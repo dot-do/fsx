@@ -591,7 +591,7 @@ interface MockFile {
 interface MockStorage {
   getFile(path: string): MockFile | undefined
   addDirectory(path: string): void
-  addFile(path: string, content: Uint8Array): void
+  addFile(path: string, content: Uint8Array, metadata?: { mode?: number; birthtime?: number }): void
   isDirectory(path: string): boolean
   parentExists(path: string): boolean
 }
@@ -615,14 +615,14 @@ function createMockStorage(): MockStorage {
       directories.add(path)
     },
 
-    addFile(path: string, content: Uint8Array): void {
+    addFile(path: string, content: Uint8Array, metadata?: { mode?: number; birthtime?: number }): void {
       const now = Date.now()
       files.set(path, {
         content,
         metadata: {
-          mode: 0o644,
+          mode: metadata?.mode ?? 0o644,
           mtime: now,
-          birthtime: now,
+          birthtime: metadata?.birthtime ?? now,
           ctime: now,
         },
       })

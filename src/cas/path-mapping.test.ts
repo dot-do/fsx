@@ -311,7 +311,7 @@ describe('edge cases', () => {
   it('should handle hash with alternating characters', () => {
     const hash = 'abababababababababababababababababababab'
     const path = hashToPath(hash)
-    expect(path).toBe('objects/ab/abababababababababababababababababab')
+    expect(path).toBe('objects/ab/ababababababababababababababababababab')
   })
 
   it('should handle all-zeros SHA-1 hash', () => {
@@ -335,6 +335,6 @@ describe('edge cases', () => {
   it('should handle all-fs SHA-256 hash', () => {
     const hash = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
     const path = hashToPath(hash)
-    expect(path).toBe('objects/ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')
+    expect(path).toBe('objects/ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')
   })
 })

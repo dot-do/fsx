@@ -11,7 +11,6 @@
  * - Destination parent directory must exist (ENOENT)
  */
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { ENOENT, EEXIST, EPERM } from '../core/errors'
 
 /**
@@ -34,13 +33,49 @@ export interface LinkFS {
  * @throws {EPERM} If existingPath is a directory
  */
 export async function link(
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   fs: LinkFS,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   existingPath: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   newPath: string
 ): Promise<void> {
-  // TODO: Implement in GREEN phase
-  throw new Error('Not implemented')
+  const syscall = 'link'
+
+  // Check for special paths that cannot be hard linked (. and ..)
+  const existingBasename = existingPath.split('/').pop() || ''
+  if (existingBasename === '.' || existingBasename === '..' || existingPath === '/') {
+    throw new EPERM(syscall, existingPath)
+  }
+
+  // Check if source exists
+  if (!fs.exists(existingPath)) {
+    throw new ENOENT(syscall, existingPath)
+  }
+
+  // Get the source entry
+  const sourceEntry = fs.files.get(existingPath)
+  if (!sourceEntry) {
+    throw new ENOENT(syscall, existingPath)
+  }
+
+  // Check if source is a directory (cannot hard link directories)
+  if (sourceEntry.isDirectory) {
+    throw new EPERM(syscall, existingPath)
+  }
+
+  // Check if destination already exists
+  if (fs.exists(newPath)) {
+    throw new EEXIST(syscall, newPath)
+  }
+
+  // Check if destination parent directory exists
+  const destParent = newPath.substring(0, newPath.lastIndexOf('/')) || '/'
+  if (destParent !== '/' && !fs.exists(destParent)) {
+    throw new ENOENT(syscall, newPath)
+  }
+
+  // Create the hard link - add a new directory entry pointing to the same inode
+  // Both entries share the same underlying data object
+  fs.files.set(newPath, sourceEntry)
+
+  // Increment nlink count (since both entries share the same object, this updates everywhere)
+  sourceEntry.nlink++
 }

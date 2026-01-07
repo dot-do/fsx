@@ -1,36 +1,51 @@
 /**
- * Tests for unlink (file deletion) operation [RED phase - should fail]
+ * Tests for unlink (file deletion) operation [GREEN phase]
  *
  * unlink removes a file from the filesystem. It does NOT remove directories
  * (use rmdir for that). For symlinks, it removes the symlink itself, not the target.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
-import { unlink } from './unlink'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { unlink, setContext, getContext, type FileEntry, type UnlinkContext } from './unlink'
 import { ENOENT, EISDIR } from '../core/errors'
+import { normalize, dirname, basename } from '../core/path'
 
 // Mock filesystem state for testing
-// In actual implementation, this would be a FileSystem instance
 interface MockFS {
-  files: Map<string, { type: 'file' | 'directory' | 'symlink'; content?: Uint8Array; target?: string }>
+  files: Map<string, FileEntry>
+  blobs: Map<string, Uint8Array>
 }
 
-describe('unlink', () => {
-  let fs: MockFS
+// Global mock filesystem reference for this test file
+let fs: MockFS
 
+describe('unlink', () => {
   beforeEach(() => {
     // Set up a mock filesystem with some initial state
     fs = {
-      files: new Map([
-        ['/test.txt', { type: 'file', content: new TextEncoder().encode('test content') }],
-        ['/nested/dir/file.txt', { type: 'file', content: new TextEncoder().encode('nested file') }],
+      files: new Map<string, FileEntry>([
+        ['/', { type: 'directory' }],
+        ['/test.txt', { type: 'file', content: new TextEncoder().encode('test content'), blobId: 'blob-1' }],
         ['/nested', { type: 'directory' }],
         ['/nested/dir', { type: 'directory' }],
+        ['/nested/dir/file.txt', { type: 'file', content: new TextEncoder().encode('nested file'), blobId: 'blob-2' }],
         ['/empty-dir', { type: 'directory' }],
         ['/link-to-test', { type: 'symlink', target: '/test.txt' }],
         ['/broken-link', { type: 'symlink', target: '/nonexistent.txt' }],
       ]),
+      blobs: new Map<string, Uint8Array>([
+        ['blob-1', new TextEncoder().encode('test content')],
+        ['blob-2', new TextEncoder().encode('nested file')],
+      ]),
     }
+
+    // Set the context for the unlink function
+    setContext(fs as UnlinkContext)
+  })
+
+  afterEach(() => {
+    // Clean up context
+    setContext(null)
   })
 
   describe('happy path: delete existing file', () => {
@@ -201,16 +216,16 @@ describe('unlink', () => {
 
       // The target is still there
       const targetContent = await readFile('/test.txt')
-      expect(targetContent.toString()).toBe('test content')
+      expect(new TextDecoder().decode(targetContent)).toBe('test content')
     })
 
     it('should preserve target content after unlinking symlink', async () => {
-      const contentBefore = await readFile('/test.txt')
+      const contentBefore = new TextDecoder().decode(await readFile('/test.txt'))
 
       await unlink('/link-to-test')
 
-      const contentAfter = await readFile('/test.txt')
-      expect(contentAfter).toEqual(contentBefore)
+      const contentAfter = new TextDecoder().decode(await readFile('/test.txt'))
+      expect(contentAfter).toBe(contentBefore)
     })
   })
 
@@ -301,37 +316,112 @@ describe('unlink', () => {
   })
 })
 
-// Helper functions that would be implemented in the actual filesystem
-// These are placeholders that will fail until the real implementation exists
+// Helper functions implemented against the mock filesystem
 
 async function fileExists(path: string): Promise<boolean> {
-  throw new Error('Not implemented')
+  const normalizedPath = normalize(path)
+  const entry = fs.files.get(normalizedPath)
+  return entry !== undefined && entry.type !== 'directory'
 }
 
 async function dirExists(path: string): Promise<boolean> {
-  throw new Error('Not implemented')
+  const normalizedPath = normalize(path)
+  const entry = fs.files.get(normalizedPath)
+  return entry !== undefined && entry.type === 'directory'
 }
 
 async function symlinkExists(path: string): Promise<boolean> {
-  throw new Error('Not implemented')
+  const normalizedPath = normalize(path)
+  const entry = fs.files.get(normalizedPath)
+  return entry !== undefined && entry.type === 'symlink'
 }
 
 async function stat(path: string): Promise<any> {
-  throw new Error('Not implemented')
+  const normalizedPath = normalize(path)
+  const entry = fs.files.get(normalizedPath)
+  if (!entry) {
+    throw new ENOENT('stat', normalizedPath)
+  }
+  return {
+    isFile: () => entry.type === 'file',
+    isDirectory: () => entry.type === 'directory',
+    isSymbolicLink: () => entry.type === 'symlink',
+    size: entry.content?.length ?? 0,
+  }
 }
 
 async function readFile(path: string): Promise<Uint8Array> {
-  throw new Error('Not implemented')
+  const normalizedPath = normalize(path)
+  const entry = fs.files.get(normalizedPath)
+  if (!entry) {
+    throw new ENOENT('readFile', normalizedPath)
+  }
+  if (entry.type === 'directory') {
+    throw new EISDIR('readFile', normalizedPath)
+  }
+  // For symlinks, follow to target
+  if (entry.type === 'symlink' && entry.target) {
+    return readFile(entry.target)
+  }
+  return entry.content ?? new Uint8Array(0)
 }
 
 async function readdir(path: string): Promise<string[]> {
-  throw new Error('Not implemented')
+  const normalizedPath = normalize(path)
+  const entry = fs.files.get(normalizedPath)
+  if (!entry) {
+    throw new ENOENT('readdir', normalizedPath)
+  }
+  if (entry.type !== 'directory') {
+    throw new Error(`ENOTDIR: not a directory, readdir '${normalizedPath}'`)
+  }
+
+  // Find all children of this directory
+  const children: string[] = []
+  const prefix = normalizedPath === '/' ? '/' : normalizedPath + '/'
+
+  for (const [filePath] of fs.files) {
+    if (filePath === normalizedPath) continue
+    if (filePath.startsWith(prefix)) {
+      // Get immediate child name
+      const remainder = filePath.slice(prefix.length)
+      const childName = remainder.split('/')[0]
+      if (childName && !children.includes(childName)) {
+        children.push(childName)
+      }
+    }
+  }
+
+  return children
 }
 
 async function createFile(path: string, content: string): Promise<void> {
-  throw new Error('Not implemented')
+  const normalizedPath = normalize(path)
+  const blobId = `blob-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const encoded = new TextEncoder().encode(content)
+
+  // Ensure parent directories exist
+  const parentPath = dirname(normalizedPath)
+  if (parentPath !== '/' && !fs.files.has(parentPath)) {
+    // Create parent directories recursively
+    const parts = parentPath.split('/').filter((s) => s !== '')
+    let current = ''
+    for (const part of parts) {
+      current = current + '/' + part
+      if (!fs.files.has(current)) {
+        fs.files.set(current, { type: 'directory' })
+      }
+    }
+  }
+
+  fs.files.set(normalizedPath, {
+    type: 'file',
+    content: encoded,
+    blobId,
+  })
+  fs.blobs.set(blobId, encoded)
 }
 
 async function getBlobCount(): Promise<number> {
-  throw new Error('Not implemented')
+  return fs.blobs.size
 }
