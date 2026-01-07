@@ -108,11 +108,11 @@ describe('Git Object Format', () => {
         0x62, 0x6c, 0x6f, 0x62, // 'blob'
         0x20, // space
         0x35, // '5'
-        0x00, // null byte (offset 7)
-        0x68, 0x65, 0x6c, 0x6c, 0x6f, // 'hello' (starts at offset 8)
+        0x00, // null byte (index 6)
+        0x68, 0x65, 0x6c, 0x6c, 0x6f, // 'hello' (starts at index 7)
       ])
       const result = parseHeader(data)
-      expect(result.contentOffset).toBe(8)
+      expect(result.contentOffset).toBe(7)
     })
 
     it('should parse tree type correctly', () => {
