@@ -159,18 +159,18 @@ describe('readlink', () => {
   describe('path edge cases', () => {
     it('should handle path with trailing slash for symlink', async () => {
       // When querying symlink with trailing slash, should still read target
-      // symlink: /home/link -> /target
+      // symlink: /trailing-test/link -> /target
 
-      const target = await readlink('/home/link/')
+      const target = await readlink('/trailing-test/link/')
 
       expect(target).toBe('/target')
     })
 
     it('should normalize path before resolving', async () => {
-      // Path like /home/./user/../user/link should work
-      // symlink: /home/user/link -> target.txt
+      // Path like /normalize/./test/../test/link should work
+      // symlink: /normalize/test/link -> target.txt
 
-      const target = await readlink('/home/./user/../user/link')
+      const target = await readlink('/normalize/./test/../test/link')
 
       expect(target).toBe('target.txt')
     })
