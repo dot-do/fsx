@@ -18,7 +18,7 @@ describe('SHA-1 Hash Computation', () => {
     const data = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
     const hash = await sha1(data)
     // Expected SHA-1 hash for bytes [0-9]
-    expect(hash).toBe('3cdf2936da2fc556bfa533ab1eb59ce710ac80e5')
+    expect(hash).toBe('494179714a6cd627239dfededf2de9ef994caf03')
   })
 
   it('should produce different hashes for different inputs', async () => {
@@ -61,7 +61,7 @@ describe('SHA-256 Hash Computation', () => {
     const data = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
     const hash = await sha256(data)
     // Expected SHA-256 hash for bytes [0-9]
-    expect(hash).toBe('c3928335280d057a0c854c7e2ddcd4c5fe5c8e8e8c2b6e0d1d4b5c2f7c8e5d9a')
+    expect(hash).toBe('1f825aa2f0020ef7cf91dfa30da4668d791c5d4824fc8e41354b89ec05795ab3')
   })
 
   it('should produce different hashes for different inputs', async () => {
