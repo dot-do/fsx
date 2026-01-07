@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { readFile } from './readFile'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { readFile, setStorage, type ReadFileStorage } from './readFile'
 import { ENOENT, EISDIR } from '../core/errors'
 
 /**
@@ -40,6 +40,17 @@ describe('readFile', () => {
       content: new Uint8Array(0),
       isDirectory: true,
     })
+
+    // Create storage adapter from Map
+    const storage: ReadFileStorage = {
+      get: (path: string) => mockFs.get(path),
+      has: (path: string) => mockFs.has(path),
+    }
+    setStorage(storage)
+  })
+
+  afterEach(() => {
+    setStorage(null)
   })
 
   describe('happy path - string output', () => {
