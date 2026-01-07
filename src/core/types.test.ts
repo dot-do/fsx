@@ -1,18 +1,17 @@
 /**
- * Tests for core filesystem types (RED phase - should fail)
+ * Tests for core filesystem types (GREEN phase - should pass)
  * These tests drive the implementation of Stats, Dirent, and FileHandle classes
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
-import type { Stats, Dirent, FileHandle, FileEntry, BlobRef } from './types'
+import { Stats, Dirent, FileHandle } from './types'
+import type { FileEntry, BlobRef } from './types'
 
 describe('Stats', () => {
   let stats: Stats
 
   beforeEach(() => {
-    // This will fail - Stats is currently just an interface, not a class
-    const StatsClass = (Stats as any).constructor || Stats
-    stats = new (StatsClass as any)({
+    stats = new Stats({
       dev: 2114,
       ino: 48064969,
       mode: 33188, // 0o100644 - regular file with rw-r--r--
@@ -126,8 +125,7 @@ describe('Stats', () => {
 
   describe('type check methods for directory', () => {
     beforeEach(() => {
-      const StatsClass = (Stats as any).constructor || Stats
-      stats = new (StatsClass as any)({
+      stats = new Stats({
         dev: 2114,
         ino: 48064969,
         mode: 16877, // 0o040755 - directory with rwxr-xr-x
@@ -176,8 +174,7 @@ describe('Stats', () => {
 
   describe('type check methods for symbolic link', () => {
     beforeEach(() => {
-      const StatsClass = (Stats as any).constructor || Stats
-      stats = new (StatsClass as any)({
+      stats = new Stats({
         dev: 2114,
         ino: 48064969,
         mode: 41471, // 0o120777 - symbolic link
@@ -229,9 +226,7 @@ describe('Dirent', () => {
   let dirent: Dirent
 
   beforeEach(() => {
-    // This will fail - Dirent is currently just an interface, not a class
-    const DirentClass = (Dirent as any).constructor || Dirent
-    dirent = new (DirentClass as any)('myfile.txt', '/home/user', 'file')
+    dirent = new Dirent('myfile.txt', '/home/user', 'file')
   })
 
   describe('properties', () => {
@@ -280,8 +275,7 @@ describe('Dirent', () => {
 
   describe('type check methods for directory', () => {
     beforeEach(() => {
-      const DirentClass = (Dirent as any).constructor || Dirent
-      dirent = new (DirentClass as any)('mydir', '/home/user', 'directory')
+      dirent = new Dirent('mydir', '/home/user', 'directory')
     })
 
     it('should identify as directory', () => {
@@ -315,8 +309,7 @@ describe('Dirent', () => {
 
   describe('type check methods for symlink', () => {
     beforeEach(() => {
-      const DirentClass = (Dirent as any).constructor || Dirent
-      dirent = new (DirentClass as any)('mylink', '/home/user', 'symlink')
+      dirent = new Dirent('mylink', '/home/user', 'symlink')
     })
 
     it('should identify as symbolic link', () => {
@@ -358,8 +351,8 @@ describe('FileHandle', () => {
     mockData = new TextEncoder().encode('Hello, World!')
 
     // Mock Stats for testing
-    const StatsClass = (Stats as any).constructor || Stats
-    mockStats = {
+    const now = Date.now()
+    mockStats = new Stats({
       dev: 2114,
       ino: 48064969,
       mode: 33188,
@@ -370,22 +363,13 @@ describe('FileHandle', () => {
       size: mockData.length,
       blksize: 4096,
       blocks: 1,
-      atime: new Date(),
-      mtime: new Date(),
-      ctime: new Date(),
-      birthtime: new Date(),
-      isFile: () => true,
-      isDirectory: () => false,
-      isSymbolicLink: () => false,
-      isBlockDevice: () => false,
-      isCharacterDevice: () => false,
-      isFIFO: () => false,
-      isSocket: () => false,
-    }
+      atimeMs: now,
+      mtimeMs: now,
+      ctimeMs: now,
+      birthtimeMs: now,
+    })
 
-    // This will fail - FileHandle is currently just an interface
-    const FileHandleClass = (FileHandle as any).constructor || FileHandle
-    handle = new (FileHandleClass as any)(1, mockData, mockStats)
+    handle = new FileHandle(1, mockData, mockStats)
   })
 
   describe('properties', () => {
