@@ -11,13 +11,171 @@
  * - Returns ENOENT if symlink target doesn't exist (broken symlink)
  */
 
-import { describe, it, expect } from 'vitest'
-import { stat } from './stat'
-import { Stats } from '../core/types'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { stat, setStorage, type StatStorage } from './stat'
+import { Stats, type FileEntry, type FileType } from '../core/types'
 import { ENOENT } from '../core/errors'
 import { constants } from '../core/constants'
+import { normalize } from '../core/path'
+
+// Helper to create file entries with default values
+function createEntry(
+  path: string,
+  type: FileType,
+  options: Partial<FileEntry> = {}
+): FileEntry {
+  const now = Date.now()
+  const birthtime = options.birthtime ?? now - 100000 // Default birth time slightly in the past
+  return {
+    id: options.id ?? path, // Use path as ID by default
+    path,
+    name: path.split('/').pop() || '',
+    parentId: null,
+    type,
+    mode: options.mode ?? (type === 'directory' ? 0o755 : 0o644),
+    uid: options.uid ?? 1000,
+    gid: options.gid ?? 1000,
+    size: options.size ?? 0,
+    blobId: null,
+    linkTarget: options.linkTarget ?? null,
+    atime: options.atime ?? now,
+    mtime: options.mtime ?? now,
+    ctime: options.ctime ?? now,
+    birthtime: birthtime,
+    nlink: options.nlink ?? (type === 'directory' ? 2 : 1),
+  }
+}
 
 describe('stat', () => {
+  // Mock filesystem for testing
+  let mockFs: Map<string, FileEntry>
+
+  beforeEach(() => {
+    mockFs = new Map()
+
+    // Root directory
+    mockFs.set('/', createEntry('/', 'directory', { id: '1', nlink: 3 }))
+
+    // /home directory structure
+    mockFs.set('/home', createEntry('/home', 'directory', { id: '2', nlink: 3 }))
+    mockFs.set('/home/user', createEntry('/home/user', 'directory', { id: '3', nlink: 4 }))
+    mockFs.set('/home/user/file.txt', createEntry('/home/user/file.txt', 'file', {
+      id: '4',
+      size: 100,
+    }))
+    mockFs.set('/home/user/documents', createEntry('/home/user/documents', 'directory', {
+      id: '5',
+      nlink: 2,
+    }))
+
+    // /data directory structure
+    mockFs.set('/data', createEntry('/data', 'directory', { id: '10', nlink: 3 }))
+    mockFs.set('/data/file.txt', createEntry('/data/file.txt', 'file', {
+      id: '11',
+      size: 50,
+    }))
+    mockFs.set('/data/file1.txt', createEntry('/data/file1.txt', 'file', {
+      id: '12',
+      size: 30,
+    }))
+    mockFs.set('/data/file2.txt', createEntry('/data/file2.txt', 'file', {
+      id: '13',
+      size: 40,
+    }))
+    mockFs.set('/data/file3.txt', createEntry('/data/file3.txt', 'file', {
+      id: '14',
+      size: 60,
+    }))
+    mockFs.set('/data/hello.txt', createEntry('/data/hello.txt', 'file', {
+      id: '15',
+      size: 13, // "Hello, World!" = 13 bytes
+    }))
+    mockFs.set('/data/empty.txt', createEntry('/data/empty.txt', 'file', {
+      id: '16',
+      size: 0,
+    }))
+    mockFs.set('/data/subdir', createEntry('/data/subdir', 'directory', {
+      id: '17',
+      nlink: 2,
+    }))
+    mockFs.set('/data/hardlinked-file.txt', createEntry('/data/hardlinked-file.txt', 'file', {
+      id: '18',
+      size: 25,
+      nlink: 2, // Has a hard link
+    }))
+    mockFs.set('/data/file with spaces.txt', createEntry('/data/file with spaces.txt', 'file', {
+      id: '19',
+      size: 20,
+    }))
+    mockFs.set('/data/unicode-file.txt', createEntry('/data/unicode-file.txt', 'file', {
+      id: '20',
+      size: 30,
+    }))
+
+    // /links directory with symlinks
+    mockFs.set('/links', createEntry('/links', 'directory', { id: '30', nlink: 2 }))
+    mockFs.set('/links/mylink', createEntry('/links/mylink', 'symlink', {
+      id: '31',
+      linkTarget: '/data/file.txt',
+      size: 14, // Length of target path
+    }))
+    mockFs.set('/links/file-link', createEntry('/links/file-link', 'symlink', {
+      id: '32',
+      linkTarget: '/data/file.txt',
+      size: 14,
+    }))
+    mockFs.set('/links/dir-link', createEntry('/links/dir-link', 'symlink', {
+      id: '33',
+      linkTarget: '/data/subdir',
+      size: 12,
+    }))
+    mockFs.set('/links/broken-link', createEntry('/links/broken-link', 'symlink', {
+      id: '34',
+      linkTarget: '/nonexistent/target',
+      size: 19,
+    }))
+
+    // Chain of symlinks: link1 -> link2 -> /data/file.txt
+    mockFs.set('/links/link2', createEntry('/links/link2', 'symlink', {
+      id: '35',
+      linkTarget: '/data/file.txt',
+      size: 14,
+    }))
+    mockFs.set('/links/link1', createEntry('/links/link1', 'symlink', {
+      id: '36',
+      linkTarget: '/links/link2',
+      size: 12,
+    }))
+
+    // Deeply nested path
+    mockFs.set('/a', createEntry('/a', 'directory', { id: '40', nlink: 3 }))
+    mockFs.set('/a/b', createEntry('/a/b', 'directory', { id: '41', nlink: 3 }))
+    mockFs.set('/a/b/c', createEntry('/a/b/c', 'directory', { id: '42', nlink: 3 }))
+    mockFs.set('/a/b/c/d', createEntry('/a/b/c/d', 'directory', { id: '43', nlink: 3 }))
+    mockFs.set('/a/b/c/d/e', createEntry('/a/b/c/d/e', 'directory', { id: '44', nlink: 2 }))
+    mockFs.set('/a/b/c/d/e/file.txt', createEntry('/a/b/c/d/e/file.txt', 'file', {
+      id: '45',
+      size: 10,
+    }))
+
+    // Create storage adapter
+    const storage: StatStorage = {
+      get: (path: string) => {
+        const normalizedPath = normalize(path)
+        return mockFs.get(normalizedPath)
+      },
+      has: (path: string) => {
+        const normalizedPath = normalize(path)
+        return mockFs.has(normalizedPath)
+      },
+    }
+    setStorage(storage)
+  })
+
+  afterEach(() => {
+    setStorage(null)
+  })
+
   describe('basic usage', () => {
     it('should return Stats object for a regular file', async () => {
       // Given: a file exists at /home/user/file.txt
