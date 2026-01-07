@@ -6,7 +6,9 @@ import {
   EISDIR,
   ENOTDIR,
   EACCES,
+  EPERM,
   ENOTEMPTY,
+  EBADF,
   EINVAL,
   ELOOP,
   ENAMETOOLONG,
@@ -14,6 +16,7 @@ import {
   EROFS,
   EBUSY,
   EMFILE,
+  ENFILE,
   EXDEV,
 } from './errors'
 
@@ -196,29 +199,24 @@ describe('EACCES', () => {
 
 describe('EPERM', () => {
   it('should have correct error code and errno', () => {
-    // @ts-expect-error - EPERM doesn't exist yet (RED phase)
     const error = new EPERM()
     expect(error.code).toBe('EPERM')
     expect(error.errno).toBe(-1)
   })
 
   it('should be instanceof Error and FSError', () => {
-    // @ts-expect-error - EPERM doesn't exist yet (RED phase)
     const error = new EPERM()
     expect(error).toBeInstanceOf(Error)
     expect(error).toBeInstanceOf(FSError)
-    // @ts-expect-error - EPERM doesn't exist yet (RED phase)
     expect(error).toBeInstanceOf(EPERM)
   })
 
   it('should have correct name', () => {
-    // @ts-expect-error - EPERM doesn't exist yet (RED phase)
     const error = new EPERM()
     expect(error.name).toBe('EPERM')
   })
 
   it('should format message correctly with syscall and path', () => {
-    // @ts-expect-error - EPERM doesn't exist yet (RED phase)
     const error = new EPERM('chmod', '/test/file.txt')
     expect(error.message).toBe("EPERM: operation not permitted, chmod '/test/file.txt'")
     expect(error.syscall).toBe('chmod')
@@ -255,29 +253,24 @@ describe('ENOTEMPTY', () => {
 
 describe('EBADF', () => {
   it('should have correct error code and errno', () => {
-    // @ts-expect-error - EBADF doesn't exist yet (RED phase)
     const error = new EBADF()
     expect(error.code).toBe('EBADF')
     expect(error.errno).toBe(-9)
   })
 
   it('should be instanceof Error and FSError', () => {
-    // @ts-expect-error - EBADF doesn't exist yet (RED phase)
     const error = new EBADF()
     expect(error).toBeInstanceOf(Error)
     expect(error).toBeInstanceOf(FSError)
-    // @ts-expect-error - EBADF doesn't exist yet (RED phase)
     expect(error).toBeInstanceOf(EBADF)
   })
 
   it('should have correct name', () => {
-    // @ts-expect-error - EBADF doesn't exist yet (RED phase)
     const error = new EBADF()
     expect(error.name).toBe('EBADF')
   })
 
   it('should format message correctly with syscall and path', () => {
-    // @ts-expect-error - EBADF doesn't exist yet (RED phase)
     const error = new EBADF('read')
     expect(error.message).toBe('EBADF: bad file descriptor, read')
     expect(error.syscall).toBe('read')
@@ -339,29 +332,24 @@ describe('EMFILE', () => {
 
 describe('ENFILE', () => {
   it('should have correct error code and errno', () => {
-    // @ts-expect-error - ENFILE doesn't exist yet (RED phase)
     const error = new ENFILE()
     expect(error.code).toBe('ENFILE')
     expect(error.errno).toBe(-23)
   })
 
   it('should be instanceof Error and FSError', () => {
-    // @ts-expect-error - ENFILE doesn't exist yet (RED phase)
     const error = new ENFILE()
     expect(error).toBeInstanceOf(Error)
     expect(error).toBeInstanceOf(FSError)
-    // @ts-expect-error - ENFILE doesn't exist yet (RED phase)
     expect(error).toBeInstanceOf(ENFILE)
   })
 
   it('should have correct name', () => {
-    // @ts-expect-error - ENFILE doesn't exist yet (RED phase)
     const error = new ENFILE()
     expect(error.name).toBe('ENFILE')
   })
 
   it('should format message correctly with syscall', () => {
-    // @ts-expect-error - ENFILE doesn't exist yet (RED phase)
     const error = new ENFILE('open')
     expect(error.message).toBe('ENFILE: file table overflow, open')
     expect(error.syscall).toBe('open')
