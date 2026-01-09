@@ -88,26 +88,82 @@ class MockSqlStorage {
 
     // Handle INSERT into files
     if (normalizedSql.includes('insert into files') || normalizedSql.includes('insert or replace into files')) {
-      const entry: MockFileEntry = {
-        id: this.nextFileId++,
-        path: params[0] as string,
-        name: params[1] as string,
-        parent_id: params[2] as number | null,
-        type: params[3] as 'file' | 'directory' | 'symlink',
-        mode: params[4] as number,
-        uid: params[5] as number,
-        gid: params[6] as number,
-        size: params[7] as number,
-        blob_id: params[8] as string | null,
-        tier: params[9] as 'hot' | 'warm' | 'cold',
-        atime: params[10] as number,
-        mtime: params[11] as number,
-        ctime: params[12] as number,
-        birthtime: params[13] as number,
-        nlink: params[14] as number,
+      // Check if this is a symlink insert (with link_target)
+      if (normalizedSql.includes('link_target')) {
+        // INSERT INTO files (..., link_target, ...) VALUES (...)
+        // path, name, parent_id, type, mode, uid, gid, size, link_target, tier, atime, mtime, ctime, birthtime, nlink
+        const entry: MockFileEntry = {
+          id: this.nextFileId++,
+          path: params[0] as string,
+          name: params[1] as string,
+          parent_id: params[2] as number | null,
+          type: params[3] as 'file' | 'directory' | 'symlink',
+          mode: params[4] as number,
+          uid: params[5] as number,
+          gid: params[6] as number,
+          size: params[7] as number,
+          blob_id: null,
+          link_target: params[8] as string | null,
+          tier: params[9] as 'hot' | 'warm' | 'cold',
+          atime: params[10] as number,
+          mtime: params[11] as number,
+          ctime: params[12] as number,
+          birthtime: params[13] as number,
+          nlink: params[14] as number,
+        }
+        this.files.set(entry.path, entry)
+        return this.emptyResult<T>()
       }
-      this.files.set(entry.path, entry)
-      return this.emptyResult<T>()
+
+      // Check if this has blob_id (15 params: path, name, parent_id, type, mode, uid, gid, size, blob_id, tier, atime, mtime, ctime, birthtime, nlink)
+      // or not (14 params: path, name, parent_id, type, mode, uid, gid, size, tier, atime, mtime, ctime, birthtime, nlink)
+      if (normalizedSql.includes('blob_id')) {
+        // With blob_id (file type)
+        const entry: MockFileEntry = {
+          id: this.nextFileId++,
+          path: params[0] as string,
+          name: params[1] as string,
+          parent_id: params[2] as number | null,
+          type: params[3] as 'file' | 'directory' | 'symlink',
+          mode: params[4] as number,
+          uid: params[5] as number,
+          gid: params[6] as number,
+          size: params[7] as number,
+          blob_id: params[8] as string | null,
+          tier: params[9] as 'hot' | 'warm' | 'cold',
+          atime: params[10] as number,
+          mtime: params[11] as number,
+          ctime: params[12] as number,
+          birthtime: params[13] as number,
+          nlink: params[14] as number,
+          link_target: null,
+        }
+        this.files.set(entry.path, entry)
+        return this.emptyResult<T>()
+      } else {
+        // Without blob_id (directory type)
+        const entry: MockFileEntry = {
+          id: this.nextFileId++,
+          path: params[0] as string,
+          name: params[1] as string,
+          parent_id: params[2] as number | null,
+          type: params[3] as 'file' | 'directory' | 'symlink',
+          mode: params[4] as number,
+          uid: params[5] as number,
+          gid: params[6] as number,
+          size: params[7] as number,
+          blob_id: null,
+          tier: params[8] as 'hot' | 'warm' | 'cold', // Shifted by 1 - no blob_id
+          atime: params[9] as number,
+          mtime: params[10] as number,
+          ctime: params[11] as number,
+          birthtime: params[12] as number,
+          nlink: params[13] as number,
+          link_target: null,
+        }
+        this.files.set(entry.path, entry)
+        return this.emptyResult<T>()
+      }
     }
 
     // Handle INSERT into blobs
@@ -148,6 +204,22 @@ class MockSqlStorage {
       }
     }
 
+    // Handle SELECT from files WHERE path LIKE ? (for directory rename)
+    if (normalizedSql.includes('select') && normalizedSql.includes('from files') && normalizedSql.includes('where path like')) {
+      const pattern = params[0] as string
+      const prefix = pattern.replace(/%$/, '')
+      const matches: MockFileEntry[] = []
+      for (const file of this.files.values()) {
+        if (file.path.startsWith(prefix)) {
+          matches.push(file)
+        }
+      }
+      return {
+        one: () => (matches[0] as T) || null,
+        toArray: () => matches as T[],
+      }
+    }
+
     // Handle SELECT from blobs WHERE id = ?
     if (normalizedSql.includes('select') && normalizedSql.includes('from blobs') && normalizedSql.includes('where id')) {
       const id = params[0] as string
@@ -161,17 +233,49 @@ class MockSqlStorage {
     // Handle UPDATE files
     if (normalizedSql.includes('update files')) {
       const id = params[params.length - 1] as number
-      for (const file of this.files.values()) {
+      for (const [path, file] of this.files.entries()) {
         if (file.id === id) {
           // Parse SET clause and update fields based on the SQL pattern
-          if (normalizedSql.includes('set blob_id')) {
+          if (normalizedSql.includes('set path') && normalizedSql.includes('name') && normalizedSql.includes('parent_id')) {
+            // UPDATE files SET path = ?, name = ?, parent_id = ?, ctime = ? WHERE id = ?
+            const newPath = params[0] as string
+            const newName = params[1] as string
+            const newParentId = params[2] as number | null
+            const newCtime = params[3] as number
+
+            // Remove from old path and add to new path
+            this.files.delete(path)
+            file.path = newPath
+            file.name = newName
+            file.parent_id = newParentId
+            file.ctime = newCtime
+            this.files.set(newPath, file)
+          } else if (normalizedSql.includes('set path') && !normalizedSql.includes('name')) {
+            // UPDATE files SET path = ? WHERE id = ?
+            const newPath = params[0] as string
+
+            // Remove from old path and add to new path
+            this.files.delete(path)
+            file.path = newPath
+            this.files.set(newPath, file)
+          } else if (normalizedSql.includes('set blob_id') && normalizedSql.includes('tier') && params.length === 3) {
+            // UPDATE files SET blob_id = ?, tier = ? WHERE id = ? (promote/demote)
+            file.blob_id = params[0] as string
+            file.tier = params[1] as 'hot' | 'warm' | 'cold'
+          } else if (normalizedSql.includes('set blob_id') && normalizedSql.includes('size') && params.length === 6) {
             // UPDATE files SET blob_id = ?, size = ?, tier = ?, mtime = ?, ctime = ? WHERE id = ?
             file.blob_id = params[0] as string
             file.size = params[1] as number
             file.tier = params[2] as 'hot' | 'warm' | 'cold'
             file.mtime = params[3] as number
             file.ctime = params[4] as number
-          } else if (normalizedSql.includes('set atime')) {
+          } else if (normalizedSql.includes('set atime') && normalizedSql.includes('mtime') && normalizedSql.includes('ctime')) {
+            // UPDATE files SET atime = ?, mtime = ?, ctime = ? WHERE id = ?
+            file.atime = params[0] as number
+            file.mtime = params[1] as number
+            file.ctime = params[2] as number
+          } else if (normalizedSql.includes('set atime') && !normalizedSql.includes('mtime')) {
+            // UPDATE files SET atime = ? WHERE id = ?
             file.atime = params[0] as number
           } else if (normalizedSql.includes('set mode')) {
             file.mode = params[0] as number
@@ -180,6 +284,9 @@ class MockSqlStorage {
             file.uid = params[0] as number
             file.gid = params[1] as number
             file.ctime = params[2] as number
+          } else if (normalizedSql.includes('set nlink')) {
+            // UPDATE files SET nlink = nlink + 1 WHERE id = ?
+            file.nlink = (file.nlink || 1) + 1
           }
           break
         }
@@ -882,6 +989,850 @@ describe('FsModule', () => {
       await fsModule.exists('/') // Initialize first
 
       await expect(fsModule.dispose()).resolves.not.toThrow()
+    })
+  })
+
+  // ==========================================================================
+  // Symbolic Link Operations Tests
+  // ==========================================================================
+
+  describe('symbolic link operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    describe('symlink', () => {
+      it('should create a symbolic link', async () => {
+        await fsModule.write('/target.txt', 'Target content')
+        await fsModule.symlink('/target.txt', '/link.txt')
+
+        const link = mockSql.getFile('/link.txt')
+        expect(link).toBeDefined()
+        expect(link?.type).toBe('symlink')
+        expect(link?.link_target).toBe('/target.txt')
+      })
+
+      it('should allow symlink to non-existent target', async () => {
+        // Symlinks can point to non-existent files (dangling symlinks)
+        await fsModule.symlink('/nonexistent.txt', '/dangling-link.txt')
+
+        const link = mockSql.getFile('/dangling-link.txt')
+        expect(link).toBeDefined()
+        expect(link?.type).toBe('symlink')
+        expect(link?.link_target).toBe('/nonexistent.txt')
+      })
+
+      it('should throw EEXIST when link path already exists', async () => {
+        await fsModule.write('/existing.txt', 'content')
+
+        await expect(fsModule.symlink('/target.txt', '/existing.txt')).rejects.toThrow()
+      })
+
+      it('should throw ENOENT when parent directory does not exist', async () => {
+        await expect(fsModule.symlink('/target.txt', '/nonexistent/link.txt')).rejects.toThrow()
+      })
+
+      it('should set symlink mode to 0o777', async () => {
+        await fsModule.write('/target.txt', 'content')
+        await fsModule.symlink('/target.txt', '/link.txt')
+
+        const link = mockSql.getFile('/link.txt')
+        expect(link?.mode).toBe(0o777)
+      })
+    })
+
+    describe('readlink', () => {
+      it('should return the target path of a symlink', async () => {
+        await fsModule.write('/target.txt', 'content')
+        await fsModule.symlink('/target.txt', '/link.txt')
+
+        const target = await fsModule.readlink('/link.txt')
+        expect(target).toBe('/target.txt')
+      })
+
+      it('should throw ENOENT for non-existent path', async () => {
+        await expect(fsModule.readlink('/nonexistent.txt')).rejects.toThrow()
+      })
+
+      it('should throw EINVAL when path is not a symlink', async () => {
+        await fsModule.write('/regular.txt', 'content')
+
+        await expect(fsModule.readlink('/regular.txt')).rejects.toThrow()
+      })
+    })
+
+    describe('realpath', () => {
+      it('should return the path for regular files', async () => {
+        await fsModule.write('/regular.txt', 'content')
+
+        const real = await fsModule.realpath('/regular.txt')
+        expect(real).toBe('/regular.txt')
+      })
+
+      it('should throw ENOENT for non-existent path', async () => {
+        await expect(fsModule.realpath('/nonexistent.txt')).rejects.toThrow()
+      })
+    })
+
+    describe('link (hard link)', () => {
+      it('should create a hard link', async () => {
+        await fsModule.write('/original.txt', 'content')
+        await fsModule.link('/original.txt', '/hardlink.txt')
+
+        const hardlink = mockSql.getFile('/hardlink.txt')
+        expect(hardlink).toBeDefined()
+        expect(hardlink?.type).toBe('file')
+        // Hard links share the same blob_id
+        const original = mockSql.getFile('/original.txt')
+        expect(hardlink?.blob_id).toBe(original?.blob_id)
+      })
+
+      it('should have matching nlink count on both files', async () => {
+        await fsModule.write('/original.txt', 'content')
+
+        await fsModule.link('/original.txt', '/hardlink.txt')
+
+        const original = mockSql.getFile('/original.txt')
+        const hardlink = mockSql.getFile('/hardlink.txt')
+
+        // After creating a hard link, both files should have nlink >= 2
+        expect(original?.nlink).toBeGreaterThanOrEqual(2)
+        // Hardlink nlink should be >= 2 as well
+        expect(hardlink?.nlink).toBeGreaterThanOrEqual(2)
+      })
+
+      it('should throw ENOENT when source does not exist', async () => {
+        await expect(fsModule.link('/nonexistent.txt', '/link.txt')).rejects.toThrow()
+      })
+
+      it('should throw EEXIST when destination already exists', async () => {
+        await fsModule.write('/original.txt', 'content')
+        await fsModule.write('/existing.txt', 'other')
+
+        await expect(fsModule.link('/original.txt', '/existing.txt')).rejects.toThrow()
+      })
+    })
+  })
+
+  // ==========================================================================
+  // File Rename and Copy Operations Tests
+  // ==========================================================================
+
+  describe('rename and copy operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    describe('rename', () => {
+      it('should rename a file', async () => {
+        await fsModule.write('/old.txt', 'content')
+        await fsModule.rename('/old.txt', '/new.txt')
+
+        expect(mockSql.getFile('/old.txt')).toBeUndefined()
+        expect(mockSql.getFile('/new.txt')).toBeDefined()
+      })
+
+      it('should preserve file content after rename', async () => {
+        await fsModule.write('/old.txt', 'Important content')
+        await fsModule.rename('/old.txt', '/new.txt')
+
+        const content = await fsModule.read('/new.txt', { encoding: 'utf-8' })
+        expect(content).toBe('Important content')
+      })
+
+      it('should throw ENOENT when source does not exist', async () => {
+        await expect(fsModule.rename('/nonexistent.txt', '/new.txt')).rejects.toThrow()
+      })
+
+      it('should throw ENOENT when destination parent does not exist', async () => {
+        await fsModule.write('/file.txt', 'content')
+
+        await expect(fsModule.rename('/file.txt', '/nonexistent/file.txt')).rejects.toThrow()
+      })
+
+      it('should throw EEXIST when destination exists without overwrite option', async () => {
+        await fsModule.write('/source.txt', 'source')
+        await fsModule.write('/dest.txt', 'dest')
+
+        await expect(fsModule.rename('/source.txt', '/dest.txt')).rejects.toThrow()
+      })
+
+      it('should overwrite destination with overwrite option', async () => {
+        await fsModule.write('/source.txt', 'source content')
+        await fsModule.write('/dest.txt', 'dest content')
+
+        await fsModule.rename('/source.txt', '/dest.txt', { overwrite: true })
+
+        expect(mockSql.getFile('/source.txt')).toBeUndefined()
+        const content = await fsModule.read('/dest.txt', { encoding: 'utf-8' })
+        expect(content).toBe('source content')
+      })
+
+      it('should rename directory', async () => {
+        await fsModule.mkdir('/olddir')
+        await fsModule.rename('/olddir', '/newdir')
+
+        expect(mockSql.getFile('/olddir')).toBeUndefined()
+        expect(mockSql.getFile('/newdir')).toBeDefined()
+        expect(mockSql.getFile('/newdir')?.type).toBe('directory')
+      })
+    })
+
+    describe('copyFile', () => {
+      it('should copy a file', async () => {
+        await fsModule.write('/original.txt', 'original content')
+        await fsModule.copyFile('/original.txt', '/copy.txt')
+
+        expect(mockSql.getFile('/original.txt')).toBeDefined()
+        expect(mockSql.getFile('/copy.txt')).toBeDefined()
+      })
+
+      it('should preserve content in copy', async () => {
+        await fsModule.write('/original.txt', 'content to copy')
+        await fsModule.copyFile('/original.txt', '/copy.txt')
+
+        const originalContent = await fsModule.read('/original.txt', { encoding: 'utf-8' })
+        const copyContent = await fsModule.read('/copy.txt', { encoding: 'utf-8' })
+        expect(copyContent).toBe(originalContent)
+      })
+
+      it('should create independent copy', async () => {
+        await fsModule.write('/original.txt', 'original')
+        await fsModule.copyFile('/original.txt', '/copy.txt')
+
+        // Modify original
+        await fsModule.write('/original.txt', 'modified')
+
+        // Copy should be unchanged
+        const copyContent = await fsModule.read('/copy.txt', { encoding: 'utf-8' })
+        expect(copyContent).toBe('original')
+      })
+
+      it('should throw ENOENT when source does not exist', async () => {
+        await expect(fsModule.copyFile('/nonexistent.txt', '/copy.txt')).rejects.toThrow()
+      })
+
+      it('should throw EEXIST when destination exists without overwrite', async () => {
+        await fsModule.write('/source.txt', 'source')
+        await fsModule.write('/dest.txt', 'dest')
+
+        await expect(fsModule.copyFile('/source.txt', '/dest.txt')).rejects.toThrow()
+      })
+
+      it('should overwrite destination with overwrite option', async () => {
+        await fsModule.write('/source.txt', 'source content')
+        await fsModule.write('/dest.txt', 'old dest content')
+
+        await fsModule.copyFile('/source.txt', '/dest.txt', { overwrite: true })
+
+        const content = await fsModule.read('/dest.txt', { encoding: 'utf-8' })
+        expect(content).toBe('source content')
+      })
+    })
+  })
+
+  // ==========================================================================
+  // Truncate Operations Tests
+  // ==========================================================================
+
+  describe('truncate operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should truncate file to specified length', async () => {
+      await fsModule.write('/file.txt', 'Hello, World!')
+      await fsModule.truncate('/file.txt', 5)
+
+      const content = await fsModule.read('/file.txt', { encoding: 'utf-8' })
+      expect(content).toBe('Hello')
+    })
+
+    it('should truncate file to zero length', async () => {
+      await fsModule.write('/file.txt', 'content')
+      await fsModule.truncate('/file.txt', 0)
+
+      const content = await fsModule.read('/file.txt', { encoding: 'utf-8' })
+      expect(content).toBe('')
+    })
+
+    it('should update file size after truncate', async () => {
+      await fsModule.write('/file.txt', 'Hello, World!')
+      await fsModule.truncate('/file.txt', 5)
+
+      const stats = await fsModule.stat('/file.txt')
+      expect(stats.size).toBe(5)
+    })
+
+    it('should throw ENOENT for non-existent file', async () => {
+      await expect(fsModule.truncate('/nonexistent.txt', 10)).rejects.toThrow()
+    })
+
+    it('should throw EISDIR for directories', async () => {
+      await fsModule.mkdir('/testdir')
+
+      await expect(fsModule.truncate('/testdir', 10)).rejects.toThrow()
+    })
+  })
+
+  // ==========================================================================
+  // File utimes Operations Tests
+  // ==========================================================================
+
+  describe('utimes operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should update access and modification times', async () => {
+      await fsModule.write('/file.txt', 'content')
+      const newAtime = new Date('2024-01-15T10:00:00Z')
+      const newMtime = new Date('2024-01-15T11:00:00Z')
+
+      await fsModule.utimes('/file.txt', newAtime, newMtime)
+
+      const stats = await fsModule.stat('/file.txt')
+      expect(stats.atimeMs).toBe(newAtime.getTime())
+      expect(stats.mtimeMs).toBe(newMtime.getTime())
+    })
+
+    it('should accept numeric timestamps', async () => {
+      await fsModule.write('/file.txt', 'content')
+      const newAtime = Date.now() - 10000
+      const newMtime = Date.now() - 5000
+
+      await fsModule.utimes('/file.txt', newAtime, newMtime)
+
+      const stats = await fsModule.stat('/file.txt')
+      expect(stats.atimeMs).toBe(newAtime)
+      expect(stats.mtimeMs).toBe(newMtime)
+    })
+
+    it('should throw ENOENT for non-existent file', async () => {
+      await expect(fsModule.utimes('/nonexistent.txt', new Date(), new Date())).rejects.toThrow()
+    })
+  })
+
+  // ==========================================================================
+  // File chown Operations Tests
+  // ==========================================================================
+
+  describe('chown operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should change file ownership', async () => {
+      await fsModule.write('/file.txt', 'content')
+      await fsModule.chown('/file.txt', 1000, 1000)
+
+      const stats = await fsModule.stat('/file.txt')
+      expect(stats.uid).toBe(1000)
+      expect(stats.gid).toBe(1000)
+    })
+
+    it('should throw ENOENT for non-existent file', async () => {
+      await expect(fsModule.chown('/nonexistent.txt', 1000, 1000)).rejects.toThrow()
+    })
+  })
+
+  // ==========================================================================
+  // rm Operations Tests
+  // ==========================================================================
+
+  describe('rm operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should remove a file', async () => {
+      await fsModule.write('/file.txt', 'content')
+      await fsModule.rm('/file.txt')
+
+      expect(mockSql.getFile('/file.txt')).toBeUndefined()
+    })
+
+    it('should remove an empty directory', async () => {
+      await fsModule.mkdir('/emptydir')
+      await fsModule.rm('/emptydir')
+
+      expect(mockSql.getFile('/emptydir')).toBeUndefined()
+    })
+
+    it('should throw ENOENT for non-existent path', async () => {
+      await expect(fsModule.rm('/nonexistent')).rejects.toThrow()
+    })
+
+    it('should not throw with force option for non-existent path', async () => {
+      await expect(fsModule.rm('/nonexistent', { force: true })).resolves.not.toThrow()
+    })
+
+    it('should remove directory recursively with recursive option', async () => {
+      await fsModule.mkdir('/parent')
+      await fsModule.write('/parent/file.txt', 'content')
+      await fsModule.mkdir('/parent/child')
+
+      await fsModule.rm('/parent', { recursive: true })
+
+      expect(mockSql.getFile('/parent')).toBeUndefined()
+      expect(mockSql.getFile('/parent/file.txt')).toBeUndefined()
+      expect(mockSql.getFile('/parent/child')).toBeUndefined()
+    })
+  })
+
+  // ==========================================================================
+  // Streaming Operations Tests
+  // ==========================================================================
+
+  describe('streaming operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    describe('createReadStream', () => {
+      it('should create a readable stream', async () => {
+        await fsModule.write('/file.txt', 'Hello, World!')
+        const stream = await fsModule.createReadStream('/file.txt')
+
+        expect(stream).toBeInstanceOf(ReadableStream)
+      })
+
+      it('should read file content through stream', async () => {
+        await fsModule.write('/file.txt', 'Stream content')
+        const stream = await fsModule.createReadStream('/file.txt')
+
+        const reader = stream.getReader()
+        const chunks: Uint8Array[] = []
+
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          if (result.done) {
+            done = true
+          } else {
+            chunks.push(result.value)
+          }
+        }
+
+        const combined = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0))
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+
+        const content = new TextDecoder().decode(combined)
+        expect(content).toBe('Stream content')
+      })
+    })
+
+    describe('createWriteStream', () => {
+      it('should create a writable stream', async () => {
+        const stream = await fsModule.createWriteStream('/output.txt')
+
+        expect(stream).toBeInstanceOf(WritableStream)
+      })
+
+      it('should write file content through stream', async () => {
+        const stream = await fsModule.createWriteStream('/output.txt')
+        const writer = stream.getWriter()
+
+        await writer.write(new TextEncoder().encode('Streamed '))
+        await writer.write(new TextEncoder().encode('content'))
+        await writer.close()
+
+        const content = await fsModule.read('/output.txt', { encoding: 'utf-8' })
+        expect(content).toBe('Streamed content')
+      })
+    })
+  })
+
+  // ==========================================================================
+  // File Handle Operations Tests
+  // ==========================================================================
+
+  describe('file handle operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    describe('open', () => {
+      it('should open an existing file', async () => {
+        await fsModule.write('/file.txt', 'content')
+        const handle = await fsModule.open('/file.txt', 'r')
+
+        expect(handle).toBeDefined()
+        expect(handle.fd).toBeGreaterThan(0)
+      })
+
+      it('should create file with w flag', async () => {
+        const handle = await fsModule.open('/newfile.txt', 'w')
+
+        expect(handle).toBeDefined()
+        expect(mockSql.getFile('/newfile.txt')).toBeDefined()
+      })
+
+      it('should throw ENOENT for non-existent file with r flag', async () => {
+        await expect(fsModule.open('/nonexistent.txt', 'r')).rejects.toThrow()
+      })
+
+      describe('handle.read', () => {
+        it('should read data into buffer', async () => {
+          await fsModule.write('/file.txt', 'Hello')
+          const handle = await fsModule.open('/file.txt', 'r')
+          const buffer = new Uint8Array(10)
+
+          const result = await handle.read(buffer, 0, 5, 0)
+
+          expect(result.bytesRead).toBe(5)
+          expect(new TextDecoder().decode(buffer.slice(0, result.bytesRead))).toBe('Hello')
+        })
+      })
+
+      describe('handle.write', () => {
+        it('should write data to file', async () => {
+          const handle = await fsModule.open('/file.txt', 'w')
+
+          await handle.write('Hello, World!')
+          await handle.close()
+
+          const content = await fsModule.read('/file.txt', { encoding: 'utf-8' })
+          expect(content).toBe('Hello, World!')
+        })
+      })
+
+      describe('handle.stat', () => {
+        it('should return file stats', async () => {
+          await fsModule.write('/file.txt', 'content')
+          const handle = await fsModule.open('/file.txt', 'r')
+
+          const stats = await handle.stat()
+
+          expect(stats.isFile()).toBe(true)
+          expect(stats.size).toBe(7)
+        })
+      })
+
+      describe('handle.truncate', () => {
+        it('should truncate file through handle', async () => {
+          await fsModule.write('/file.txt', 'Hello, World!')
+          const handle = await fsModule.open('/file.txt', 'w')
+
+          await handle.truncate(5)
+          await handle.close()
+
+          const content = await fsModule.read('/file.txt', { encoding: 'utf-8' })
+          expect(content).toBe('Hello')
+        })
+      })
+
+      describe('handle.sync and handle.close', () => {
+        it('should sync and close without error', async () => {
+          const handle = await fsModule.open('/file.txt', 'w')
+          await handle.write('content')
+
+          await expect(handle.sync()).resolves.not.toThrow()
+          await expect(handle.close()).resolves.not.toThrow()
+        })
+      })
+    })
+  })
+
+  // ==========================================================================
+  // Tiered Storage Backend Switching Tests
+  // ==========================================================================
+
+  describe('storage backend switching', () => {
+    let mockArchive: MockR2Bucket
+
+    beforeEach(async () => {
+      mockArchive = new MockR2Bucket()
+      fsModule = new FsModule({
+        sql: mockSql as unknown as SqlStorage,
+        r2: mockR2 as unknown as R2Bucket,
+        archive: mockArchive as unknown as R2Bucket,
+        hotMaxSize: 100, // 100 bytes threshold
+      })
+      await fsModule.exists('/')
+    })
+
+    describe('getTier', () => {
+      it('should return current tier for a file', async () => {
+        await fsModule.write('/file.txt', 'content')
+
+        const tier = await fsModule.getTier('/file.txt')
+
+        expect(tier).toBe('hot')
+      })
+
+      it('should throw ENOENT for non-existent file', async () => {
+        await expect(fsModule.getTier('/nonexistent.txt')).rejects.toThrow()
+      })
+    })
+
+    describe('promote', () => {
+      it('should promote file to hot tier', async () => {
+        await fsModule.write('/file.txt', 'content', { tier: 'warm' })
+
+        await fsModule.promote('/file.txt', 'hot')
+
+        const tier = await fsModule.getTier('/file.txt')
+        expect(tier).toBe('hot')
+      })
+
+      it('should throw ENOENT for non-existent file', async () => {
+        await expect(fsModule.promote('/nonexistent.txt', 'hot')).rejects.toThrow()
+      })
+
+      it('should be no-op when file is already in target tier', async () => {
+        await fsModule.write('/file.txt', 'content') // Default is hot
+
+        await expect(fsModule.promote('/file.txt', 'hot')).resolves.not.toThrow()
+      })
+    })
+
+    describe('demote', () => {
+      it('should demote file to warm tier', async () => {
+        await fsModule.write('/file.txt', 'content') // Hot tier
+
+        await fsModule.demote('/file.txt', 'warm')
+
+        const tier = await fsModule.getTier('/file.txt')
+        expect(tier).toBe('warm')
+      })
+
+      it('should demote file to cold tier', async () => {
+        await fsModule.write('/file.txt', 'content') // Hot tier
+
+        await fsModule.demote('/file.txt', 'cold')
+
+        const tier = await fsModule.getTier('/file.txt')
+        expect(tier).toBe('cold')
+      })
+
+      it('should throw ENOENT for non-existent file', async () => {
+        await expect(fsModule.demote('/nonexistent.txt', 'warm')).rejects.toThrow()
+      })
+
+      it('should be no-op when file is already in target tier', async () => {
+        await fsModule.write('/file.txt', 'content', { tier: 'warm' })
+
+        await expect(fsModule.demote('/file.txt', 'warm')).resolves.not.toThrow()
+      })
+    })
+
+    describe('automatic tier selection', () => {
+      it('should select warm tier for files exceeding hot threshold when R2 is configured', async () => {
+        const largeContent = 'x'.repeat(200) // Exceeds 100 byte threshold
+        await fsModule.write('/large.txt', largeContent)
+
+        const file = mockSql.getFile('/large.txt')
+        expect(file?.tier).toBe('warm')
+      })
+
+      it('should store warm tier data in R2', async () => {
+        const largeContent = 'x'.repeat(200)
+        await fsModule.write('/large.txt', largeContent)
+
+        const file = mockSql.getFile('/large.txt')
+        expect(mockR2.has(file!.blob_id!)).toBe(true)
+      })
+    })
+  })
+
+  // ==========================================================================
+  // Error Code Verification Tests
+  // ==========================================================================
+
+  describe('error code verification', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should throw error with code ENOENT for missing file', async () => {
+      try {
+        await fsModule.read('/nonexistent.txt')
+        expect.fail('Should have thrown')
+      } catch (error: any) {
+        expect(error.code).toBe('ENOENT')
+      }
+    })
+
+    it('should throw error with code EISDIR when reading directory', async () => {
+      await fsModule.mkdir('/testdir')
+
+      try {
+        await fsModule.read('/testdir')
+        expect.fail('Should have thrown')
+      } catch (error: any) {
+        expect(error.code).toBe('EISDIR')
+      }
+    })
+
+    it('should throw error with code EEXIST when creating existing directory', async () => {
+      await fsModule.mkdir('/existing')
+
+      try {
+        await fsModule.mkdir('/existing')
+        expect.fail('Should have thrown')
+      } catch (error: any) {
+        expect(error.code).toBe('EEXIST')
+      }
+    })
+
+    it('should throw error with code ENOTDIR when rmdir on file', async () => {
+      await fsModule.write('/file.txt', 'content')
+
+      try {
+        await fsModule.rmdir('/file.txt')
+        expect.fail('Should have thrown')
+      } catch (error: any) {
+        expect(error.code).toBe('ENOTDIR')
+      }
+    })
+
+    it('should throw error with code ENOTEMPTY for non-empty directory', async () => {
+      await fsModule.mkdir('/nonempty')
+      await fsModule.write('/nonempty/file.txt', 'content')
+
+      try {
+        await fsModule.rmdir('/nonempty')
+        expect.fail('Should have thrown')
+      } catch (error: any) {
+        expect(error.code).toBe('ENOTEMPTY')
+      }
+    })
+  })
+
+  // ==========================================================================
+  // lstat Operations Tests
+  // ==========================================================================
+
+  describe('lstat operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should return stats for regular file', async () => {
+      await fsModule.write('/file.txt', 'content')
+
+      const stats = await fsModule.lstat('/file.txt')
+
+      expect(stats.isFile()).toBe(true)
+      expect(stats.isSymbolicLink()).toBe(false)
+    })
+
+    it('should return stats for symlink without following', async () => {
+      await fsModule.write('/target.txt', 'content')
+      await fsModule.symlink('/target.txt', '/link.txt')
+
+      const stats = await fsModule.lstat('/link.txt')
+
+      expect(stats.isSymbolicLink()).toBe(true)
+      expect(stats.isFile()).toBe(false)
+    })
+
+    it('should throw ENOENT for non-existent path', async () => {
+      await expect(fsModule.lstat('/nonexistent')).rejects.toThrow()
+    })
+  })
+
+  // ==========================================================================
+  // Range Read Tests
+  // ==========================================================================
+
+  describe('range read operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should read partial file with start option', async () => {
+      await fsModule.write('/file.txt', 'Hello, World!')
+
+      const content = await fsModule.read('/file.txt', { start: 7 })
+
+      expect(content).toBeInstanceOf(Uint8Array)
+      expect(new TextDecoder().decode(content as Uint8Array)).toBe('World!')
+    })
+
+    it('should read partial file with start and end options', async () => {
+      await fsModule.write('/file.txt', 'Hello, World!')
+
+      const content = await fsModule.read('/file.txt', { start: 0, end: 4 })
+
+      expect(new TextDecoder().decode(content as Uint8Array)).toBe('Hello')
+    })
+
+    it('should read partial file with only end option', async () => {
+      await fsModule.write('/file.txt', 'Hello, World!')
+
+      const content = await fsModule.read('/file.txt', { end: 4 })
+
+      expect(new TextDecoder().decode(content as Uint8Array)).toBe('Hello')
+    })
+  })
+
+  // ==========================================================================
+  // Watch Operations Tests (Stub verification)
+  // ==========================================================================
+
+  describe('watch operations', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should return FSWatcher with close method', () => {
+      const watcher = fsModule.watch('/file.txt')
+
+      expect(watcher).toBeDefined()
+      expect(typeof watcher.close).toBe('function')
+      expect(typeof watcher.ref).toBe('function')
+      expect(typeof watcher.unref).toBe('function')
+    })
+
+    it('should allow close without error', () => {
+      const watcher = fsModule.watch('/file.txt')
+
+      expect(() => watcher.close()).not.toThrow()
+    })
+
+    it('should return self from ref and unref', () => {
+      const watcher = fsModule.watch('/file.txt')
+
+      expect(watcher.ref()).toBe(watcher)
+      expect(watcher.unref()).toBe(watcher)
+    })
+  })
+
+  // ==========================================================================
+  // list alias Tests
+  // ==========================================================================
+
+  describe('list (readdir alias)', () => {
+    beforeEach(async () => {
+      await fsModule.exists('/')
+    })
+
+    it('should list directory contents like readdir', async () => {
+      await fsModule.mkdir('/dir')
+      await fsModule.write('/dir/a.txt', 'a')
+      await fsModule.write('/dir/b.txt', 'b')
+
+      const entries = await fsModule.list('/dir')
+
+      expect(entries).toHaveLength(2)
+      expect(entries).toContain('a.txt')
+      expect(entries).toContain('b.txt')
+    })
+  })
+
+  // ==========================================================================
+  // Module name property Tests
+  // ==========================================================================
+
+  describe('module properties', () => {
+    it('should have name property set to "fs"', () => {
+      expect(fsModule.name).toBe('fs')
     })
   })
 })
