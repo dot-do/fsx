@@ -34,9 +34,9 @@
  */
 
 import { DurableObject } from 'cloudflare:workers'
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { constants } from '../core/constants.js'
-import type { FileEntry, FileType, Stats, Dirent } from '../core/types.js'
+import type { FileType, Dirent as DirentClass } from '../core/types.js'
 
 // Re-export FsModule and related types for fsx/do entry point
 export { FsModule, type FsModuleConfig } from './module.js'
@@ -45,6 +45,64 @@ export { withFs, hasFs, getFs, type WithFsContext, type WithFsOptions, type With
 interface Env {
   FSX: DurableObjectNamespace
   R2?: R2Bucket
+}
+
+/**
+ * Internal file entry matching SQLite schema (snake_case columns)
+ */
+interface SqlFileEntry {
+  id: string
+  path: string
+  name: string
+  parent_id: string | null
+  type: FileType
+  mode: number
+  uid: number
+  gid: number
+  size: number
+  blob_id: string | null
+  link_target: string | null
+  atime: number
+  mtime: number
+  ctime: number
+  birthtime: number
+  nlink: number
+}
+
+/**
+ * Dirent-like object for directory listings
+ */
+interface DirentLike {
+  name: string
+  parentPath: string
+  path: string
+  isFile: () => boolean
+  isDirectory: () => boolean
+  isSymbolicLink: () => boolean
+  isBlockDevice: () => boolean
+  isCharacterDevice: () => boolean
+  isFIFO: () => boolean
+  isSocket: () => boolean
+}
+
+/**
+ * Stats-like object returned from stat operations
+ */
+interface StatsLike {
+  dev: number
+  ino: number
+  mode: number
+  nlink: number
+  uid: number
+  gid: number
+  rdev: number
+  size: number
+  blksize: number
+  blocks: number
+  atime: number
+  mtime: number
+  ctime: number
+  birthtime: number
 }
 
 /**
@@ -103,7 +161,7 @@ export class FileSystemDO extends DurableObject<Env> {
     await this.ctx.storage.sql.exec(SCHEMA)
 
     // Create root directory if not exists
-    const root = await this.ctx.storage.sql.exec<FileEntry>('SELECT * FROM files WHERE path = ?', '/').one()
+    const root = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE path = ?', '/').one()
 
     if (!root) {
       const now = Date.now()
@@ -242,8 +300,8 @@ export class FileSystemDO extends DurableObject<Env> {
     }
   }
 
-  private async getFile(path: string): Promise<FileEntry | null> {
-    const result = await this.ctx.storage.sql.exec<FileEntry>('SELECT * FROM files WHERE path = ?', path).one()
+  private async getFile(path: string): Promise<SqlFileEntry | null> {
+    const result = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE path = ?', path).one()
     return result || null
   }
 
@@ -474,7 +532,7 @@ export class FileSystemDO extends DurableObject<Env> {
       throw Object.assign(new Error('not a directory'), { code: 'ENOTDIR', path })
     }
 
-    const children = await this.ctx.storage.sql.exec<FileEntry>('SELECT * FROM files WHERE parent_id = ?', file.id).toArray()
+    const children = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE parent_id = ?', file.id).toArray()
 
     if (children.length > 0 && !options.recursive) {
       throw Object.assign(new Error('directory not empty'), { code: 'ENOTEMPTY', path })
@@ -508,7 +566,7 @@ export class FileSystemDO extends DurableObject<Env> {
     }
   }
 
-  private async readdir(path: string, options: { withFileTypes?: boolean; recursive?: boolean } = {}): Promise<string[] | Dirent[]> {
+  private async readdir(path: string, options: { withFileTypes?: boolean; recursive?: boolean } = {}): Promise<string[] | DirentLike[]> {
     const file = await this.getFile(path)
     if (!file) {
       throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
@@ -518,7 +576,7 @@ export class FileSystemDO extends DurableObject<Env> {
       throw Object.assign(new Error('not a directory'), { code: 'ENOTDIR', path })
     }
 
-    const children = await this.ctx.storage.sql.exec<FileEntry>('SELECT * FROM files WHERE parent_id = ?', file.id).toArray()
+    const children = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE parent_id = ?', file.id).toArray()
 
     if (options.withFileTypes) {
       const result: Dirent[] = children.map((child) => ({
