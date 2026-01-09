@@ -143,16 +143,25 @@ export class FSx {
     path = this.normalizePath(path)
     const result = await this.request<{ data: string; encoding: string }>('readFile', { path, encoding })
 
-    if (encoding || result.encoding === 'utf-8') {
-      return result.data
-    }
-
-    // Decode base64 to Uint8Array
+    // The backend always returns base64-encoded data
+    // Decode base64 to bytes first
     const binary = atob(result.data)
     const bytes = new Uint8Array(binary.length)
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i)
     }
+
+    // If utf-8 encoding requested (or default), decode bytes to string
+    if (!encoding || encoding === 'utf-8' || encoding === 'utf8') {
+      return new TextDecoder().decode(bytes)
+    }
+
+    // If base64 encoding requested, return the original base64 string
+    if (encoding === 'base64') {
+      return result.data
+    }
+
+    // For other encodings or no encoding, return bytes
     return bytes
   }
 
