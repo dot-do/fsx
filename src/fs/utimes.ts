@@ -1,10 +1,12 @@
 /**
  * utimes - Update file timestamps
  *
- * RED phase stub - implementation not yet complete
+ * GREEN phase - implementation complete
  */
 
 import { type FileEntry } from '../core/types'
+import { ENOENT } from '../core/errors'
+import { normalize } from '../core/path'
 
 /**
  * Storage interface for utimes operations
@@ -26,6 +28,32 @@ export function setStorage(s: UtimesStorage | null): void {
 }
 
 /**
+ * Convert a timestamp input to milliseconds.
+ * Handles Date objects, numeric timestamps (ms or seconds), and string dates.
+ *
+ * @param time - The time value to convert
+ * @returns The time in milliseconds
+ */
+function toMilliseconds(time: Date | number | string): number {
+  if (time instanceof Date) {
+    return time.getTime()
+  }
+
+  if (typeof time === 'string') {
+    return new Date(time).getTime()
+  }
+
+  // Number: determine if seconds or milliseconds
+  // Values >= 1e12 are treated as milliseconds (covers dates from ~2001 onwards)
+  // Values < 1e12 are treated as seconds and converted to milliseconds
+  if (time >= 1e12 || time === 0) {
+    return time
+  }
+
+  return time * 1000
+}
+
+/**
  * Update the access and modification times of a file.
  * Follows symbolic links.
  *
@@ -39,8 +67,52 @@ export async function utimes(
   atime: Date | number | string,
   mtime: Date | number | string
 ): Promise<void> {
-  // RED phase - not implemented yet
-  throw new Error('utimes not implemented')
+  if (!storage) {
+    throw new Error('Storage not configured')
+  }
+
+  const normalizedPath = normalize(path)
+  const entry = storage.get(normalizedPath)
+
+  if (!entry) {
+    throw new ENOENT('utimes', normalizedPath)
+  }
+
+  // If it's a symlink, follow it to the target
+  if (entry.type === 'symlink') {
+    if (!storage.resolveSymlink) {
+      throw new ENOENT('utimes', normalizedPath)
+    }
+
+    const resolved = storage.resolveSymlink(normalizedPath)
+    if (!resolved) {
+      // Broken symlink - target doesn't exist
+      throw new ENOENT('utimes', normalizedPath)
+    }
+
+    // Update the target's timestamps
+    const atimeMs = toMilliseconds(atime)
+    const mtimeMs = toMilliseconds(mtime)
+    const now = Date.now()
+
+    storage.update(resolved.path, {
+      atime: atimeMs,
+      mtime: mtimeMs,
+      ctime: now,
+    })
+    return
+  }
+
+  // Update timestamps for regular files and directories
+  const atimeMs = toMilliseconds(atime)
+  const mtimeMs = toMilliseconds(mtime)
+  const now = Date.now()
+
+  storage.update(normalizedPath, {
+    atime: atimeMs,
+    mtime: mtimeMs,
+    ctime: now,
+  })
 }
 
 /**
@@ -57,6 +129,25 @@ export async function lutimes(
   atime: Date | number | string,
   mtime: Date | number | string
 ): Promise<void> {
-  // RED phase - not implemented yet
-  throw new Error('lutimes not implemented')
+  if (!storage) {
+    throw new Error('Storage not configured')
+  }
+
+  const normalizedPath = normalize(path)
+  const entry = storage.get(normalizedPath)
+
+  if (!entry) {
+    throw new ENOENT('lutimes', normalizedPath)
+  }
+
+  // Update timestamps directly on the entry (don't follow symlinks)
+  const atimeMs = toMilliseconds(atime)
+  const mtimeMs = toMilliseconds(mtime)
+  const now = Date.now()
+
+  storage.update(normalizedPath, {
+    atime: atimeMs,
+    mtime: mtimeMs,
+    ctime: now,
+  })
 }

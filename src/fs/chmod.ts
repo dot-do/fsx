@@ -2,7 +2,6 @@
  * chmod - Change file mode bits
  *
  * Changes the permissions (mode) of a file or directory.
- * This is a stub implementation for RED phase TDD.
  *
  * POSIX behavior:
  * - chmod(path, mode) - Changes permissions of file at path (follows symlinks)
@@ -16,6 +15,12 @@
  */
 
 import { type FileEntry } from '../core/types'
+import { ENOENT, EPERM } from '../core/errors'
+import { normalize } from '../core/path'
+import { constants } from '../core/constants'
+
+// Permission bits mask (includes setuid, setgid, sticky, and rwx for owner/group/other)
+const PERMISSION_MASK = 0o7777
 
 /**
  * Storage interface for chmod operations
@@ -70,6 +75,98 @@ export function getStorage(): ChmodStorage | null {
 }
 
 /**
+ * Internal implementation for chmod operations
+ *
+ * @param path - Path to the file or directory
+ * @param mode - New permissions (numeric mode)
+ * @param followSymlinks - Whether to follow symbolic links
+ * @param syscall - Name of the syscall for error messages
+ */
+async function chmodInternal(
+  path: string,
+  mode: number,
+  followSymlinks: boolean,
+  syscall: 'chmod' | 'lchmod'
+): Promise<void> {
+  // Check if storage is configured
+  if (!storage) {
+    throw new Error('Storage not configured')
+  }
+
+  // Normalize the path
+  const normalizedPath = normalize(path)
+
+  // Get the entry at the path
+  const entry = storage.get(normalizedPath)
+
+  // Check if the entry exists
+  if (!entry) {
+    throw new ENOENT(syscall, path)
+  }
+
+  // Determine which entry to modify
+  let targetEntry: FileEntry | undefined
+  let targetPath: string
+
+  if (followSymlinks && entry.type === 'symlink') {
+    // Follow symlinks to get the target
+    if (storage.resolveSymlink) {
+      targetEntry = storage.resolveSymlink(normalizedPath)
+    }
+    // If symlink resolution fails or target doesn't exist, throw ENOENT
+    if (!targetEntry) {
+      throw new ENOENT(syscall, path)
+    }
+    targetPath = targetEntry.path
+  } else {
+    // Operate on the entry directly (no symlink following)
+    targetEntry = entry
+    targetPath = normalizedPath
+  }
+
+  // Get current user ID (default to 1000 if not provided)
+  const currentUid = storage.getUid ? storage.getUid() : 1000
+
+  // Check permissions: only owner or root can chmod
+  // Root (uid 0) can chmod any file
+  if (currentUid !== 0 && targetEntry.uid !== currentUid) {
+    throw new EPERM(syscall, path)
+  }
+
+  // Calculate the new mode:
+  // - Preserve file type bits (S_IFMT)
+  // - Set new permission bits (masked to 0o7777)
+  //
+  // Get file type bits either from the existing mode or derive from type field
+  let fileTypeBits = targetEntry.mode & constants.S_IFMT
+
+  // If file type bits are not set in mode, derive them from the type field
+  if (fileTypeBits === 0) {
+    switch (targetEntry.type) {
+      case 'file':
+        fileTypeBits = constants.S_IFREG
+        break
+      case 'directory':
+        fileTypeBits = constants.S_IFDIR
+        break
+      case 'symlink':
+        fileTypeBits = constants.S_IFLNK
+        break
+      // Other types can be added as needed
+    }
+  }
+
+  const newPermissionBits = mode & PERMISSION_MASK
+  const newMode = fileTypeBits | newPermissionBits
+
+  // Update the entry with new mode and ctime
+  storage.update(targetPath, {
+    mode: newMode,
+    ctime: Date.now(),
+  })
+}
+
+/**
  * Change file mode bits
  *
  * Changes the permissions of the file specified by path.
@@ -96,7 +193,7 @@ export function getStorage(): ChmodStorage | null {
  * ```
  */
 export async function chmod(path: string, mode: number): Promise<void> {
-  throw new Error('chmod not implemented')
+  return chmodInternal(path, mode, true, 'chmod')
 }
 
 /**
@@ -122,5 +219,5 @@ export async function chmod(path: string, mode: number): Promise<void> {
  * ```
  */
 export async function lchmod(path: string, mode: number): Promise<void> {
-  throw new Error('lchmod not implemented')
+  return chmodInternal(path, mode, false, 'lchmod')
 }
