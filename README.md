@@ -24,7 +24,7 @@ await fs.mkdir('/app/uploads', { recursive: true })
 const files = await fs.readdir('/app/uploads')
 ```
 
-Your Cloudflare Worker now has a persistent, POSIX-compatible filesystem backed by Durable Objects and R2.
+**Scales to millions of agents.** Each agent gets its own isolated filesystem on Cloudflare's edge network. No shared state. No noisy neighbors. Just fast, persistent storage at global scale.
 
 ## Installation
 
