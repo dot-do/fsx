@@ -369,7 +369,9 @@ export class ShellTokenizer {
     let value = ''
     let inSingleQuote = false
     let inDoubleQuote = false
+    let inBacktick = false
     let escaped = false
+    let parenDepth = 0
 
     while (this.pos < this.input.length) {
       const char = this.peek()
@@ -387,22 +389,54 @@ export class ShellTokenizer {
         continue
       }
 
-      if (char === "'" && !inDoubleQuote) {
+      if (char === "'" && !inDoubleQuote && !inBacktick) {
         inSingleQuote = !inSingleQuote
         value += char
         this.advance()
         continue
       }
 
-      if (char === '"' && !inSingleQuote) {
+      if (char === '"' && !inSingleQuote && !inBacktick) {
         inDoubleQuote = !inDoubleQuote
         value += char
         this.advance()
         continue
       }
 
-      // Stop at unquoted metacharacters
-      if (!inSingleQuote && !inDoubleQuote) {
+      // Handle backtick command substitution
+      if (char === '`' && !inSingleQuote) {
+        inBacktick = !inBacktick
+        value += char
+        this.advance()
+        continue
+      }
+
+      // Handle $(...) command substitution - keep ( and ) as part of word
+      if (char === '$' && this.peek(1) === '(' && !inSingleQuote) {
+        value += char
+        this.advance()
+        value += this.advance() // consume (
+        parenDepth++
+        continue
+      }
+
+      // Track nested parentheses within $()
+      if (char === '(' && parenDepth > 0) {
+        parenDepth++
+        value += char
+        this.advance()
+        continue
+      }
+
+      if (char === ')' && parenDepth > 0) {
+        parenDepth--
+        value += char
+        this.advance()
+        continue
+      }
+
+      // Stop at unquoted metacharacters (but not when inside quotes, backticks, or $())
+      if (!inSingleQuote && !inDoubleQuote && !inBacktick && parenDepth === 0) {
         if (/[ \t\n|&;<>()]/.test(char)) {
           break
         }
@@ -593,10 +627,27 @@ export class ShellParser {
     }
 
     // Parse arguments (interleaved with redirections)
+    // Note: ASSIGNMENT tokens after the command name are also treated as arguments
+    // (e.g., dd if=/dev/zero of=/dev/sda uses key=value syntax as arguments, not assignments)
     const redirections = this.parseRedirections()
 
-    while (this.current().type === 'WORD') {
-      args.push(this.parseWord(this.advance().value))
+    while (this.current().type === 'WORD' || this.current().type === 'ASSIGNMENT') {
+      const token = this.advance()
+      if (token.type === 'ASSIGNMENT') {
+        // For commands like dd, key=value pairs are arguments, not shell assignments
+        // Parse them as special "assignment-style" arguments
+        const [, varName, varValue] = token.value.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$/) ?? []
+        // Add to args for general processing
+        args.push(this.parseWord(token.value))
+        // Also track as assignments for special command analysis (like dd)
+        assignments.push({
+          type: 'assignment',
+          name: varName,
+          value: this.parseWord(varValue),
+        })
+      } else {
+        args.push(this.parseWord(token.value))
+      }
       redirections.push(...this.parseRedirections())
     }
 
@@ -979,6 +1030,14 @@ export class AstSafetyAnalyzer {
       })
     }
 
+    // Check for inherently dangerous commands
+    if (INHERENTLY_DANGEROUS_COMMANDS.has(cmdName)) {
+      // dd is special - it uses its own syntax with assignments like of=/dev/sda
+      if (cmdName === 'dd') {
+        this.analyzeDdCommand(node)
+      }
+    }
+
     // Check for dangerous rm commands
     if (cmdName === 'rm') {
       this.analyzeRmCommand(node)
@@ -1052,6 +1111,50 @@ export class AstSafetyAnalyzer {
         node,
       })
     }
+  }
+
+  private analyzeDdCommand(node: CommandNode): void {
+    // dd uses its own syntax with if= and of= for input/output
+    // These appear as assignments in the AST since they match NAME=VALUE pattern
+    // Check the assignments for dangerous device targets
+    for (const assignment of node.assignments) {
+      const name = assignment.name
+      const value = assignment.value.value
+
+      // Check output file (of=) for dangerous targets
+      if (name === 'of') {
+        // Block device writes
+        if (/^\/dev\/sd[a-z]/.test(value) || /^\/dev\/hd[a-z]/.test(value) ||
+            /^\/dev\/nvme\d+n\d+/.test(value) || /^\/dev\/vd[a-z]/.test(value)) {
+          this.hasDangerousRedirection = true
+          this.issues.push({
+            severity: 'critical',
+            code: 'DD_BLOCK_DEVICE',
+            message: `dd writing to block device: ${value}`,
+            node,
+          })
+        }
+
+        // Writing to other dangerous locations
+        if (value === '/dev/mem' || value === '/dev/kmem' || value === '/dev/port') {
+          this.hasDangerousRedirection = true
+          this.issues.push({
+            severity: 'critical',
+            code: 'DD_SYSTEM_DEVICE',
+            message: `dd writing to system device: ${value}`,
+            node,
+          })
+        }
+      }
+    }
+
+    // dd is inherently dangerous, add a medium severity warning
+    this.issues.push({
+      severity: 'medium',
+      code: 'DD_COMMAND',
+      message: 'Using dd command - can cause data loss if misused',
+      node,
+    })
   }
 
   private analyzePipeline(node: PipelineNode): void {

@@ -22,22 +22,26 @@ import type { FsModule } from './module.js'
 
 /**
  * Mock SqlStorage that simulates Cloudflare's SqlStorage API
+ *
+ * Cloudflare's SqlStorage.exec() returns a SqlStorageResults object synchronously.
+ * The .one() and .toArray() methods on that object are also synchronous.
+ * But the code awaits them, so we wrap in Promise.resolve().
  */
 class MockSqlStorage {
   private tables: Map<string, Map<string, Record<string, unknown>>> = new Map()
   private schemas: string[] = []
 
-  async exec<T = unknown>(query: string, ...params: unknown[]): Promise<{
-    one: () => Promise<T | null>
+  exec<T = unknown>(query: string, ...params: unknown[]): {
+    one: () => T | null
     toArray: () => T[]
-  }> {
+  } {
     const normalizedQuery = query.trim().toLowerCase()
 
     // Handle CREATE TABLE and CREATE INDEX
     if (normalizedQuery.startsWith('create table') || normalizedQuery.startsWith('create index')) {
       this.schemas.push(query)
       return {
-        one: async () => null,
+        one: () => null,
         toArray: () => [],
       }
     }
@@ -65,7 +69,7 @@ class MockSqlStorage {
         }
       }
       return {
-        one: async () => null,
+        one: () => null,
         toArray: () => [],
       }
     }
@@ -87,7 +91,7 @@ class MockSqlStorage {
             const activeValue = condition.includes('is_active = ?') ? params[params.length - 1] : 1
             const rows = Array.from(table.values()).filter((row) => row.is_active === activeValue)
             return {
-              one: async () => (rows.length > 0 ? (rows[0] as T) : null),
+              one: () => (rows.length > 0 ? (rows[0] as T) : null),
               toArray: () => rows as T[],
             }
           }
@@ -96,7 +100,7 @@ class MockSqlStorage {
             const id = params[0] as string
             const row = table.get(id)
             return {
-              one: async () => (row as T) || null,
+              one: () => (row as T) || null,
               toArray: () => (row ? [row as T] : []),
             }
           }
@@ -105,7 +109,7 @@ class MockSqlStorage {
             const path = params[0] as string
             const row = Array.from(table.values()).find((r) => r.path === path)
             return {
-              one: async () => (row as T) || null,
+              one: () => (row as T) || null,
               toArray: () => (row ? [row as T] : []),
             }
           }
@@ -116,7 +120,7 @@ class MockSqlStorage {
               (r) => r.command === command && r.is_pattern === 0 && r.is_active === 1
             )
             return {
-              one: async () => (row as T) || null,
+              one: () => (row as T) || null,
               toArray: () => (row ? [row as T] : []),
             }
           }
@@ -124,7 +128,7 @@ class MockSqlStorage {
           if (condition.includes('is_pattern = 1')) {
             const rows = Array.from(table.values()).filter((r) => r.is_pattern === 1 && r.is_active === 1)
             return {
-              one: async () => (rows.length > 0 ? (rows[0] as T) : null),
+              one: () => (rows.length > 0 ? (rows[0] as T) : null),
               toArray: () => rows as T[],
             }
           }
@@ -132,7 +136,7 @@ class MockSqlStorage {
           if (condition.includes('executed_at')) {
             const rows = Array.from(table.values())
             return {
-              one: async () => (rows.length > 0 ? (rows[0] as T) : null),
+              one: () => (rows.length > 0 ? (rows[0] as T) : null),
               toArray: () => rows as T[],
             }
           }
@@ -141,7 +145,7 @@ class MockSqlStorage {
         // Return all rows
         const rows = Array.from(table.values())
         return {
-          one: async () => (rows.length > 0 ? (rows[0] as T) : null),
+          one: () => (rows.length > 0 ? (rows[0] as T) : null),
           toArray: () => rows as T[],
         }
       }
@@ -154,28 +158,37 @@ class MockSqlStorage {
         const tableName = tableMatch[1]
         const table = this.tables.get(tableName)
         if (table) {
-          // Handle is_active = 0 for all rows
-          if (query.includes('is_active = 0') && !query.includes('where id')) {
+          // Handle is_active = 0 for all rows (no WHERE clause)
+          if (query.includes('is_active = 0') && !query.includes('where')) {
             for (const row of table.values()) {
               row.is_active = 0
             }
           }
 
-          // Handle specific id update
+          // Handle specific id update (UPDATE ... WHERE id = ?)
           const whereIdMatch = query.match(/where id = \?/i)
           if (whereIdMatch) {
             const id = params[params.length - 1] as string
             const row = table.get(id)
             if (row) {
-              // Extract SET values
-              const setMatch = query.match(/set\s+(.+?)\s+where/i)
-              if (setMatch) {
-                const sets = setMatch[1].split(',').map((s) => s.trim())
-                let paramIndex = 0
-                for (const set of sets) {
-                  const [col] = set.split('=').map((s) => s.trim())
-                  if (set.includes('?')) {
-                    row[col] = params[paramIndex++]
+              // Handle is_active = 1 specifically (activatePolicy)
+              if (query.includes('is_active = 1')) {
+                row.is_active = 1
+                // Also handle updated_at if present
+                if (query.includes('updated_at = ?')) {
+                  row.updated_at = params[0]
+                }
+              } else {
+                // Extract SET values generically
+                const setMatch = query.match(/set\s+(.+?)\s+where/i)
+                if (setMatch) {
+                  const sets = setMatch[1].split(',').map((s) => s.trim())
+                  let paramIndex = 0
+                  for (const set of sets) {
+                    const [col] = set.split('=').map((s) => s.trim())
+                    if (set.includes('?')) {
+                      row[col] = params[paramIndex++]
+                    }
                   }
                 }
               }
@@ -184,7 +197,7 @@ class MockSqlStorage {
         }
       }
       return {
-        one: async () => null,
+        one: () => null,
         toArray: () => [],
       }
     }
@@ -215,13 +228,13 @@ class MockSqlStorage {
         }
       }
       return {
-        one: async () => ({ count: 0 } as T),
+        one: () => ({ count: 0 } as T),
         toArray: () => [],
       }
     }
 
     return {
-      one: async () => null,
+      one: () => null,
       toArray: () => [],
     }
   }
