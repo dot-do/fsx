@@ -3,25 +3,68 @@
  *
  * A virtual filesystem for the edge with POSIX-like API,
  * tiered storage, and MCP integration for AI-assisted operations.
+ *
+ * @example
+ * ```typescript
+ * import { FSx, type FsCapability } from 'fsx.do'
+ *
+ * const fs = new FSx(env.FSX)
+ * await fs.writeFile('/hello.txt', 'Hello, World!')
+ * const content = await fs.readFile('/hello.txt', 'utf-8')
+ * ```
+ *
+ * @packageDocumentation
  */
 
 // Core filesystem API
 export { FSx, type FSxOptions } from './core/fsx.js'
 
-// Types
+// Types - Core capability interface
 export type {
+  // Main capability interface for dotdo integration
+  FsCapability,
+
+  // Storage tier type
+  StorageTier,
+
+  // File statistics types
+  FileStat,
   Stats,
+  StatsInit,
+  StatsLike,
+
+  // Directory entry types
   Dirent,
-  FileHandle,
+  DirentType,
+  FileType,
+  FileEntry,
+  FileMode,
+
+  // Operation options
+  ReadOptions,
+  WriteOptions,
+  ListOptions,
+  CopyOptions,
+  MoveOptions,
+  RemoveOptions,
   ReadStreamOptions,
   WriteStreamOptions,
   MkdirOptions,
   RmdirOptions,
   ReaddirOptions,
   WatchOptions,
+
+  // Result types
+  WriteResult,
+  ReadResult,
+
+  // File handle and watcher
+  FileHandle,
   FSWatcher,
-  FileMode,
-  FileType,
+
+  // Encoding and storage
+  BufferEncoding,
+  BlobRef,
 } from './core/types.js'
 
 // Constants
