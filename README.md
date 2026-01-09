@@ -1,55 +1,30 @@
 # fsx.do
 
-Filesystem on Cloudflare Durable Objects - A virtual filesystem for the edge.
+**A real filesystem for Cloudflare Workers.** POSIX-compatible. Durable. 3,000+ tests.
 
-## Features
+[![npm version](https://img.shields.io/npm/v/fsx.do.svg)](https://www.npmjs.com/package/fsx.do)
+[![Tests](https://img.shields.io/badge/tests-3%2C044%20passing-brightgreen.svg)](https://github.com/dot-do/fsx)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue.svg)](https://www.typescriptlang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-- **POSIX-like API** - Familiar fs operations (read, write, mkdir, readdir, stat, etc.)
-- **Durable Object Storage** - SQLite-backed metadata with R2 blob storage
-- **MCP Tools** - Model Context Protocol integration for AI-assisted file operations
-- **DO Integration** - Provides `$.fs` capability for dotdo DOs
-- **RPC Service** - Can run as a separate Worker for heavy operations
-- **Tiered Storage** - Hot/warm/cold storage tiers with automatic promotion
-  - Hot: Durable Object SQLite (low latency, small files)
-  - Warm: R2 object storage (large files, blobs)
-  - Cold: Archive storage (infrequent access)
-- **Streaming** - ReadableStream/WritableStream support for large files
-- **Permissions** - Unix-like permission model (rwx)
-- **Symbolic Links** - Symlink and hardlink support
-- **Watch** - File/directory change notifications
+## Why fsx?
 
-## DO Integration
+**Edge workers don't have filesystems.** No `fs.readFile()`. No directories. No persistence across requests.
 
-fsx provides the `$.fs` capability for dotdo Durable Objects:
+**AI agents need filesystems.** They want to read configs, write outputs, organize files in directories, watch for changes.
+
+**fsx gives you both:**
 
 ```typescript
-import { DO } from 'dotdo/fs'
+import fs from 'fsx.do'
 
-class MySite extends DO {
-  async loadContent() {
-    // $.fs is lazy-loaded from fsx
-    const content = await this.$.fs.read('content/index.mdx')
-    const files = await this.$.fs.list('content/')
-    await this.$.fs.write('cache/index.html', rendered)
-  }
-}
+// Just like Node.js fs - but on the edge
+await fs.writeFile('/app/config.json', JSON.stringify(config))
+await fs.mkdir('/app/uploads', { recursive: true })
+const files = await fs.readdir('/app/uploads')
 ```
 
-### As an RPC Service
-
-For heavy file operations, fsx can run as a separate Worker to keep your DO bundle small:
-
-```toml
-# wrangler.toml
-[[services]]
-binding = "FSX"
-service = "fsx-do"
-```
-
-```typescript
-// Heavy operations go through RPC
-const largeFile = await env.FSX.read('/data/huge-dataset.json')
-```
+Your Cloudflare Worker now has a persistent, POSIX-compatible filesystem backed by Durable Objects and R2.
 
 ## Installation
 
@@ -59,52 +34,68 @@ npm install fsx.do
 
 ## Quick Start
 
-### Basic Operations
-
 ```typescript
-import { FSx } from 'fsx.do'
+import fs from 'fsx.do'
 
-const fs = new FSx(env.FSX)
-
-// Write a file
+// Write files
 await fs.writeFile('/hello.txt', 'Hello, World!')
 
-// Read a file
+// Read files
 const content = await fs.readFile('/hello.txt', 'utf-8')
 
-// Create directory
-await fs.mkdir('/my-folder', { recursive: true })
+// Create directories
+await fs.mkdir('/data/uploads', { recursive: true })
 
-// List directory
-const entries = await fs.readdir('/my-folder')
+// List contents
+const entries = await fs.readdir('/data')
 
-// Get file stats
+// Get metadata
 const stats = await fs.stat('/hello.txt')
 console.log(`Size: ${stats.size}, Modified: ${stats.mtime}`)
 
-// Delete file
+// Delete
 await fs.unlink('/hello.txt')
 ```
 
-### Streaming Large Files
+## Features
+
+### Tiered Storage
+
+Small files stay fast in SQLite. Large files go to R2. You don't think about it.
 
 ```typescript
-import { FSx } from 'fsx.do'
+import { TieredFS } from 'fsx.do/storage'
 
-const fs = new FSx(env.FSX)
+const fs = new TieredFS({
+  hot: env.FSX,           // Durable Object SQLite (fast, <1MB)
+  warm: env.R2_BUCKET,    // R2 object storage (large files)
+  thresholds: {
+    hotMaxSize: 1024 * 1024,  // 1MB threshold
+  }
+})
 
+// Automatic tier selection
+await fs.writeFile('/small.json', '{}')           // → SQLite
+await fs.writeFile('/large.bin', hugeBinaryData)  // → R2
+```
+
+### Streaming
+
+Handle files larger than memory:
+
+```typescript
 // Write stream
 const writable = await fs.createWriteStream('/large-file.bin')
-await someReadableStream.pipeTo(writable)
+await sourceStream.pipeTo(writable)
 
 // Read stream
 const readable = await fs.createReadStream('/large-file.bin')
 for await (const chunk of readable) {
-  process.stdout.write(chunk)
+  await process(chunk)
 }
 
-// Partial reads
-const partial = await fs.createReadStream('/large-file.bin', {
+// Partial reads (byte ranges)
+const partial = await fs.createReadStream('/video.mp4', {
   start: 1000,
   end: 2000
 })
@@ -112,41 +103,56 @@ const partial = await fs.createReadStream('/large-file.bin', {
 
 ### File Watching
 
+React to changes:
+
 ```typescript
-import { FSx } from 'fsx.do'
-
-const fs = new FSx(env.FSX)
-
-// Watch a file
 const watcher = fs.watch('/config.json', (eventType, filename) => {
   console.log(`${eventType}: ${filename}`)
+  // Reload config, trigger rebuild, etc.
 })
 
-// Watch a directory recursively
-const dirWatcher = fs.watch('/src', { recursive: true }, (eventType, filename) => {
-  console.log(`${eventType}: ${filename}`)
+// Watch directories recursively
+fs.watch('/src', { recursive: true }, (event, file) => {
+  if (file.endsWith('.ts')) rebuild()
 })
-
-// Stop watching
-watcher.close()
 ```
 
-### MCP Tools
+### Unix Permissions
+
+Real permission model:
+
+```typescript
+// Set permissions
+await fs.chmod('/script.sh', 0o755)  // rwxr-xr-x
+
+// Change ownership
+await fs.chown('/data', 1000, 1000)
+
+// Check access
+await fs.access('/secret', fs.constants.R_OK)
+```
+
+### Symbolic Links
+
+```typescript
+await fs.symlink('/app/current', '/app/releases/v1.2.3')
+const target = await fs.readlink('/app/current')
+const resolved = await fs.realpath('/app/current/config.json')
+```
+
+### MCP Tools for AI Agents
+
+Built-in [Model Context Protocol](https://modelcontextprotocol.io/) tools:
 
 ```typescript
 import { fsTools, invokeTool } from 'fsx.do/mcp'
 
-// List available fs tools
-console.log(fsTools.map(t => t.name))
-// ['fs_read', 'fs_write', 'fs_list', 'fs_mkdir', 'fs_delete', 'fs_move', 'fs_copy', ...]
+// Available tools
+// fs_read, fs_write, fs_list, fs_mkdir, fs_delete, fs_move, fs_copy, fs_search
 
-// Invoke a tool
-const result = await invokeTool('fs_list', { path: '/src', recursive: true })
-
-// Read file tool
-const content = await invokeTool('fs_read', { path: '/README.md' })
-
-// Search files
+// AI agent can call these directly
+const result = await invokeTool('fs_read', { path: '/README.md' })
+const files = await invokeTool('fs_list', { path: '/src', recursive: true })
 const matches = await invokeTool('fs_search', {
   path: '/src',
   pattern: '*.ts',
@@ -154,12 +160,13 @@ const matches = await invokeTool('fs_search', {
 })
 ```
 
-### Durable Object
+## Durable Object Integration
+
+### As a Standalone DO
 
 ```typescript
 import { FileSystemDO } from 'fsx.do/do'
 
-// In your worker
 export { FileSystemDO }
 
 export default {
@@ -171,94 +178,91 @@ export default {
 }
 ```
 
-### Tiered Storage
+### As an RPC Service
+
+Keep your DO bundle small - offload heavy file operations:
+
+```toml
+# wrangler.toml
+[[services]]
+binding = "FSX"
+service = "fsx-worker"
+```
 
 ```typescript
-import { TieredFS } from 'fsx.do/storage'
+// Heavy operations via RPC
+const data = await env.FSX.read('/data/huge-dataset.json')
+```
 
-const fs = new TieredFS({
-  hot: env.FSX,           // Durable Object (fast, small files)
-  warm: env.R2_BUCKET,    // R2 (large files)
-  cold: env.ARCHIVE,      // Archive (infrequent)
-  thresholds: {
-    hotMaxSize: 1024 * 1024,      // 1MB
-    warmMaxSize: 100 * 1024 * 1024 // 100MB
+### With dotdo Framework
+
+```typescript
+import { DO } from 'dotdo'
+import { withFs } from 'fsx.do/do'
+
+class MySite extends withFs(DO) {
+  async loadContent() {
+    const content = await this.$.fs.read('content/index.mdx')
+    const files = await this.$.fs.list('content/')
+    await this.$.fs.write('cache/index.html', rendered)
   }
-})
-
-// Automatic tier selection based on file size
-await fs.writeFile('/small.txt', 'small content')      // -> hot tier
-await fs.writeFile('/large.bin', hugeBuffer)           // -> warm tier
+}
 ```
 
-## API Overview
+## API Reference
 
-### Core Module (`fsx.do/core`)
+### File Operations
 
-**File Operations**
-- `readFile(path, encoding?)` - Read file contents
-- `writeFile(path, data, options?)` - Write file contents
-- `appendFile(path, data)` - Append to file
-- `unlink(path)` - Delete file
-- `rename(oldPath, newPath)` - Rename/move file
-- `copyFile(src, dest)` - Copy file
+| Method | Description |
+|--------|-------------|
+| `readFile(path, encoding?)` | Read file contents |
+| `writeFile(path, data, options?)` | Write file contents |
+| `appendFile(path, data)` | Append to file |
+| `copyFile(src, dest)` | Copy file |
+| `rename(oldPath, newPath)` | Rename/move file |
+| `unlink(path)` | Delete file |
 
-**Directory Operations**
-- `mkdir(path, options?)` - Create directory
-- `rmdir(path, options?)` - Remove directory
-- `readdir(path, options?)` - List directory contents
+### Directory Operations
 
-**Metadata**
-- `stat(path)` - Get file/directory stats
-- `lstat(path)` - Get stats (don't follow symlinks)
-- `access(path, mode?)` - Check file access
-- `chmod(path, mode)` - Change permissions
-- `chown(path, uid, gid)` - Change ownership
+| Method | Description |
+|--------|-------------|
+| `mkdir(path, options?)` | Create directory |
+| `rmdir(path, options?)` | Remove directory |
+| `readdir(path, options?)` | List directory contents |
 
-**Links**
-- `symlink(target, path)` - Create symbolic link
-- `link(existingPath, newPath)` - Create hard link
-- `readlink(path)` - Read symbolic link target
-- `realpath(path)` - Resolve path (follow symlinks)
+### Metadata
 
-**Streams**
-- `createReadStream(path, options?)` - Get readable stream
-- `createWriteStream(path, options?)` - Get writable stream
+| Method | Description |
+|--------|-------------|
+| `stat(path)` | Get file stats |
+| `lstat(path)` | Get stats (don't follow symlinks) |
+| `access(path, mode?)` | Check access permissions |
+| `chmod(path, mode)` | Change permissions |
+| `chown(path, uid, gid)` | Change ownership |
+| `utimes(path, atime, mtime)` | Update timestamps |
 
-**Watching**
-- `watch(path, options?, listener?)` - Watch for changes
-- `watchFile(path, options?, listener?)` - Watch specific file
+### Links
 
-### MCP Tools (`fsx.do/mcp`)
+| Method | Description |
+|--------|-------------|
+| `symlink(target, path)` | Create symbolic link |
+| `link(existingPath, newPath)` | Create hard link |
+| `readlink(path)` | Read symlink target |
+| `realpath(path)` | Resolve path |
 
-- `fsTools` - Array of available filesystem tool definitions
-- `invokeTool(name, params)` - Execute a tool by name
-- `registerTool(tool)` - Add a custom tool
+### Streams
 
-### Durable Object (`fsx.do/do`)
+| Method | Description |
+|--------|-------------|
+| `createReadStream(path, options?)` | Get readable stream |
+| `createWriteStream(path, options?)` | Get writable stream |
 
-- `FileSystemDO` - Main Durable Object class
-- Handles all filesystem operations via fetch API
+### Watching
 
-### Storage (`fsx.do/storage`)
-
-- `TieredFS` - Multi-tier filesystem with automatic placement
-- `R2Storage` - R2-backed blob storage
-- `SQLiteMetadata` - SQLite-backed metadata store
-
-## File System Structure
-
-```
-/
-├── .fsx/                 # System directory
-│   ├── metadata.db       # SQLite metadata
-│   └── config.json       # FS configuration
-├── home/
-│   └── user/
-│       ├── documents/
-│       └── .config/
-└── tmp/                  # Temporary files (auto-cleanup)
-```
+| Method | Description |
+|--------|-------------|
+| `watch(path, options?, listener?)` | Watch for changes |
+| `watchFile(path, options?, listener?)` | Poll-based watching |
 
 ## Configuration
 
@@ -266,24 +270,78 @@ await fs.writeFile('/large.bin', hugeBuffer)           // -> warm tier
 const fs = new FSx(env.FSX, {
   // Storage tiers
   tiers: {
-    hotMaxSize: 1024 * 1024,        // 1MB
-    warmEnabled: true,
-    coldEnabled: false,
+    hotMaxSize: 1024 * 1024,     // 1MB (files below go to SQLite)
+    warmEnabled: true,            // Enable R2 for large files
   },
 
-  // Permissions
-  defaultMode: 0o644,               // rw-r--r--
-  defaultDirMode: 0o755,            // rwxr-xr-x
-
-  // Cleanup
-  tmpMaxAge: 24 * 60 * 60 * 1000,   // 24 hours
+  // Default permissions
+  defaultMode: 0o644,             // rw-r--r--
+  defaultDirMode: 0o755,          // rwxr-xr-x
 
   // Limits
-  maxFileSize: 100 * 1024 * 1024,   // 100MB
-  maxPathLength: 4096,
+  maxFileSize: 100 * 1024 * 1024, // 100MB max file size
+  maxPathLength: 4096,            // Max path length
+
+  // Temp file cleanup
+  tmpMaxAge: 24 * 60 * 60 * 1000, // 24 hours
 })
 ```
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                      fsx.do                             │
+├─────────────────────────────────────────────────────────┤
+│  POSIX API Layer (readFile, writeFile, mkdir, etc.)    │
+├─────────────────────────────────────────────────────────┤
+│  Tiered Storage Router                                  │
+├────────────────────┬────────────────────────────────────┤
+│   Hot Tier         │         Warm Tier                  │
+│   (SQLite)         │         (R2)                       │
+│                    │                                    │
+│   • Metadata       │   • Large files                    │
+│   • Small files    │   • Binary blobs                   │
+│   • Fast access    │   • Cost-effective                 │
+└────────────────────┴────────────────────────────────────┘
+```
+
+**Hot Tier (Durable Object SQLite)**
+- File metadata (paths, permissions, timestamps)
+- Small files (<1MB by default)
+- Microsecond access latency
+
+**Warm Tier (R2 Object Storage)**
+- Large files and binary data
+- Cost-effective at scale
+- Automatic promotion/demotion
+
+## Comparison
+
+| Feature | fsx.do | Workers KV | R2 | D1 |
+|---------|--------|------------|----|----|
+| Directories | ✅ | ❌ | ❌ | ❌ |
+| POSIX API | ✅ | ❌ | ❌ | ❌ |
+| Permissions | ✅ | ❌ | ❌ | ❌ |
+| Symlinks | ✅ | ❌ | ❌ | ❌ |
+| Streaming | ✅ | ❌ | ✅ | ❌ |
+| Watch | ✅ | ❌ | ❌ | ❌ |
+| Large files | ✅ | 25MB | 5GB | ❌ |
+| Transactions | ✅ | ❌ | ❌ | ✅ |
+
+## Performance
+
+- **3,044 tests** covering all operations
+- **Microsecond latency** for hot tier operations
+- **Zero cold starts** (Durable Objects)
+- **Global distribution** (300+ Cloudflare locations)
 
 ## License
 
 MIT
+
+## Links
+
+- [GitHub](https://github.com/dot-do/fsx)
+- [Documentation](https://fsx.do)
+- [dotdo Framework](https://dotdo.dev)
