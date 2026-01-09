@@ -90,3 +90,13 @@ export { grep, type GrepOptions, type GrepMatch, type GrepResult } from './grep/
 
 // Sparse checkout patterns
 export { parsePattern, type ParsedPattern } from './sparse/patterns.js'
+
+// Content-Addressable Storage (CAS) for git object storage
+export {
+  ContentAddressableFS,
+  type CASObject,
+  type CASStorage,
+  type ObjectType,
+} from './cas/content-addressable-fs.js'
+export { sha1, sha256, bytesToHex, hexToBytes } from './cas/hash.js'
+export { hashToPath, pathToHash } from './cas/path-mapping.js'
