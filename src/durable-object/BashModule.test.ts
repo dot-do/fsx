@@ -1456,7 +1456,7 @@ describe('BashModule', () => {
       it('should classify wget as dangerous (can be overridden)', () => {
         const analysis = bash.analyze('wget http://example.com')
         expect(analysis.classification).toBe('dangerous')
-        expect(analysis.risk).toBe('critical') // High risk but...
+        expect(analysis.risk).toBe('high') // High risk but...
         // ...dangerous means it CAN be overridden by policy
       })
 
@@ -1472,6 +1472,7 @@ describe('BashModule', () => {
       })
 
       it('should allow safe rm commands', async () => {
+        await mockFs.mkdir('/temp')
         await mockFs.write('/temp/file.txt', 'content')
         const analysis = bash.analyze('rm /temp/file.txt')
         expect(analysis.classification).toBe('safe')

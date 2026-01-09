@@ -241,10 +241,10 @@ const CRITICAL_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: />\s*\/dev\/mem\b/, reason: 'Direct memory manipulation' },
   { pattern: />\s*\/dev\/kmem\b/, reason: 'Kernel memory manipulation' },
 
-  // Filesystem formatting
-  { pattern: /mkfs\s+.*\/dev\/sd[a-z]/, reason: 'Format disk device' },
-  { pattern: /mkfs\s+.*\/dev\/hd[a-z]/, reason: 'Format disk device' },
-  { pattern: /mkfs\s+.*\/dev\/nvme/, reason: 'Format NVMe device' },
+  // Filesystem formatting (mkfs, mkfs.ext4, mkfs.xfs, etc.)
+  { pattern: /mkfs(\.\w+)?\s+.*\/dev\/sd[a-z]/, reason: 'Format disk device' },
+  { pattern: /mkfs(\.\w+)?\s+.*\/dev\/hd[a-z]/, reason: 'Format disk device' },
+  { pattern: /mkfs(\.\w+)?\s+.*\/dev\/nvme/, reason: 'Format NVMe device' },
 
   // System directories with recursive deletion
   { pattern: /rm\s+-[rf]*\s+\/bin\b/, reason: 'Remove /bin directory' },

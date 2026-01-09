@@ -1011,9 +1011,11 @@ export class AstSafetyAnalyzer {
     this.commands.push(cmdName)
 
     // Check if command is blocked
+    // Note: Blocked commands use 'high' severity, not 'critical', because they can be
+    // overridden via configuration. Only truly destructive patterns get 'critical'.
     if (this.config.blockedCommands?.has(cmdName)) {
       this.issues.push({
-        severity: 'critical',
+        severity: 'high',
         code: 'BLOCKED_COMMAND',
         message: `Command "${cmdName}" is blocked`,
         node,
