@@ -7,6 +7,8 @@ Filesystem on Cloudflare Durable Objects - A virtual filesystem for the edge.
 - **POSIX-like API** - Familiar fs operations (read, write, mkdir, readdir, stat, etc.)
 - **Durable Object Storage** - SQLite-backed metadata with R2 blob storage
 - **MCP Tools** - Model Context Protocol integration for AI-assisted file operations
+- **DO Integration** - Provides `$.fs` capability for dotdo DOs
+- **RPC Service** - Can run as a separate Worker for heavy operations
 - **Tiered Storage** - Hot/warm/cold storage tiers with automatic promotion
   - Hot: Durable Object SQLite (low latency, small files)
   - Warm: R2 object storage (large files, blobs)
@@ -15,6 +17,39 @@ Filesystem on Cloudflare Durable Objects - A virtual filesystem for the edge.
 - **Permissions** - Unix-like permission model (rwx)
 - **Symbolic Links** - Symlink and hardlink support
 - **Watch** - File/directory change notifications
+
+## DO Integration
+
+fsx provides the `$.fs` capability for dotdo Durable Objects:
+
+```typescript
+import { DO } from 'dotdo/fs'
+
+class MySite extends DO {
+  async loadContent() {
+    // $.fs is lazy-loaded from fsx
+    const content = await this.$.fs.read('content/index.mdx')
+    const files = await this.$.fs.list('content/')
+    await this.$.fs.write('cache/index.html', rendered)
+  }
+}
+```
+
+### As an RPC Service
+
+For heavy file operations, fsx can run as a separate Worker to keep your DO bundle small:
+
+```toml
+# wrangler.toml
+[[services]]
+binding = "FSX"
+service = "fsx-do"
+```
+
+```typescript
+// Heavy operations go through RPC
+const largeFile = await env.FSX.read('/data/huge-dataset.json')
+```
 
 ## Installation
 
