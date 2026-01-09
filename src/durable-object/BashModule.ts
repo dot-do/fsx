@@ -120,6 +120,16 @@ export interface ParsedCommand {
 // ============================================================================
 
 /**
+ * Command-specific flags that expect a value
+ * Maps flag character to set of commands where it takes a value
+ */
+const VALUE_FLAGS_BY_COMMAND: Record<string, Set<string>> = {
+  'n': new Set(['head', 'tail']),  // -n takes value for head/tail but not echo/cat
+  'c': new Set(['head', 'tail']),  // -c bytes for head/tail
+  'm': new Set(['chmod']),         // -m mode for mkdir
+}
+
+/**
  * Commands that are natively supported via FsModule
  */
 const FS_NATIVE_COMMANDS = new Set([
@@ -394,7 +404,7 @@ export class BashModule {
       }
 
       // Flags
-      if (token.startsWith('-')) {
+      if (token.startsWith('-') && token.length > 1 && !/^-?\d+$/.test(token)) {
         if (token.startsWith('--')) {
           // Long flag
           const eqIndex = token.indexOf('=')
@@ -406,10 +416,23 @@ export class BashModule {
             result.flags[token.substring(2)] = true
           }
         } else {
-          // Short flags
+          // Short flags - handle flags that take values (like -n 10)
           const flagChars = token.substring(1)
-          for (const char of flagChars) {
-            result.flags[char] = true
+
+          // Check if this is a single-char flag that might take a value for this command
+          const valueCommands = VALUE_FLAGS_BY_COMMAND[flagChars]
+          if (flagChars.length === 1 && valueCommands && valueCommands.has(result.command)) {
+            // Peek at next token to see if it's a value
+            if (i + 1 < tokens.length && !tokens[i + 1].startsWith('-')) {
+              result.flags[flagChars] = tokens[++i]
+            } else {
+              result.flags[flagChars] = true
+            }
+          } else {
+            // Handle combined flags or flags without values
+            for (const char of flagChars) {
+              result.flags[char] = true
+            }
           }
         }
         result.args.push(token)
@@ -661,6 +684,11 @@ export class BashModule {
     try {
       // Execute command
       const result = await this.executeCommand(analysis.parsed)
+
+      // In strict mode, throw if command failed
+      if (this.strict && result.exitCode !== 0) {
+        throw new Error(result.stderr || `Command exited with code ${result.exitCode}`)
+      }
 
       return {
         exitCode: result.exitCode,
@@ -1165,7 +1193,9 @@ export class BashModule {
 
     // Handle stdin
     if (files.length === 0 && stdin !== undefined) {
-      const lines = stdin.split('\n').slice(0, numLines)
+      // Remove trailing newline before splitting to get accurate line count
+      const trimmed = stdin.endsWith('\n') ? stdin.slice(0, -1) : stdin
+      const lines = trimmed.split('\n').slice(0, numLines)
       return { exitCode: 0, stdout: lines.join('\n') + '\n', stderr: '' }
     }
 
@@ -1174,7 +1204,9 @@ export class BashModule {
       try {
         const path = this.resolvePath(file)
         const content = await this.fs.read(path, { encoding: 'utf-8' }) as string
-        const lines = content.split('\n').slice(0, numLines)
+        // Remove trailing newline before splitting to get accurate line count
+        const trimmed = content.endsWith('\n') ? content.slice(0, -1) : content
+        const lines = trimmed.split('\n').slice(0, numLines)
 
         if (files.length > 1) {
           output += `==> ${file} <==\n`
@@ -1197,7 +1229,9 @@ export class BashModule {
 
     // Handle stdin
     if (files.length === 0 && stdin !== undefined) {
-      const lines = stdin.split('\n')
+      // Remove trailing newline before splitting to get accurate line count
+      const trimmed = stdin.endsWith('\n') ? stdin.slice(0, -1) : stdin
+      const lines = trimmed.split('\n')
       const lastLines = lines.slice(-numLines)
       return { exitCode: 0, stdout: lastLines.join('\n') + '\n', stderr: '' }
     }
@@ -1207,7 +1241,9 @@ export class BashModule {
       try {
         const path = this.resolvePath(file)
         const content = await this.fs.read(path, { encoding: 'utf-8' }) as string
-        const lines = content.split('\n')
+        // Remove trailing newline before splitting to get accurate line count
+        const trimmed = content.endsWith('\n') ? content.slice(0, -1) : content
+        const lines = trimmed.split('\n')
         const lastLines = lines.slice(-numLines)
 
         if (files.length > 1) {
@@ -1471,10 +1507,12 @@ export class BashModule {
    * test / [ - evaluate conditional expression
    */
   private async execTest(parsed: ParsedCommand): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const args = parsed.args.filter((a) => !a.startsWith('-') || a === '-e' || a === '-f' || a === '-d' || a === '-r' || a === '-w' || a === '-x' || a === '-s' || a === '-z' || a === '-n')
+    // For test command, we want all args including operators like -gt, -lt, etc.
+    // Filter only applies to standard flags like -n (which for test is a test operator, not a flag)
+    const args = [...parsed.args]
 
     // Remove trailing ] if present
-    if (args[args.length - 1] === ']') {
+    if (args.length > 0 && args[args.length - 1] === ']') {
       args.pop()
     }
 

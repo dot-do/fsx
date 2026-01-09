@@ -42,6 +42,23 @@ import type { FileType, Dirent as DirentClass } from '../core/types.js'
 export { FsModule, type FsModuleConfig } from './module.js'
 export { withFs, hasFs, getFs, type WithFsContext, type WithFsOptions, type WithFsDO } from './mixin.js'
 
+// Re-export BashModule and related types for fsx/do entry point
+export {
+  BashModule,
+  type BashModuleConfig,
+  type ExecResult,
+  type SafetyAnalysis,
+  type ParsedCommand,
+} from './BashModule.js'
+export {
+  withBash,
+  hasBash,
+  getBash,
+  type WithBashContext,
+  type WithBashOptions,
+  type WithBashDO,
+} from './bash-mixin.js'
+
 interface Env {
   FSX: DurableObjectNamespace
   R2?: R2Bucket
