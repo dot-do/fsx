@@ -848,7 +848,14 @@ export interface BlobRef {
   size: number
   checksum: string
   createdAt: number
+  /** Index signature for SqlStorage compatibility */
+  [key: string]: SqlStorageValue
 }
+
+/**
+ * Valid SqlStorage value types
+ */
+export type SqlStorageValue = string | number | null | ArrayBuffer
 
 // =============================================================================
 // FsCapability Interface

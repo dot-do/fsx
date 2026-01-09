@@ -65,12 +65,11 @@ export interface WithFsContext {
 }
 
 /**
- * Type for a class with the fs mixin applied
+ * Type for a class with the fs mixin applied.
  */
-export interface WithFsDO<TBase extends Constructor<HasWorkflowContext & HasDurableObjectContext>>
-  extends InstanceType<TBase> {
+export type WithFsDO<TBase extends Constructor<HasWorkflowContext & HasDurableObjectContext>> = {
   $: WithFsContext
-}
+} & InstanceType<TBase>
 
 /**
  * Options for configuring the fs mixin
@@ -90,8 +89,9 @@ export interface WithFsOptions {
   archiveBindingName?: string
 }
 
-// Symbol for caching the fs capability instance
-const FS_CAPABILITY_CACHE = Symbol('fsCapabilityCache')
+// WeakMap for caching the fs capability instance
+// Using WeakMap instead of private class members to avoid TypeScript export issues
+const fsCapabilityCache = new WeakMap<object, FsModule>()
 
 // ============================================================================
 // MIXIN FUNCTION
@@ -135,15 +135,12 @@ export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurable
     static capabilities = [...((Base as any).capabilities || []), 'fs']
 
     /**
-     * Cache for the FsModule instance
-     */
-    private [FS_CAPABILITY_CACHE]?: FsModule
-
-    /**
      * Get the FsModule instance (lazy-loaded)
+     * @internal
      */
-    private get fsCapability(): FsModule {
-      if (!this[FS_CAPABILITY_CACHE]) {
+    get _fsCapability(): FsModule {
+      let cached = fsCapabilityCache.get(this)
+      if (!cached) {
         // Get R2 bindings from env
         const r2BindingName = options.r2BindingName ?? 'R2'
         const archiveBindingName = options.archiveBindingName ?? 'ARCHIVE'
@@ -158,9 +155,10 @@ export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurable
           defaultDirMode: options.defaultDirMode,
         }
 
-        this[FS_CAPABILITY_CACHE] = new FsModule(config)
+        cached = new FsModule(config)
+        fsCapabilityCache.set(this, cached)
       }
-      return this[FS_CAPABILITY_CACHE]
+      return cached
     }
 
     /**
@@ -187,7 +185,7 @@ export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurable
       this.$ = new Proxy(originalContext as WithFsContext, {
         get(target, prop: string | symbol) {
           if (prop === 'fs') {
-            return self.fsCapability
+            return self._fsCapability
           }
           // Forward to original context
           const value = (target as any)[prop]
@@ -209,7 +207,7 @@ export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurable
               configurable: true,
               enumerable: true,
               writable: false,
-              value: self.fsCapability,
+              value: self._fsCapability,
             }
           }
           return Reflect.getOwnPropertyDescriptor(target, prop)

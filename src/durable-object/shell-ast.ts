@@ -1023,7 +1023,7 @@ export class AstSafetyAnalyzer {
     }
 
     // Check if command is not in allowlist (when allowlist mode is enabled)
-    if (this.config.allowedCommands !== null && !this.config.allowedCommands.has(cmdName)) {
+    if (this.config.allowedCommands != null && !this.config.allowedCommands.has(cmdName)) {
       this.issues.push({
         severity: 'high',
         code: 'NOT_ALLOWED',

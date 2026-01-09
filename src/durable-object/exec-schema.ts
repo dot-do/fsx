@@ -240,6 +240,7 @@ interface PolicyRow {
   created_at: number
   updated_at: number
   is_active: number
+  [key: string]: SqlStorageValue
 }
 
 interface OverrideRow {
@@ -252,6 +253,7 @@ interface OverrideRow {
   created_at: number
   expires_at: number | null
   is_active: number
+  [key: string]: SqlStorageValue
 }
 
 interface HistoryRow {
@@ -263,6 +265,7 @@ interface HistoryRow {
   cwd: string
   duration: number
   executed_at: number
+  [key: string]: SqlStorageValue
 }
 
 // ============================================================================

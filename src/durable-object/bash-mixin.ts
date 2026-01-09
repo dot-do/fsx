@@ -152,12 +152,11 @@ export interface WithBashContext {
 }
 
 /**
- * Type for a class with the bash mixin applied
+ * Type for a class with the bash mixin applied.
  */
-export interface WithBashDO<TBase extends Constructor<HasFsContext & HasDurableObjectContext>>
-  extends InstanceType<TBase> {
+export type WithBashDO<TBase extends Constructor<HasFsContext & HasDurableObjectContext>> = {
   $: WithBashContext
-}
+} & InstanceType<TBase>
 
 /**
  * Options for configuring the bash mixin
@@ -177,8 +176,9 @@ export interface WithBashOptions {
   blockedCommands?: string[]
 }
 
-// Symbol for caching the bash capability instance
-const BASH_CAPABILITY_CACHE = Symbol('bashCapabilityCache')
+// WeakMap for caching the bash capability instance
+// Using WeakMap instead of private class members to avoid TypeScript export issues
+const bashCapabilityCache = new WeakMap<object, CallableBashModule>()
 
 // ============================================================================
 // MIXIN FUNCTION
@@ -230,18 +230,15 @@ export function withBash<TBase extends Constructor<HasFsContext & HasDurableObje
     static capabilities = [...((Base as any).capabilities || []), 'bash']
 
     /**
-     * Cache for the CallableBashModule instance
-     */
-    private [BASH_CAPABILITY_CACHE]?: CallableBashModule
-
-    /**
      * Get the CallableBashModule instance (lazy-loaded)
      * Returns a callable that supports both:
      * - `this.$.bash.exec('command')`
      * - `this.$.bash`command ${var}``
+     * @internal
      */
-    private get bashCapability(): CallableBashModule {
-      if (!this[BASH_CAPABILITY_CACHE]) {
+    get _bashCapability(): CallableBashModule {
+      let cached = bashCapabilityCache.get(this)
+      if (!cached) {
         // Get fs from context - withFs must be applied first
         const fs = (this.$ as any).fs as FsModule
 
@@ -263,9 +260,10 @@ export function withBash<TBase extends Constructor<HasFsContext & HasDurableObje
         }
 
         const bashModule = new BashModule(config)
-        this[BASH_CAPABILITY_CACHE] = createCallableBash(bashModule)
+        cached = createCallableBash(bashModule)
+        bashCapabilityCache.set(this, cached)
       }
-      return this[BASH_CAPABILITY_CACHE]
+      return cached
     }
 
     /**
@@ -292,7 +290,7 @@ export function withBash<TBase extends Constructor<HasFsContext & HasDurableObje
       this.$ = new Proxy(originalContext as WithBashContext, {
         get(target, prop: string | symbol) {
           if (prop === 'bash') {
-            return self.bashCapability
+            return self._bashCapability
           }
           // Forward to original context
           const value = (target as any)[prop]
@@ -314,7 +312,7 @@ export function withBash<TBase extends Constructor<HasFsContext & HasDurableObje
               configurable: true,
               enumerable: true,
               writable: false,
-              value: self.bashCapability,
+              value: self._bashCapability,
             }
           }
           return Reflect.getOwnPropertyDescriptor(target, prop)

@@ -31,8 +31,6 @@ import type {
   RemoveOptions,
   ReaddirOptions,
   Stats,
-  Dirent,
-  FileHandle,
   FSWatcher,
   WatchOptions,
   ReadStreamOptions,
@@ -40,7 +38,10 @@ import type {
   MoveOptions,
   CopyOptions,
   StatsInit,
+  DirentType,
+  StatsLike,
 } from '../core/types.js'
+import { Dirent, FileHandle } from '../core/types.js'
 import { constants } from '../core/constants.js'
 import { ENOENT, EEXIST, EISDIR, ENOTDIR, ENOTEMPTY, EACCES } from '../core/errors.js'
 
@@ -89,6 +90,7 @@ interface FileEntry {
   ctime: number
   birthtime: number
   nlink: number
+  [key: string]: SqlStorageValue
 }
 
 // ============================================================================
@@ -782,18 +784,7 @@ export class FsModule implements FsCapability {
     const children = this.sql.exec<FileEntry>('SELECT * FROM files WHERE parent_id = ?', file.id).toArray()
 
     if (options?.withFileTypes) {
-      const result: Dirent[] = children.map((child) => ({
-        name: child.name,
-        parentPath: normalized,
-        path: child.path,
-        isFile: () => child.type === 'file',
-        isDirectory: () => child.type === 'directory',
-        isSymbolicLink: () => child.type === 'symlink',
-        isBlockDevice: () => false,
-        isCharacterDevice: () => false,
-        isFIFO: () => false,
-        isSocket: () => false,
-      }))
+      const result: Dirent[] = children.map((child) => new Dirent(child.name, normalized, child.type as DirentType))
 
       if (options.recursive) {
         for (const child of children) {
@@ -1232,7 +1223,7 @@ export class FsModule implements FsCapability {
           },
         })
       },
-    }
+    } as FileHandle
   }
 
   // ===========================================================================

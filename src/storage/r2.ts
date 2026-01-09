@@ -141,7 +141,7 @@ export class R2Storage {
 
     return {
       objects: result.objects,
-      cursor: result.cursor,
+      cursor: result.truncated ? result.cursor : undefined,
       truncated: result.truncated,
     }
   }

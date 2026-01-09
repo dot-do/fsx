@@ -29,6 +29,7 @@ interface FileRow {
   ctime: number
   birthtime: number
   nlink: number
+  [key: string]: SqlStorageValue
 }
 
 /**

@@ -133,6 +133,7 @@ interface AccessMetadataRow {
   access_count: number
   size: number
   created_at: number
+  [key: string]: SqlStorageValue
 }
 
 /**

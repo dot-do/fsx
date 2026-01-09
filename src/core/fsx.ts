@@ -495,7 +495,7 @@ export class FSx {
     // Return a FileHandle implementation
     return {
       fd,
-      read: async (buffer, offset, length, position) => {
+      read: async (buffer: Uint8Array, offset: number | undefined, length: number | undefined, position: number | undefined) => {
         const result = await this.request<{ bytesRead: number; data: string }>('read', {
           fd,
           length: length ?? buffer.length,
@@ -507,7 +507,7 @@ export class FSx {
         }
         return { bytesRead: result.bytesRead, buffer }
       },
-      write: async (data, position) => {
+      write: async (data: Uint8Array | string, position?: number) => {
         let encoded: string
         if (typeof data === 'string') {
           encoded = btoa(data)
@@ -522,15 +522,15 @@ export class FSx {
         return result
       },
       stat: () => this.request('fstat', { fd }).then(this.hydrateStats.bind(this)),
-      truncate: (length) => this.request('ftruncate', { fd, length }),
+      truncate: (length?: number) => this.request('ftruncate', { fd, length }),
       sync: () => this.request('fsync', { fd }),
       close: () => this.request('close', { fd }),
-      createReadStream: (options) => {
+      createReadStream: (options?: ReadStreamOptions) => {
         throw new Error('Not implemented')
       },
-      createWriteStream: (options) => {
+      createWriteStream: (options?: WriteStreamOptions) => {
         throw new Error('Not implemented')
       },
-    }
+    } as unknown as FileHandle
   }
 }
