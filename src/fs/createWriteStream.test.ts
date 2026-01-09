@@ -18,49 +18,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-// Note: These imports will fail until implementation exists
-// import { createWriteStream, setStorage, type CreateWriteStreamStorage } from './createWriteStream'
+import { createWriteStream, setStorage, type CreateWriteStreamStorage, type WriteStreamOptions } from './createWriteStream'
 import { ENOENT, EISDIR, EEXIST } from '../core/errors'
-
-/**
- * Options for createWriteStream (expected interface)
- */
-interface WriteStreamOptions {
-  /** Start position for writing, default: 0 (overwrite) */
-  start?: number
-  /** File flags ('w' for write, 'a' for append) */
-  flags?: 'w' | 'a' | 'wx' | 'ax'
-  /** File mode (permissions), default: 0o644 */
-  mode?: number
-  /** Content type for R2 metadata */
-  contentType?: string
-  /** Abort signal for cancellation */
-  signal?: AbortSignal
-  /** Chunk size for multipart upload, default: 5MB */
-  partSize?: number
-}
-
-/**
- * Storage interface for createWriteStream (expected interface)
- */
-interface CreateWriteStreamStorage {
-  parentExists(path: string): boolean
-  isDirectory(path: string): boolean
-  exists(path: string): boolean
-  getFile(path: string): { content: Uint8Array; metadata: { mode: number } } | undefined
-  writeFile(path: string, data: Uint8Array, options?: { mode?: number; contentType?: string }): Promise<void>
-}
 
 describe('createWriteStream', () => {
   // Mock filesystem state for testing
   let mockFs: Map<string, { content: Uint8Array; isDirectory: boolean; metadata?: { mode: number } }>
   let mockDirs: Set<string>
-
-  // Placeholder function - will be replaced by actual import once implemented
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  let createWriteStream: (path: string, options?: WriteStreamOptions) => Promise<WritableStream<Uint8Array>>
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  let setStorage: (s: CreateWriteStreamStorage | null) => void
 
   beforeEach(() => {
     mockFs = new Map()
@@ -104,23 +68,11 @@ describe('createWriteStream', () => {
       },
     }
 
-    // TODO: Uncomment when implementation exists
-    // setStorage(storage)
-
-    // Placeholder implementation that throws - will be replaced by import
-    createWriteStream = async () => {
-      throw new Error('createWriteStream not implemented yet')
-    }
-    setStorage = () => {
-      // Placeholder
-    }
-    // Suppress unused variable warning by using setStorage
     setStorage(storage)
   })
 
   afterEach(() => {
-    // TODO: Uncomment when implementation exists
-    // setStorage(null)
+    setStorage(null)
   })
 
   /**
