@@ -1,11 +1,46 @@
 /**
- * FileSystemDO - Durable Object implementation for filesystem
+ * fsx/do - Durable Object filesystem integration
+ *
+ * This module provides filesystem capabilities for Cloudflare Durable Objects:
+ *
+ * - FsModule: Standalone filesystem module with lazy initialization
+ * - withFs: Mixin function to add $.fs capability to DO classes
+ * - FileSystemDO: Complete Durable Object with HTTP API
+ *
+ * @example
+ * ```typescript
+ * // Using FsModule directly
+ * import { FsModule } from 'fsx/do'
+ *
+ * const fs = new FsModule({ sql: ctx.storage.sql })
+ * await fs.initialize()
+ * await fs.write('/config.json', JSON.stringify(config))
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // Using withFs mixin with dotdo
+ * import { withFs } from 'fsx/do'
+ * import { DO } from 'dotdo'
+ *
+ * class MySite extends withFs(DO) {
+ *   async loadContent() {
+ *     return this.$.fs.read('/content/index.mdx', { encoding: 'utf-8' })
+ *   }
+ * }
+ * ```
+ *
+ * @module fsx/do
  */
 
 import { DurableObject } from 'cloudflare:workers'
 import { Hono } from 'hono'
 import { constants } from '../core/constants.js'
 import type { FileEntry, FileType, Stats, Dirent } from '../core/types.js'
+
+// Re-export FsModule and related types for fsx/do entry point
+export { FsModule, type FsModuleConfig } from './module.js'
+export { withFs, hasFs, getFs, type WithFsContext, type WithFsOptions, type WithFsDO } from './mixin.js'
 
 interface Env {
   FSX: DurableObjectNamespace
