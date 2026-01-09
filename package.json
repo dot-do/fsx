@@ -1,6 +1,6 @@
 {
   "name": "fsx.do",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Filesystem on Cloudflare Durable Objects - A virtual filesystem for the edge",
   "type": "module",
   "main": "dist/index.js",
