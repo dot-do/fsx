@@ -1273,6 +1273,246 @@ describe('BashModule', () => {
   })
 
   // ==========================================================================
+  // Critical Safety Classification Tests
+  // ==========================================================================
+
+  describe('critical safety classification', () => {
+    beforeEach(async () => {
+      await bash.initialize()
+    })
+
+    describe('classification types', () => {
+      it('should classify safe commands as "safe"', () => {
+        const analysis = bash.analyze('echo hello')
+        expect(analysis.classification).toBe('safe')
+        expect(analysis.safe).toBe(true)
+      })
+
+      it('should classify blocked commands as "dangerous"', () => {
+        const analysis = bash.analyze('wget http://example.com')
+        expect(analysis.classification).toBe('dangerous')
+        expect(analysis.safe).toBe(false)
+      })
+
+      it('should classify rm -rf / as "critical"', () => {
+        const analysis = bash.analyze('rm -rf /')
+        expect(analysis.classification).toBe('critical')
+        expect(analysis.safe).toBe(false)
+        expect(analysis.risk).toBe('critical')
+      })
+
+      it('should classify rm -rf /* as "critical"', () => {
+        const analysis = bash.analyze('rm -rf /*')
+        expect(analysis.classification).toBe('critical')
+        expect(analysis.safe).toBe(false)
+      })
+    })
+
+    describe('critical commands that can NEVER be executed', () => {
+      it('should always block rm -rf /', async () => {
+        const result = await bash.exec('rm -rf /')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block rm -rf /*', async () => {
+        const result = await bash.exec('rm -rf /*')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block rm -rf /bin', async () => {
+        const result = await bash.exec('rm -rf /bin')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block rm -rf /usr', async () => {
+        const result = await bash.exec('rm -rf /usr')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block rm -rf /etc', async () => {
+        const result = await bash.exec('rm -rf /etc')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block dd of=/dev/sda', async () => {
+        const result = await bash.exec('dd if=/dev/zero of=/dev/sda')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block dd to NVMe devices', async () => {
+        const result = await bash.exec('dd if=/dev/zero of=/dev/nvme0n1')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block mkfs on disk devices', async () => {
+        const result = await bash.exec('mkfs.ext4 /dev/sda')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block redirect to /dev/mem', async () => {
+        const result = await bash.exec('echo test > /dev/mem')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+
+      it('should always block redirect to disk devices', async () => {
+        const result = await bash.exec('echo test > /dev/sda')
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('CRITICAL')
+      })
+    })
+
+    describe('critical patterns analysis', () => {
+      it('should detect rm -rf / variations', () => {
+        expect(bash.analyze('rm -rf /').classification).toBe('critical')
+        expect(bash.analyze('rm -r -f /').classification).toBe('critical')
+        expect(bash.analyze('rm -fr /').classification).toBe('critical')
+      })
+
+      it('should detect system directory deletion', () => {
+        expect(bash.analyze('rm -rf /bin').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /sbin').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /usr').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /lib').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /lib64').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /etc').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /boot').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /dev').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /proc').classification).toBe('critical')
+        expect(bash.analyze('rm -rf /sys').classification).toBe('critical')
+      })
+
+      it('should detect dd to block devices', () => {
+        expect(bash.analyze('dd if=/dev/zero of=/dev/sda').classification).toBe('critical')
+        expect(bash.analyze('dd if=/dev/zero of=/dev/hda').classification).toBe('critical')
+        expect(bash.analyze('dd if=/dev/zero of=/dev/nvme0n1').classification).toBe('critical')
+        expect(bash.analyze('dd if=/dev/zero of=/dev/vda').classification).toBe('critical')
+      })
+
+      it('should detect mkfs commands', () => {
+        expect(bash.analyze('mkfs /dev/sda').classification).toBe('critical')
+        expect(bash.analyze('mkfs.ext4 /dev/sda1').classification).toBe('critical')
+      })
+    })
+
+    describe('critical commands cannot be overridden', () => {
+      // Note: These tests verify that even with configuration changes,
+      // critical commands remain blocked
+
+      it('should block rm -rf / even with custom allowed commands', () => {
+        const permissiveBash = new BashModule({
+          fs: mockFs as unknown as FsModule,
+          allowedCommands: ['rm'], // Allow rm in general
+        })
+
+        const analysis = permissiveBash.analyze('rm -rf /')
+        expect(analysis.classification).toBe('critical')
+        expect(analysis.safe).toBe(false)
+      })
+
+      it('should block rm -rf / even with empty blocked commands list', () => {
+        const permissiveBash = new BashModule({
+          fs: mockFs as unknown as FsModule,
+          blockedCommands: [], // No blocked commands
+        })
+
+        const analysis = permissiveBash.analyze('rm -rf /')
+        expect(analysis.classification).toBe('critical')
+        expect(analysis.safe).toBe(false)
+      })
+
+      it('should block dd to devices regardless of configuration', () => {
+        const permissiveBash = new BashModule({
+          fs: mockFs as unknown as FsModule,
+          blockedCommands: [], // No blocked commands
+          allowedCommands: ['dd'], // Allow dd
+        })
+
+        const analysis = permissiveBash.analyze('dd if=/dev/zero of=/dev/sda')
+        expect(analysis.classification).toBe('critical')
+        expect(analysis.safe).toBe(false)
+      })
+
+      it('should always block system directory deletion', () => {
+        const permissiveBash = new BashModule({
+          fs: mockFs as unknown as FsModule,
+          blockedCommands: [],
+        })
+
+        expect(permissiveBash.analyze('rm -rf /usr').classification).toBe('critical')
+        expect(permissiveBash.analyze('rm -rf /bin').classification).toBe('critical')
+      })
+    })
+
+    describe('dangerous vs critical distinction', () => {
+      it('should classify wget as dangerous (can be overridden)', () => {
+        const analysis = bash.analyze('wget http://example.com')
+        expect(analysis.classification).toBe('dangerous')
+        expect(analysis.risk).toBe('critical') // High risk but...
+        // ...dangerous means it CAN be overridden by policy
+      })
+
+      it('should classify curl as dangerous (can be overridden)', () => {
+        const analysis = bash.analyze('curl http://example.com')
+        expect(analysis.classification).toBe('dangerous')
+      })
+
+      it('should classify rm -rf / as critical (cannot be overridden)', () => {
+        const analysis = bash.analyze('rm -rf /')
+        expect(analysis.classification).toBe('critical')
+        // Critical means it can NEVER be allowed
+      })
+
+      it('should allow safe rm commands', async () => {
+        await mockFs.write('/temp/file.txt', 'content')
+        const analysis = bash.analyze('rm /temp/file.txt')
+        expect(analysis.classification).toBe('safe')
+        expect(analysis.safe).toBe(true)
+      })
+
+      it('should classify rm -rf on user paths as safe or medium risk', () => {
+        // rm -rf on a user path (not system) should be medium risk, not critical
+        const analysis = bash.analyze('rm -rf /home/user/temp')
+        expect(analysis.classification).toBe('safe') // It's risky but allowed
+        expect(analysis.risk).toBe('medium')
+      })
+    })
+
+    describe('execution blocking for critical commands', () => {
+      it('should never execute critical commands', async () => {
+        const criticalCommands = [
+          'rm -rf /',
+          'rm -rf /*',
+          'rm -rf /bin',
+          'rm -rf /usr',
+          'dd if=/dev/zero of=/dev/sda',
+          'mkfs /dev/sda',
+        ]
+
+        for (const cmd of criticalCommands) {
+          const result = await bash.exec(cmd)
+          expect(result.exitCode).toBe(1)
+          expect(result.stderr).toContain('Unsafe command blocked')
+          expect(result.stderr).toMatch(/CRITICAL|critical/i)
+        }
+      })
+
+      it('should include CRITICAL in the error message for critical commands', async () => {
+        const result = await bash.exec('rm -rf /')
+        expect(result.stderr).toContain('CRITICAL')
+      })
+    })
+  })
+
+  // ==========================================================================
   // Result Metadata Tests
   // ==========================================================================
 

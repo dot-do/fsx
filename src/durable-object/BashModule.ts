@@ -86,6 +86,14 @@ export interface ExecResult {
 }
 
 /**
+ * Safety classification determines how a command is handled:
+ * - 'safe': Command can be executed without confirmation
+ * - 'dangerous': Command requires confirmation but can be allowed via override
+ * - 'critical': Command is NEVER allowed, even with explicit override (e.g., rm -rf /, fork bombs)
+ */
+export type SafetyClassification = 'safe' | 'dangerous' | 'critical'
+
+/**
  * Safety analysis result
  */
 export interface SafetyAnalysis {
@@ -93,6 +101,13 @@ export interface SafetyAnalysis {
   safe: boolean
   /** Risk level: 'none', 'low', 'medium', 'high', 'critical' */
   risk: 'none' | 'low' | 'medium' | 'high' | 'critical'
+  /**
+   * Safety classification:
+   * - 'safe': Can be executed
+   * - 'dangerous': Requires confirmation but can be overridden
+   * - 'critical': NEVER allowed, cannot be overridden
+   */
+  classification: SafetyClassification
   /** Detailed reasons for the safety assessment */
   reasons: string[]
   /** Suggested alternatives if command is unsafe */
@@ -199,6 +214,50 @@ const DEFAULT_BLOCKED_COMMANDS = new Set([
   'rsync',
   'ftp',
 ])
+
+/**
+ * CRITICAL patterns that should NEVER be allowed, even with explicit override.
+ * These commands are so dangerous that no amount of confirmation should permit them.
+ */
+const CRITICAL_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  // Filesystem destruction
+  { pattern: /^rm\s+(-[rf]+\s+)*\/\s*$/, reason: 'Removes entire root filesystem' },
+  { pattern: /^rm\s+(-[rf]+\s+)*\/\*\s*$/, reason: 'Removes all files in root' },
+  { pattern: /^rm\s+-[rf]*\s+-[rf]*\s+\//, reason: 'Removes root filesystem' },
+
+  // Fork bombs and resource exhaustion
+  { pattern: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, reason: 'Fork bomb - causes system hang' },
+  { pattern: /\bfork\s*bomb\b/i, reason: 'Fork bomb detected' },
+  { pattern: /while\s*\(\s*true\s*\)\s*;\s*do\s*:\s*;\s*done\s*&/, reason: 'Infinite loop fork' },
+
+  // Direct disk destruction
+  { pattern: /dd\s+.*of\s*=\s*\/dev\/sd[a-z]\b/, reason: 'Direct write to disk device' },
+  { pattern: /dd\s+.*of\s*=\s*\/dev\/hd[a-z]\b/, reason: 'Direct write to disk device' },
+  { pattern: /dd\s+.*of\s*=\s*\/dev\/nvme\d+n\d+\b/, reason: 'Direct write to NVMe device' },
+  { pattern: /dd\s+.*of\s*=\s*\/dev\/vd[a-z]\b/, reason: 'Direct write to virtual disk' },
+
+  // System file corruption
+  { pattern: />\s*\/dev\/sd[a-z]\b/, reason: 'Redirect to disk device' },
+  { pattern: />\s*\/dev\/mem\b/, reason: 'Direct memory manipulation' },
+  { pattern: />\s*\/dev\/kmem\b/, reason: 'Kernel memory manipulation' },
+
+  // Filesystem formatting
+  { pattern: /mkfs\s+.*\/dev\/sd[a-z]/, reason: 'Format disk device' },
+  { pattern: /mkfs\s+.*\/dev\/hd[a-z]/, reason: 'Format disk device' },
+  { pattern: /mkfs\s+.*\/dev\/nvme/, reason: 'Format NVMe device' },
+
+  // System directories with recursive deletion
+  { pattern: /rm\s+-[rf]*\s+\/bin\b/, reason: 'Remove /bin directory' },
+  { pattern: /rm\s+-[rf]*\s+\/sbin\b/, reason: 'Remove /sbin directory' },
+  { pattern: /rm\s+-[rf]*\s+\/usr\b/, reason: 'Remove /usr directory' },
+  { pattern: /rm\s+-[rf]*\s+\/lib\b/, reason: 'Remove /lib directory' },
+  { pattern: /rm\s+-[rf]*\s+\/lib64\b/, reason: 'Remove /lib64 directory' },
+  { pattern: /rm\s+-[rf]*\s+\/etc\b/, reason: 'Remove /etc directory' },
+  { pattern: /rm\s+-[rf]*\s+\/boot\b/, reason: 'Remove /boot directory' },
+  { pattern: /rm\s+-[rf]*\s+\/dev\b/, reason: 'Remove /dev directory' },
+  { pattern: /rm\s+-[rf]*\s+\/proc\b/, reason: 'Remove /proc directory' },
+  { pattern: /rm\s+-[rf]*\s+\/sys\b/, reason: 'Remove /sys directory' },
+]
 
 /**
  * Patterns that indicate potentially dangerous commands
@@ -595,11 +654,12 @@ export class BashModule {
    * Analyze a command for safety before execution using AST-based analysis.
    *
    * This method performs comprehensive safety analysis by:
-   * 1. Parsing the command into an Abstract Syntax Tree (AST)
-   * 2. Analyzing the AST for dangerous constructs (command substitution, pipes to shell, etc.)
-   * 3. Checking against blocked/allowed command lists
-   * 4. Evaluating database-configured overrides
-   * 5. Assessing risk level based on command structure
+   * 1. First checking for CRITICAL patterns that can NEVER be overridden
+   * 2. Parsing the command into an Abstract Syntax Tree (AST)
+   * 3. Analyzing the AST for dangerous constructs (command substitution, pipes to shell, etc.)
+   * 4. Checking against blocked/allowed command lists
+   * 5. Evaluating database-configured overrides (only for non-critical commands)
+   * 6. Assessing risk level based on command structure
    *
    * @param command - The shell command string to analyze
    * @returns SafetyAnalysis object with comprehensive safety information
@@ -607,6 +667,22 @@ export class BashModule {
   analyze(command: string): SafetyAnalysis {
     const parsed = this.parseCommand(command)
     const expandedCommand = this.expandVars(command)
+
+    // FIRST: Check for CRITICAL patterns - these can NEVER be allowed, regardless of overrides
+    // This check happens before everything else to ensure critical commands cannot be bypassed
+    const criticalCheck = this.checkCriticalPatterns(expandedCommand)
+    if (criticalCheck) {
+      return {
+        safe: false,
+        risk: 'critical',
+        classification: 'critical',
+        reasons: [`CRITICAL: ${criticalCheck.reason}`],
+        delegatedToFs: false,
+        parsed,
+        ast: undefined,
+        issues: [],
+      }
+    }
 
     // Perform AST-based analysis
     let ast: AstNode | null = null
@@ -637,9 +713,12 @@ export class BashModule {
 
       if (criticalIssues.length > 0 || highIssues.length > 0) {
         const reasons = astResult.issues.map(i => `[${i.severity.toUpperCase()}] ${i.code}: ${i.message}`)
+        // Critical AST issues are also classified as 'critical' and cannot be overridden
+        const classification: SafetyClassification = criticalIssues.length > 0 ? 'critical' : 'dangerous'
         return {
           safe: false,
           risk: criticalIssues.length > 0 ? 'critical' : 'high',
+          classification,
           reasons,
           delegatedToFs: false,
           parsed,
@@ -650,6 +729,7 @@ export class BashModule {
     }
 
     // Check for per-command override from database
+    // NOTE: Overrides can only affect 'dangerous' commands, NOT 'critical' ones
     const override = this.getOverrideForCommand(parsed.command, expandedCommand)
     if (override) {
       if (override.action === 'allow') {
@@ -658,6 +738,7 @@ export class BashModule {
         return {
           safe: true,
           risk: 'low',
+          classification: 'safe',
           reasons: [`Command allowed by override: ${override.reason}`],
           delegatedToFs,
           parsed,
@@ -669,6 +750,7 @@ export class BashModule {
         return {
           safe: false,
           risk: 'critical',
+          classification: 'dangerous',  // Override-blocked commands are 'dangerous', not 'critical'
           reasons: [`Command blocked by override: ${override.reason}`],
           delegatedToFs: false,
           parsed,
@@ -683,6 +765,7 @@ export class BashModule {
       return {
         safe: false,
         risk: 'critical',
+        classification: 'dangerous',  // Blocked commands can be overridden
         reasons: [`Command "${parsed.command}" is blocked`],
         alternatives: this.getSafeAlternatives(parsed.command),
         delegatedToFs: false,
@@ -697,6 +780,7 @@ export class BashModule {
       return {
         safe: false,
         risk: 'high',
+        classification: 'dangerous',  // Not-in-whitelist can be overridden
         reasons: [`Command "${parsed.command}" is not in allowed list`],
         delegatedToFs: false,
         parsed,
@@ -719,6 +803,7 @@ export class BashModule {
       return {
         safe: false,
         risk: 'critical',
+        classification: 'critical',  // Pattern matches are treated as critical
         reasons: dangerousReasons,
         delegatedToFs: false,
         parsed,
@@ -743,15 +828,37 @@ export class BashModule {
       }
     }
 
+    // Determine classification based on final risk level
+    const classification: SafetyClassification = (risk === 'critical' || risk === 'high')
+      ? 'dangerous'
+      : 'safe'
+
     return {
       safe: risk !== 'critical' && risk !== 'high',
       risk,
+      classification,
       reasons: astResult?.issues.map(i => `[${i.severity}] ${i.code}: ${i.message}`) ?? [],
       delegatedToFs,
       parsed,
       ast: astResult,
       issues: astResult?.issues,
     }
+  }
+
+  /**
+   * Check if command matches any CRITICAL pattern that should NEVER be allowed.
+   * Critical patterns cannot be overridden by any means.
+   *
+   * @param command - The expanded command string to check
+   * @returns The matching critical pattern info, or null if no match
+   */
+  private checkCriticalPatterns(command: string): { pattern: RegExp; reason: string } | null {
+    for (const { pattern, reason } of CRITICAL_PATTERNS) {
+      if (pattern.test(command)) {
+        return { pattern, reason }
+      }
+    }
+    return null
   }
 
   /**
