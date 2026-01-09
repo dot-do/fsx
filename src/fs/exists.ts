@@ -65,7 +65,62 @@ export function getStorage(): ExistsStorage | null {
  * ```
  */
 export async function exists(path: string): Promise<boolean> {
-  // RED phase stub - not implemented yet
-  // This will cause tests to fail with incorrect behavior
-  throw new Error('exists() is not implemented yet')
+  // Handle edge cases that should return false
+  if (!path || path === '') {
+    return false
+  }
+
+  // Check if storage is configured
+  if (!storage) {
+    return false
+  }
+
+  // Import normalize here to avoid circular dependency issues
+  const { normalize } = await import('../core/path')
+
+  // Normalize the path
+  const normalizedPath = normalize(path)
+
+  // Handle trailing slash: POSIX treats trailing slash as "must be directory"
+  // So /file.txt/ should return false if file.txt is not a directory
+  const hasTrailingSlash = path.endsWith('/') && path !== '/'
+
+  // Look up the entry
+  const entry = storage.get(normalizedPath)
+
+  if (!entry) {
+    return false
+  }
+
+  // If path had trailing slash but entry is not a directory, return false
+  if (hasTrailingSlash && entry.type !== 'directory' && entry.type !== 'symlink') {
+    return false
+  }
+
+  // Handle symlinks - exists follows symlinks
+  if (entry.type === 'symlink') {
+    if (storage.resolveSymlink) {
+      const resolved = storage.resolveSymlink(normalizedPath)
+      if (!resolved) {
+        // Broken symlink - target doesn't exist
+        return false
+      }
+      // If resolved is still a symlink, it's a circular reference that couldn't be resolved
+      if (resolved.type === 'symlink') {
+        return false
+      }
+      // If trailing slash was used, verify target is a directory
+      if (hasTrailingSlash && resolved.type !== 'directory') {
+        return false
+      }
+      return true
+    } else {
+      // No resolveSymlink method available, can't follow symlink
+      // Return false since we can't verify target exists
+      return false
+    }
+  }
+
+  // Entry exists and is not a symlink
+  return true
 }
