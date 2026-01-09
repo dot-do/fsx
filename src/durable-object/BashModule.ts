@@ -30,6 +30,14 @@
 
 import type { FsModule } from './module.js'
 import type { Stats, Dirent } from '../core/types.js'
+import { ExecStore, type ExecSettings, type CommandOverride } from './exec-schema.js'
+import {
+  ShellParser,
+  AstSafetyAnalyzer,
+  type AstNode,
+  type AstSafetyResult,
+  type SafetyIssue,
+} from './shell-ast.js'
 
 // ============================================================================
 // TYPES
@@ -53,6 +61,10 @@ export interface BashModuleConfig {
   allowedCommands?: string[]
   /** Blocked commands blacklist (default: dangerous commands) */
   blockedCommands?: string[]
+  /** SqlStorage for persistent safety settings (optional) */
+  sql?: SqlStorage
+  /** Enable execution history logging (requires sql) */
+  enableHistory?: boolean
 }
 
 /**
@@ -89,6 +101,10 @@ export interface SafetyAnalysis {
   delegatedToFs: boolean
   /** Parsed command info */
   parsed: ParsedCommand
+  /** AST-based analysis result (when available) */
+  ast?: AstSafetyResult
+  /** Safety issues detected by AST analysis */
+  issues?: SafetyIssue[]
 }
 
 /**
@@ -224,6 +240,11 @@ export class BashModule {
   private allowedCommands: Set<string> | null
   private blockedCommands: Set<string>
   private initialized = false
+  private execStore: ExecStore | null = null
+  private dbSettings: ExecSettings | null = null
+  private enableHistory: boolean
+  private shellParser: ShellParser
+  private astAnalyzer: AstSafetyAnalyzer | null = null
 
   constructor(config: BashModuleConfig) {
     this.fs = config.fs
@@ -236,6 +257,15 @@ export class BashModule {
       ...DEFAULT_BLOCKED_COMMANDS,
       ...(config.blockedCommands ?? []),
     ])
+    this.enableHistory = config.enableHistory ?? false
+
+    // Initialize shell parser for AST-based analysis
+    this.shellParser = new ShellParser()
+
+    // Initialize ExecStore if SQL is provided
+    if (config.sql) {
+      this.execStore = new ExecStore(config.sql)
+    }
   }
 
   /**
@@ -246,6 +276,27 @@ export class BashModule {
 
     // Ensure FsModule is initialized
     await this.fs.exists('/')
+
+    // Load settings from database if available
+    if (this.execStore) {
+      await this.execStore.init()
+      this.dbSettings = await this.execStore.getSettings()
+
+      // Apply database settings (they override constructor config)
+      this.blockedCommands = this.dbSettings.blockedCommands
+      this.allowedCommands = this.dbSettings.allowedCommands
+      this.strict = this.dbSettings.strictMode
+      this.timeout = this.dbSettings.timeout
+    }
+
+    // Initialize AST safety analyzer with current settings
+    this.astAnalyzer = new AstSafetyAnalyzer({
+      blockedCommands: this.blockedCommands,
+      allowedCommands: this.allowedCommands,
+      allowCommandSubstitution: false,
+      allowPipeToShell: false,
+      allowBackgroundExecution: true,
+    })
 
     // Set default environment variables
     this.env.HOME = this.env.HOME ?? '/'
@@ -541,11 +592,91 @@ export class BashModule {
   // ===========================================================================
 
   /**
-   * Analyze a command for safety before execution
+   * Analyze a command for safety before execution using AST-based analysis.
+   *
+   * This method performs comprehensive safety analysis by:
+   * 1. Parsing the command into an Abstract Syntax Tree (AST)
+   * 2. Analyzing the AST for dangerous constructs (command substitution, pipes to shell, etc.)
+   * 3. Checking against blocked/allowed command lists
+   * 4. Evaluating database-configured overrides
+   * 5. Assessing risk level based on command structure
+   *
+   * @param command - The shell command string to analyze
+   * @returns SafetyAnalysis object with comprehensive safety information
    */
   analyze(command: string): SafetyAnalysis {
     const parsed = this.parseCommand(command)
     const expandedCommand = this.expandVars(command)
+
+    // Perform AST-based analysis
+    let ast: AstNode | null = null
+    let astResult: AstSafetyResult | undefined
+
+    try {
+      ast = this.shellParser.parse(expandedCommand)
+
+      // Use pre-initialized analyzer if available, otherwise create a new one
+      const analyzer = this.astAnalyzer ?? new AstSafetyAnalyzer({
+        blockedCommands: this.blockedCommands,
+        allowedCommands: this.allowedCommands,
+        allowCommandSubstitution: false,
+        allowPipeToShell: false,
+        allowBackgroundExecution: true,
+      })
+
+      astResult = analyzer.analyze(ast)
+    } catch {
+      // If AST parsing fails, continue with regex-based analysis
+      astResult = undefined
+    }
+
+    // If AST analysis found critical issues, reject immediately
+    if (astResult && !astResult.safe) {
+      const criticalIssues = astResult.issues.filter(i => i.severity === 'critical')
+      const highIssues = astResult.issues.filter(i => i.severity === 'high')
+
+      if (criticalIssues.length > 0 || highIssues.length > 0) {
+        const reasons = astResult.issues.map(i => `[${i.severity.toUpperCase()}] ${i.code}: ${i.message}`)
+        return {
+          safe: false,
+          risk: criticalIssues.length > 0 ? 'critical' : 'high',
+          reasons,
+          delegatedToFs: false,
+          parsed,
+          ast: astResult,
+          issues: astResult.issues,
+        }
+      }
+    }
+
+    // Check for per-command override from database
+    const override = this.getOverrideForCommand(parsed.command, expandedCommand)
+    if (override) {
+      if (override.action === 'allow') {
+        // Command is explicitly allowed by override
+        const delegatedToFs = FS_NATIVE_COMMANDS.has(parsed.command)
+        return {
+          safe: true,
+          risk: 'low',
+          reasons: [`Command allowed by override: ${override.reason}`],
+          delegatedToFs,
+          parsed,
+          ast: astResult,
+          issues: astResult?.issues,
+        }
+      } else {
+        // Command is explicitly blocked by override
+        return {
+          safe: false,
+          risk: 'critical',
+          reasons: [`Command blocked by override: ${override.reason}`],
+          delegatedToFs: false,
+          parsed,
+          ast: astResult,
+          issues: astResult?.issues,
+        }
+      }
+    }
 
     // Check if command is blocked
     if (this.blockedCommands.has(parsed.command)) {
@@ -556,6 +687,8 @@ export class BashModule {
         alternatives: this.getSafeAlternatives(parsed.command),
         delegatedToFs: false,
         parsed,
+        ast: astResult,
+        issues: astResult?.issues,
       }
     }
 
@@ -567,12 +700,16 @@ export class BashModule {
         reasons: [`Command "${parsed.command}" is not in allowed list`],
         delegatedToFs: false,
         parsed,
+        ast: astResult,
+        issues: astResult?.issues,
       }
     }
 
-    // Check for dangerous patterns
+    // Check for dangerous patterns (use db patterns if available)
+    // This is a fallback for cases where AST parsing might miss something
+    const patterns = this.dbSettings?.dangerousPatterns ?? DANGEROUS_PATTERNS
     const dangerousReasons: string[] = []
-    for (const pattern of DANGEROUS_PATTERNS) {
+    for (const pattern of patterns) {
       if (pattern.test(expandedCommand)) {
         dangerousReasons.push(`Matches dangerous pattern: ${pattern.source}`)
       }
@@ -585,22 +722,102 @@ export class BashModule {
         reasons: dangerousReasons,
         delegatedToFs: false,
         parsed,
+        ast: astResult,
+        issues: astResult?.issues,
       }
     }
 
     // Check if command can be delegated to FsModule
     const delegatedToFs = FS_NATIVE_COMMANDS.has(parsed.command)
 
-    // Determine risk level based on command
-    const risk = this.assessRisk(parsed)
+    // Determine risk level based on command and AST analysis
+    let risk = this.assessRisk(parsed)
+
+    // Incorporate medium-severity AST issues into risk assessment
+    if (astResult) {
+      const mediumIssues = astResult.issues.filter(i => i.severity === 'medium')
+      if (mediumIssues.length > 0 && risk === 'none') {
+        risk = 'low'
+      } else if (mediumIssues.length > 0 && risk === 'low') {
+        risk = 'medium'
+      }
+    }
 
     return {
       safe: risk !== 'critical' && risk !== 'high',
       risk,
-      reasons: [],
+      reasons: astResult?.issues.map(i => `[${i.severity}] ${i.code}: ${i.message}`) ?? [],
       delegatedToFs,
       parsed,
+      ast: astResult,
+      issues: astResult?.issues,
     }
+  }
+
+  /**
+   * Perform deep AST analysis on a command string.
+   * This method provides detailed AST information without safety decisions.
+   *
+   * @param command - The shell command string to analyze
+   * @returns The AST safety result with detailed information
+   */
+  analyzeAst(command: string): AstSafetyResult {
+    const expandedCommand = this.expandVars(command)
+    const ast = this.shellParser.parse(expandedCommand)
+
+    const analyzer = this.astAnalyzer ?? new AstSafetyAnalyzer({
+      blockedCommands: this.blockedCommands,
+      allowedCommands: this.allowedCommands,
+      allowCommandSubstitution: false,
+      allowPipeToShell: false,
+      allowBackgroundExecution: true,
+    })
+
+    return analyzer.analyze(ast)
+  }
+
+  /**
+   * Parse a command into an AST without safety analysis.
+   * Useful for debugging and inspection.
+   *
+   * @param command - The shell command string to parse
+   * @returns The parsed AST node, or null if parsing fails
+   */
+  parseAst(command: string): AstNode | null {
+    try {
+      return this.shellParser.parse(command)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Check if there's an override for this command (from database settings)
+   */
+  private getOverrideForCommand(command: string, fullCommand: string): CommandOverride | null {
+    if (!this.dbSettings?.overrides) return null
+
+    // Check exact match first
+    const exactMatch = this.dbSettings.overrides.get(command)
+    if (exactMatch && !exactMatch.isPattern) {
+      return exactMatch
+    }
+
+    // Check pattern matches
+    for (const [pattern, override] of this.dbSettings.overrides) {
+      if (override.isPattern) {
+        try {
+          const regex = new RegExp(pattern)
+          if (regex.test(fullCommand)) {
+            return override
+          }
+        } catch {
+          // Invalid regex, skip
+        }
+      }
+    }
+
+    return null
   }
 
   /**
@@ -670,20 +887,49 @@ export class BashModule {
     const analysis = this.analyze(expandedCommand)
 
     if (!analysis.safe) {
+      const duration = Date.now() - startTime
       const errorMsg = `Unsafe command blocked: ${analysis.reasons.join(', ')}`
+
+      // Log blocked command if history enabled
+      if (this.enableHistory && this.execStore) {
+        await this.execStore.logExecution({
+          command: expandedCommand,
+          exitCode: 1,
+          wasBlocked: true,
+          blockReason: errorMsg,
+          cwd: this.cwd,
+          duration,
+          executedAt: Date.now(),
+        })
+      }
+
       return {
         exitCode: 1,
         stdout: '',
         stderr: errorMsg,
         command: expandedCommand,
         cwd: this.cwd,
-        duration: Date.now() - startTime,
+        duration,
       }
     }
 
     try {
       // Execute command
       const result = await this.executeCommand(analysis.parsed)
+      const duration = Date.now() - startTime
+
+      // Log successful execution if history enabled
+      if (this.enableHistory && this.execStore) {
+        await this.execStore.logExecution({
+          command: expandedCommand,
+          exitCode: result.exitCode,
+          wasBlocked: false,
+          blockReason: null,
+          cwd: this.cwd,
+          duration,
+          executedAt: Date.now(),
+        })
+      }
 
       // In strict mode, throw if command failed
       if (this.strict && result.exitCode !== 0) {
@@ -696,10 +942,25 @@ export class BashModule {
         stderr: result.stderr,
         command: expandedCommand,
         cwd: this.cwd,
-        duration: Date.now() - startTime,
+        duration,
       }
     } catch (error: any) {
+      const duration = Date.now() - startTime
       const stderr = error.message || String(error)
+
+      // Log failed execution if history enabled
+      if (this.enableHistory && this.execStore) {
+        await this.execStore.logExecution({
+          command: expandedCommand,
+          exitCode: 1,
+          wasBlocked: false,
+          blockReason: null,
+          cwd: this.cwd,
+          duration,
+          executedAt: Date.now(),
+        })
+      }
+
       if (this.strict) {
         throw error
       }
@@ -709,7 +970,7 @@ export class BashModule {
         stderr,
         command: expandedCommand,
         cwd: this.cwd,
-        duration: Date.now() - startTime,
+        duration,
       }
     }
   }
@@ -1609,6 +1870,85 @@ export class BashModule {
   }
 
   // ===========================================================================
+  // TAGGED TEMPLATE SUPPORT
+  // ===========================================================================
+
+  /**
+   * Escape a value for safe use in a shell command.
+   * Handles strings, numbers, arrays, and other types.
+   *
+   * @param value - The value to escape
+   * @returns Shell-safe escaped string
+   */
+  private escapeShellArg(value: unknown): string {
+    if (value === null || value === undefined) {
+      return ''
+    }
+
+    if (typeof value === 'number' || typeof value === 'bigint') {
+      return String(value)
+    }
+
+    if (typeof value === 'boolean') {
+      return value ? 'true' : 'false'
+    }
+
+    if (Array.isArray(value)) {
+      // For arrays, escape each element and join with spaces
+      return value.map((v) => this.escapeShellArg(v)).join(' ')
+    }
+
+    // Convert to string and escape
+    const str = String(value)
+
+    // If the string is empty, return empty single quotes
+    if (str === '') {
+      return "''"
+    }
+
+    // Check if the string needs escaping
+    // Safe characters: alphanumeric, dash, underscore, period, slash, colon, at, equals, plus, comma
+    if (/^[a-zA-Z0-9_\-./:@=+,]+$/.test(str)) {
+      return str
+    }
+
+    // Use single quotes for escaping - single quotes preserve everything literally
+    // except we need to handle single quotes within the string
+    // Replace ' with '\'' (end quote, escaped quote, start quote)
+    const escaped = str.replace(/'/g, "'\\''")
+    return `'${escaped}'`
+  }
+
+  /**
+   * Tagged template literal for bash commands.
+   * Safely interpolates values by escaping shell special characters.
+   *
+   * @example
+   * ```typescript
+   * const dir = '/path/with spaces'
+   * const result = await bash.tag`ls -la ${dir}`
+   *
+   * const files = ['file1.txt', 'file2.txt']
+   * await bash.tag`rm ${files}`  // Expands to: rm file1.txt file2.txt
+   * ```
+   *
+   * @param strings - Template literal string parts
+   * @param values - Interpolated values
+   * @returns Promise resolving to ExecResult
+   */
+  tag(strings: TemplateStringsArray, ...values: unknown[]): Promise<ExecResult> {
+    // Build the command by interleaving strings and escaped values
+    let command = ''
+    for (let i = 0; i < strings.length; i++) {
+      command += strings[i]
+      if (i < values.length) {
+        command += this.escapeShellArg(values[i])
+      }
+    }
+    return this.exec(command)
+  }
+
+  // ===========================================================================
   // PUBLIC UTILITIES
   // ===========================================================================
 
@@ -1646,5 +1986,181 @@ export class BashModule {
    */
   getAllEnv(): Record<string, string> {
     return { ...this.env }
+  }
+
+  // ===========================================================================
+  // SAFETY SETTINGS MANAGEMENT
+  // ===========================================================================
+
+  /**
+   * Check if database-backed settings are available
+   */
+  hasDatabase(): boolean {
+    return this.execStore !== null
+  }
+
+  /**
+   * Add an override to allow or block a specific command.
+   * Requires database configuration (sql option in constructor).
+   *
+   * @example
+   * ```typescript
+   * // Allow curl for API health checks
+   * await bash.addOverride({
+   *   command: 'curl',
+   *   action: 'allow',
+   *   reason: 'Required for API health checks',
+   *   createdBy: 'admin'
+   * })
+   *
+   * // Block a specific command pattern
+   * await bash.addOverride({
+   *   command: 'rm.*-rf',
+   *   isPattern: true,
+   *   action: 'block',
+   *   reason: 'Prevent recursive force deletion',
+   *   createdBy: 'security-policy'
+   * })
+   * ```
+   */
+  async addOverride(override: {
+    command: string
+    action: 'allow' | 'block'
+    reason: string
+    createdBy?: string
+    isPattern?: boolean
+    expiresAt?: number | null
+  }): Promise<string> {
+    if (!this.execStore) {
+      throw new Error('Database not configured. Pass sql option to BashModule constructor.')
+    }
+
+    await this.initialize()
+
+    const id = await this.execStore.addOverride({
+      command: override.command,
+      action: override.action,
+      reason: override.reason,
+      createdBy: override.createdBy ?? 'system',
+      isPattern: override.isPattern ?? false,
+      expiresAt: override.expiresAt ?? null,
+      isActive: true,
+    })
+
+    // Reload settings to apply the new override
+    this.dbSettings = await this.execStore.getSettings()
+    this.blockedCommands = this.dbSettings.blockedCommands
+    this.allowedCommands = this.dbSettings.allowedCommands
+
+    return id
+  }
+
+  /**
+   * Remove an override by ID.
+   * Requires database configuration.
+   */
+  async removeOverride(id: string): Promise<void> {
+    if (!this.execStore) {
+      throw new Error('Database not configured. Pass sql option to BashModule constructor.')
+    }
+
+    await this.initialize()
+    await this.execStore.deleteOverride(id)
+
+    // Reload settings
+    this.dbSettings = await this.execStore.getSettings()
+    this.blockedCommands = this.dbSettings.blockedCommands
+    this.allowedCommands = this.dbSettings.allowedCommands
+  }
+
+  /**
+   * List all active overrides.
+   * Requires database configuration.
+   */
+  async listOverrides(): Promise<CommandOverride[]> {
+    if (!this.execStore) {
+      throw new Error('Database not configured. Pass sql option to BashModule constructor.')
+    }
+
+    await this.initialize()
+    return this.execStore.listOverrides()
+  }
+
+  /**
+   * Get command execution history.
+   * Requires database configuration with enableHistory.
+   */
+  async getHistory(options: {
+    limit?: number
+    offset?: number
+    command?: string
+    onlyBlocked?: boolean
+    since?: number
+  } = {}): Promise<Array<{
+    id: string
+    command: string
+    exitCode: number
+    wasBlocked: boolean
+    blockReason: string | null
+    cwd: string
+    duration: number
+    executedAt: number
+  }>> {
+    if (!this.execStore) {
+      throw new Error('Database not configured. Pass sql option to BashModule constructor.')
+    }
+
+    await this.initialize()
+    return this.execStore.getHistory(options)
+  }
+
+  /**
+   * Clear execution history older than a certain time.
+   * Requires database configuration.
+   *
+   * @param olderThan - Timestamp in milliseconds. If not provided, clears all history.
+   * @returns Number of records deleted
+   */
+  async clearHistory(olderThan?: number): Promise<number> {
+    if (!this.execStore) {
+      throw new Error('Database not configured. Pass sql option to BashModule constructor.')
+    }
+
+    await this.initialize()
+    return this.execStore.clearHistory(olderThan)
+  }
+
+  /**
+   * Get the current safety settings.
+   * Returns the merged settings from database and constructor config.
+   */
+  getSettings(): {
+    blockedCommands: string[]
+    allowedCommands: string[] | null
+    strictMode: boolean
+    timeout: number
+  } {
+    return {
+      blockedCommands: Array.from(this.blockedCommands),
+      allowedCommands: this.allowedCommands ? Array.from(this.allowedCommands) : null,
+      strictMode: this.strict,
+      timeout: this.timeout,
+    }
+  }
+
+  /**
+   * Reload settings from the database.
+   * Useful after external changes to the database.
+   */
+  async reloadSettings(): Promise<void> {
+    if (!this.execStore) {
+      throw new Error('Database not configured. Pass sql option to BashModule constructor.')
+    }
+
+    this.dbSettings = await this.execStore.getSettings()
+    this.blockedCommands = this.dbSettings.blockedCommands
+    this.allowedCommands = this.dbSettings.allowedCommands
+    this.strict = this.dbSettings.strictMode
+    this.timeout = this.dbSettings.timeout
   }
 }

@@ -20,6 +20,10 @@
  *     const result = await this.$.bash.exec('ls -la /app')
  *     console.log(result.stdout)
  *
+ *     // Use as tagged template literal for safe variable interpolation
+ *     const dir = '/path/with spaces'
+ *     const result = await this.$.bash`ls -la ${dir}`
+ *
  *     // Analyze command safety before execution
  *     const analysis = this.$.bash.analyze('rm -rf /')
  *     if (!analysis.safe) {
@@ -30,8 +34,80 @@
  * ```
  */
 
-import { BashModule, type BashModuleConfig } from './BashModule.js'
+import { BashModule, type BashModuleConfig, type ExecResult } from './BashModule.js'
 import type { FsModule } from './module.js'
+
+// ============================================================================
+// CALLABLE BASH MODULE
+// ============================================================================
+
+/**
+ * Tagged template function signature for bash commands
+ */
+export interface BashTagFunction {
+  /**
+   * Execute a bash command using tagged template literal syntax.
+   * Variables are automatically escaped for shell safety.
+   *
+   * @example
+   * ```typescript
+   * const dir = '/path/with spaces'
+   * const result = await this.$.bash`ls -la ${dir}`
+   * ```
+   */
+  (strings: TemplateStringsArray, ...values: unknown[]): Promise<ExecResult>
+}
+
+/**
+ * A BashModule that is also callable as a tagged template literal.
+ * This allows both:
+ * - `this.$.bash.exec('command')`
+ * - `this.$.bash`command ${var}``
+ */
+export type CallableBashModule = BashModule & BashTagFunction
+
+/**
+ * Creates a callable wrapper around BashModule that supports tagged template literals.
+ *
+ * @param bash - The BashModule instance to wrap
+ * @returns A callable BashModule that can be used as a tagged template literal
+ */
+function createCallableBash(bash: BashModule): CallableBashModule {
+  // Create a callable function that delegates to bash.tag()
+  const callable = function (strings: TemplateStringsArray, ...values: unknown[]): Promise<ExecResult> {
+    return bash.tag(strings, ...values)
+  }
+
+  // Copy all properties and methods from the BashModule to the callable
+  // This allows both `bash.exec()` and `bash`command`` to work
+  return new Proxy(callable, {
+    get(target, prop, receiver) {
+      // Forward property access to the BashModule
+      const value = (bash as any)[prop]
+      if (typeof value === 'function') {
+        return value.bind(bash)
+      }
+      return value
+    },
+    set(target, prop, value) {
+      (bash as any)[prop] = value
+      return true
+    },
+    has(target, prop) {
+      return prop in bash
+    },
+    ownKeys(target) {
+      return Reflect.ownKeys(bash)
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      return Reflect.getOwnPropertyDescriptor(bash, prop)
+    },
+    apply(target, thisArg, args) {
+      // When called as a function (tagged template), delegate to bash.tag()
+      return bash.tag(args[0] as TemplateStringsArray, ...args.slice(1))
+    },
+  }) as CallableBashModule
+}
 
 // ============================================================================
 // TYPES
@@ -71,7 +147,7 @@ interface HasDurableObjectContext {
  */
 export interface WithBashContext {
   fs: FsModule
-  bash: BashModule
+  bash: CallableBashModule
   [key: string]: unknown
 }
 
@@ -154,14 +230,17 @@ export function withBash<TBase extends Constructor<HasFsContext & HasDurableObje
     static capabilities = [...((Base as any).capabilities || []), 'bash']
 
     /**
-     * Cache for the BashModule instance
+     * Cache for the CallableBashModule instance
      */
-    private [BASH_CAPABILITY_CACHE]?: BashModule
+    private [BASH_CAPABILITY_CACHE]?: CallableBashModule
 
     /**
-     * Get the BashModule instance (lazy-loaded)
+     * Get the CallableBashModule instance (lazy-loaded)
+     * Returns a callable that supports both:
+     * - `this.$.bash.exec('command')`
+     * - `this.$.bash`command ${var}``
      */
-    private get bashCapability(): BashModule {
+    private get bashCapability(): CallableBashModule {
       if (!this[BASH_CAPABILITY_CACHE]) {
         // Get fs from context - withFs must be applied first
         const fs = (this.$ as any).fs as FsModule
@@ -183,7 +262,8 @@ export function withBash<TBase extends Constructor<HasFsContext & HasDurableObje
           blockedCommands: options.blockedCommands,
         }
 
-        this[BASH_CAPABILITY_CACHE] = new BashModule(config)
+        const bashModule = new BashModule(config)
+        this[BASH_CAPABILITY_CACHE] = createCallableBash(bashModule)
       }
       return this[BASH_CAPABILITY_CACHE]
     }
@@ -254,13 +334,15 @@ export function withBash<TBase extends Constructor<HasFsContext & HasDurableObje
 export function hasBash<T extends { $: { [key: string]: unknown } }>(
   obj: T
 ): obj is T & { $: WithBashContext } {
-  return obj.$ != null && typeof (obj.$ as any).bash === 'object' && (obj.$ as any).bash !== null
+  // Check if bash exists and is either an object or function (callable)
+  const bash = (obj.$ as any)?.bash
+  return bash != null && (typeof bash === 'object' || typeof bash === 'function')
 }
 
 /**
  * Get the bash capability from a context, throwing if not available
  */
-export function getBash<T extends { $: { [key: string]: unknown } }>(obj: T): BashModule {
+export function getBash<T extends { $: { [key: string]: unknown } }>(obj: T): CallableBashModule {
   if (!hasBash(obj)) {
     throw new Error("Bash capability is not available. Use withBash mixin to add it.")
   }

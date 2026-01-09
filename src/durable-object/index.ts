@@ -54,6 +54,7 @@ export {
   withBash,
   hasBash,
   getBash,
+  type CallableBashModule,
   type WithBashContext,
   type WithBashOptions,
   type WithBashDO,

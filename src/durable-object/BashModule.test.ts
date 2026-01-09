@@ -1325,4 +1325,260 @@ describe('BashModule', () => {
       expect(allEnv.TEST2).toBe('value2')
     })
   })
+
+  // ==========================================================================
+  // Tagged Template Literal Tests
+  // ==========================================================================
+
+  describe('tagged template literal (tag)', () => {
+    beforeEach(async () => {
+      await bash.initialize()
+    })
+
+    describe('basic usage', () => {
+      it('should execute simple command without interpolation', async () => {
+        const result = await bash.tag`echo hello`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toBe('hello\n')
+      })
+
+      it('should execute command with string interpolation', async () => {
+        await mockFs.mkdir('/app')
+        const dir = '/app'
+        const result = await bash.tag`ls ${dir}`
+        expect(result.exitCode).toBe(0)
+      })
+
+      it('should execute cat with file path variable', async () => {
+        await mockFs.write('/test.txt', 'hello world')
+        const file = '/test.txt'
+        const result = await bash.tag`cat ${file}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toBe('hello world')
+      })
+    })
+
+    describe('shell escaping', () => {
+      it('should escape paths with spaces', async () => {
+        await mockFs.mkdir('/path with spaces')
+        const dir = '/path with spaces'
+        const result = await bash.tag`ls ${dir}`
+        expect(result.exitCode).toBe(0)
+      })
+
+      it('should escape strings with single quotes', async () => {
+        const text = "it's a test"
+        const result = await bash.tag`echo ${text}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain("it's a test")
+      })
+
+      it('should escape strings with double quotes', async () => {
+        const text = 'say "hello"'
+        const result = await bash.tag`echo ${text}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('say "hello"')
+      })
+
+      it('should escape strings with ampersands and other special chars', async () => {
+        // Note: Ampersands and other special chars are safely quoted
+        const text = 'foo & bar && baz'
+        const result = await bash.tag`echo ${text}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('foo & bar && baz')
+      })
+
+      it('should block strings that look like command substitution (security)', async () => {
+        // Note: The safety analysis is conservative and blocks patterns like backticks
+        // even when properly escaped in single quotes. This is intentional for security.
+        const text = 'test`whoami`test'
+        const result = await bash.tag`echo ${text}`
+        // This gets blocked because DANGEROUS_PATTERNS sees backticks
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('Unsafe command blocked')
+      })
+
+      it('should escape strings with semicolons', async () => {
+        const text = 'first; second'
+        const result = await bash.tag`echo ${text}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('first; second')
+      })
+
+      it('should escape strings with pipes', async () => {
+        const text = 'data | other'
+        const result = await bash.tag`echo ${text}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('data | other')
+      })
+
+      it('should not add quotes to safe strings', async () => {
+        // alphanumeric, dash, underscore, period, slash should not need quotes
+        const safePath = '/app/data_file-2.txt'
+        const result = await bash.tag`echo ${safePath}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.trim()).toBe(safePath)
+      })
+    })
+
+    describe('type handling', () => {
+      it('should handle number values', async () => {
+        const count = 5
+        const result = await bash.tag`echo ${count}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.trim()).toBe('5')
+      })
+
+      it('should handle bigint values', async () => {
+        const big = BigInt(12345678901234567890n)
+        const result = await bash.tag`echo ${big}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('12345678901234567890')
+      })
+
+      it('should handle boolean values', async () => {
+        const flag = true
+        const result = await bash.tag`echo ${flag}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.trim()).toBe('true')
+      })
+
+      it('should handle null values', async () => {
+        const val = null
+        const result = await bash.tag`echo start${val}end`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.trim()).toBe('startend')
+      })
+
+      it('should handle undefined values', async () => {
+        const val = undefined
+        const result = await bash.tag`echo start${val}end`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.trim()).toBe('startend')
+      })
+
+      it('should handle array values by joining with spaces', async () => {
+        await mockFs.write('/file1.txt', 'content1')
+        await mockFs.write('/file2.txt', 'content2')
+        const files = ['/file1.txt', '/file2.txt']
+        const result = await bash.tag`cat ${files}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toBe('content1content2')
+      })
+
+      it('should handle empty string values', async () => {
+        const empty = ''
+        const result = await bash.tag`echo ${empty}`
+        expect(result.exitCode).toBe(0)
+        // Empty string becomes '' in shell
+      })
+    })
+
+    describe('multiple interpolations', () => {
+      it('should handle multiple string variables', async () => {
+        const greeting = 'hello'
+        const name = 'world'
+        const result = await bash.tag`echo ${greeting} ${name}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.trim()).toBe('hello world')
+      })
+
+      it('should handle mixed types', async () => {
+        const name = 'test'
+        const count = 42
+        const flag = true
+        const result = await bash.tag`echo ${name} ${count} ${flag}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout.trim()).toBe('test 42 true')
+      })
+    })
+
+    describe('command safety', () => {
+      it('should block dangerous commands even with tag', async () => {
+        const target = '/'
+        const result = await bash.tag`rm -rf ${target}`
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('Unsafe command blocked')
+      })
+
+      it('should block command injection patterns (security conservative)', async () => {
+        // Note: The safety analysis is conservative and blocks patterns like "; rm"
+        // even when properly escaped in single quotes. This is intentional for security.
+        // The value would be properly escaped as '; rm -rf /' in quotes,
+        // but the analyzer sees the dangerous pattern in the raw command string.
+        const malicious = '; rm -rf /'
+        const result = await bash.tag`echo ${malicious}`
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('Unsafe command blocked')
+      })
+
+      it('should block command substitution patterns (security conservative)', async () => {
+        // Note: The safety analysis blocks $(...) patterns even in quoted strings
+        // This is a conservative security approach - false positives over false negatives
+        const malicious = '$(whoami)'
+        const result = await bash.tag`echo ${malicious}`
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('Unsafe command blocked')
+      })
+
+      it('should block backtick patterns (security conservative)', async () => {
+        // Note: The safety analysis blocks backtick patterns even in quoted strings
+        const malicious = '`id`'
+        const result = await bash.tag`echo ${malicious}`
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain('Unsafe command blocked')
+      })
+
+      it('should allow safe strings that are properly escaped', async () => {
+        // These values are safe and will be properly handled
+        const userInput = 'hello world'
+        const result = await bash.tag`echo ${userInput}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('hello world')
+      })
+    })
+
+    describe('real-world scenarios', () => {
+      it('should handle file paths with complex names', async () => {
+        await mockFs.mkdir('/my project')
+        await mockFs.mkdir("/my project/it's working")
+        await mockFs.write("/my project/it's working/data.txt", 'test')
+
+        const dir = "/my project/it's working"
+        const result = await bash.tag`cat ${dir}/data.txt`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toBe('test')
+      })
+
+      it('should handle command with flags and variable path', async () => {
+        await mockFs.mkdir('/testdir')
+        await mockFs.write('/testdir/file.txt', 'content')
+
+        const dir = '/testdir'
+        const result = await bash.tag`ls -la ${dir}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('file.txt')
+      })
+
+      it('should handle creating directory with variable name', async () => {
+        const dirName = '/my new directory'
+        const result = await bash.tag`mkdir ${dirName}`
+        expect(result.exitCode).toBe(0)
+        expect(await mockFs.exists('/my new directory')).toBe(true)
+      })
+
+      it('should handle head with numeric argument', async () => {
+        const content = 'line1\nline2\nline3\nline4\nline5\n'
+        await mockFs.write('/file.txt', content)
+
+        const numLines = 3
+        const file = '/file.txt'
+        const result = await bash.tag`head -n ${numLines} ${file}`
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain('line1')
+        expect(result.stdout).toContain('line3')
+        expect(result.stdout).not.toContain('line4')
+      })
+    })
+  })
 })
