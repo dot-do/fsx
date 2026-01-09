@@ -344,4 +344,5 @@ MIT
 
 - [GitHub](https://github.com/dot-do/fsx)
 - [Documentation](https://fsx.do)
-- [dotdo Framework](https://dotdo.dev)
+- [.do](https://do.org.ai)
+- [Platform.do](https://platform.do)
