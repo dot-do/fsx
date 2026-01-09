@@ -5,3 +5,9 @@ dist/
 *.log
 .DS_Store
 coverage/
+
+# Build artifacts in src (should be in dist/)
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
+src/**/*.d.ts.map
