@@ -360,7 +360,9 @@ describe('createReadStream', () => {
 
     it('should handle streaming with multiple concurrent readers', async () => {
       // Start two streams on same file
-      const stream1 = await createReadStream('/test/1mb.bin', { start: 0, end: 511 * 1024 })
+      // First half: bytes 0 to 524287 (inclusive) = 524288 bytes = 512KB
+      // Second half: bytes 524288 to 1048575 (inclusive) = 524288 bytes = 512KB
+      const stream1 = await createReadStream('/test/1mb.bin', { start: 0, end: 512 * 1024 - 1 })
       const stream2 = await createReadStream('/test/1mb.bin', { start: 512 * 1024, end: 1024 * 1024 - 1 })
 
       // Read both in parallel
@@ -555,7 +557,6 @@ describe('createReadStream', () => {
     it('should create valid Content-Range responses', async () => {
       // For a 206 Partial Content response
       const stream = await createReadStream('/test/sequential.bin', { start: 10, end: 19 })
-      const content = await readAllChunks(stream)
       const response = new Response(stream, {
         status: 206,
         headers: {
@@ -564,6 +565,9 @@ describe('createReadStream', () => {
           'Content-Length': '10',
         },
       })
+
+      // Read the response body to verify content
+      const content = new Uint8Array(await response.arrayBuffer())
 
       expect(response.status).toBe(206)
       expect(content.length).toBe(10)

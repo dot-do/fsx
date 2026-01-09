@@ -1,4 +1,5 @@
 import type { BufferEncoding } from '../core/types'
+import { ENOENT, EISDIR, EINVAL } from '../core/errors'
 
 /**
  * Options for createReadStream
@@ -42,6 +43,32 @@ export function getStorage(): CreateReadStreamStorage | null {
   return storage
 }
 
+/** Default chunk size: 64KB */
+const DEFAULT_HIGH_WATER_MARK = 64 * 1024
+
+/**
+ * Normalize a file path by resolving . and .. components and removing double slashes
+ */
+function normalizePath(path: string): string {
+  // Split path into segments, filtering empty strings (from double slashes)
+  const segments = path.split('/').filter((s) => s !== '')
+  const result: string[] = []
+
+  for (const segment of segments) {
+    if (segment === '.') {
+      // Current directory, skip
+      continue
+    } else if (segment === '..') {
+      // Parent directory, go up
+      result.pop()
+    } else {
+      result.push(segment)
+    }
+  }
+
+  return '/' + result.join('/')
+}
+
 /**
  * Create a readable stream for a file
  *
@@ -51,13 +78,90 @@ export function getStorage(): CreateReadStreamStorage | null {
  *
  * @throws {ENOENT} If file does not exist
  * @throws {EISDIR} If path is a directory
- * @throws {EINVAL} If start > end
+ * @throws {EINVAL} If start > end or path is relative
  */
 export async function createReadStream(
   path: string,
   options?: ReadStreamOptions
 ): Promise<ReadableStream<Uint8Array>> {
-  // TODO: Implement createReadStream
-  // This is a stub for RED phase TDD - implementation comes in GREEN phase
-  throw new Error('createReadStream not implemented')
+  // Validate absolute path
+  if (!path.startsWith('/')) {
+    throw new EINVAL('createReadStream', path)
+  }
+
+  // Check for pre-aborted signal
+  if (options?.signal?.aborted) {
+    const error = new Error('The operation was aborted')
+    error.name = 'AbortError'
+    throw error
+  }
+
+  // Normalize path to handle //, ., and ..
+  const normalizedPath = normalizePath(path)
+
+  // Get entry from storage
+  if (!storage) {
+    throw new ENOENT('open', normalizedPath)
+  }
+
+  const entry = storage.get(normalizedPath)
+  if (!entry) {
+    throw new ENOENT('open', normalizedPath)
+  }
+
+  if (entry.isDirectory) {
+    throw new EISDIR('read', normalizedPath)
+  }
+
+  // Parse options
+  const start = options?.start ?? 0
+  const fileEnd = entry.content.length - 1
+  // If end is beyond file size, clamp to file end
+  const end = options?.end !== undefined ? Math.min(options.end, fileEnd) : fileEnd
+  const highWaterMark = options?.highWaterMark ?? DEFAULT_HIGH_WATER_MARK
+
+  // Validate range
+  if (start > end && entry.content.length > 0) {
+    throw new EINVAL('createReadStream', normalizedPath)
+  }
+
+  // Handle empty file case
+  if (entry.content.length === 0) {
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.close()
+      },
+    })
+  }
+
+  // Slice the data for the requested range
+  const data = entry.content.slice(start, end + 1)
+  let offset = 0
+  const signal = options?.signal
+
+  // Create ReadableStream with pull-based chunking for proper backpressure
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      // Check abort signal
+      if (signal?.aborted) {
+        controller.close()
+        return
+      }
+
+      // Check if we've read all data
+      if (offset >= data.length) {
+        controller.close()
+        return
+      }
+
+      // Read next chunk
+      const chunk = data.slice(offset, offset + highWaterMark)
+      offset += chunk.length
+      controller.enqueue(chunk)
+    },
+
+    cancel() {
+      // Clean up on cancel - nothing specific needed for in-memory data
+    },
+  })
 }
