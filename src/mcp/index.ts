@@ -206,7 +206,19 @@ const handlers: Record<string, (fs: FSx, params: Record<string, unknown>) => Pro
     const encoding = params.encoding as string
 
     try {
-      await fs.writeFile(path, content, { flag: 'w' })
+      // If encoding is base64, decode the content before writing
+      let dataToWrite: string | Uint8Array = content
+      if (encoding === 'base64') {
+        // Decode base64 to binary
+        const binaryString = atob(content)
+        const bytes = new Uint8Array(binaryString.length)
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i)
+        }
+        dataToWrite = bytes
+      }
+
+      await fs.writeFile(path, dataToWrite, { flag: 'w' })
       return {
         content: [{ type: 'text', text: `Successfully wrote to ${path}` }],
       }
