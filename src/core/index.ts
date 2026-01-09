@@ -11,6 +11,7 @@
 export { FSx, type FSxOptions } from './fsx.js'
 export { constants, type Constants } from './constants.js'
 export { FSError, ENOENT, EEXIST, EISDIR, ENOTDIR, EACCES, ENOTEMPTY, EINVAL, ELOOP, ENAMETOOLONG, ENOSPC, EROFS, EBUSY, EMFILE, EXDEV } from './errors.js'
+export { createConfig, isReadOnly, defaultConfig, type FSxConfig, type FSxConfigOptions } from './config.js'
 export type {
   // Core capability interface
   FsCapability,
