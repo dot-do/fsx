@@ -522,9 +522,9 @@ export class CloudflareContainerExecutor {
     const initConnection = async () => {
       try {
         const response = await instance.fetch(upgradeRequest)
-        // The response should be a WebSocket upgrade response
-        // @ts-expect-error - webSocket property exists on upgraded responses
-        websocket = response.webSocket as WebSocket
+        // The response should be a WebSocket upgrade response in CF Workers runtime
+        // The webSocket property exists on upgraded responses in Cloudflare Workers
+        websocket = (response as Response & { webSocket?: WebSocket }).webSocket
         if (websocket) {
           websocket.accept()
           websocket.addEventListener('message', (event) => {

@@ -60,6 +60,23 @@ export {
   type WithBashDO,
 } from './bash-mixin.js'
 
+// Re-export CloudflareContainerExecutor and related types for fsx/do entry point
+export {
+  CloudflareContainerExecutor,
+  createContainerExecutor,
+  createIsolatedExecutor,
+  type ContainerBinding,
+  type ContainerInstance,
+  type ContainerExecutorConfig,
+  type ContainerExecResult,
+  type ExecOptions,
+  type StreamingExecEvent,
+  type StreamingExecSession,
+  type ContainerState,
+  type HasContainerExecutor,
+  type WithExecContext,
+} from './container-executor.js'
+
 interface Env {
   FSX: DurableObjectNamespace
   R2?: R2Bucket
