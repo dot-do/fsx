@@ -374,37 +374,50 @@ export class TieredR2Storage {
   async get(path: string): Promise<TieredReadResult | null> {
     const key = this.key(path)
 
+    // Track which buckets we've already checked (for when same bucket is used for multiple tiers)
+    const checkedBuckets = new Set<R2Bucket>()
+
     // Try to find the object in each tier, starting with hot
     for (const tier of ['hot', 'warm', 'cold'] as StorageTier[]) {
       const bucket = this.getBucket(tier)
+
+      // Skip if we've already checked this bucket
+      if (checkedBuckets.has(bucket)) {
+        continue
+      }
+      checkedBuckets.add(bucket)
+
       const object = await bucket.get(key)
 
       if (object) {
         const data = new Uint8Array(await object.arrayBuffer())
         const existingMeta = this.parseMetadata(object.customMetadata)
 
+        // Use the tier from metadata if available, otherwise use the bucket's tier
+        const actualTier = existingMeta?.tier ?? tier
+
         // Update access metadata
-        await this.updateAccessMetadata(key, tier, data.length)
+        await this.updateAccessMetadata(key, actualTier, data.length)
 
         // Check if promotion is needed
-        if (this.policy.autoPromote && tier !== 'hot') {
+        if (this.policy.autoPromote && actualTier !== 'hot') {
           const shouldPromote = this.shouldPromote(existingMeta)
           if (shouldPromote) {
-            const newTier = tier === 'cold' ? 'warm' : 'hot'
-            await this.migrateInternal(key, data, tier, newTier, existingMeta, object.httpMetadata)
+            const newTier = actualTier === 'cold' ? 'warm' : 'hot'
+            await this.migrateInternal(key, data, actualTier, newTier, existingMeta, object.httpMetadata)
 
             return {
               data,
               metadata: object,
               tier: newTier,
               migrated: true,
-              previousTier: tier,
+              previousTier: actualTier,
             }
           }
         }
 
         // Update last access metadata in place
-        const updatedMeta = this.createMetadata(tier, existingMeta, path)
+        const updatedMeta = this.createMetadata(actualTier, existingMeta, path)
         await bucket.put(key, data, {
           httpMetadata: object.httpMetadata,
           customMetadata: updatedMeta,
@@ -413,7 +426,7 @@ export class TieredR2Storage {
         return {
           data,
           metadata: object,
-          tier,
+          tier: actualTier,
           migrated: false,
         }
       }
@@ -472,13 +485,23 @@ export class TieredR2Storage {
    */
   async exists(path: string): Promise<{ exists: boolean; tier?: StorageTier }> {
     const key = this.key(path)
+    const checkedBuckets = new Set<R2Bucket>()
 
     for (const tier of ['hot', 'warm', 'cold'] as StorageTier[]) {
       const bucket = this.getBucket(tier)
+
+      if (checkedBuckets.has(bucket)) {
+        continue
+      }
+      checkedBuckets.add(bucket)
+
       const object = await bucket.head(key)
 
       if (object) {
-        return { exists: true, tier }
+        // Use tier from metadata if available
+        const existingMeta = this.parseMetadata(object.customMetadata)
+        const actualTier = existingMeta?.tier ?? tier
+        return { exists: true, tier: actualTier }
       }
     }
 
@@ -490,13 +513,23 @@ export class TieredR2Storage {
    */
   async head(path: string): Promise<{ metadata: R2Object; tier: StorageTier } | null> {
     const key = this.key(path)
+    const checkedBuckets = new Set<R2Bucket>()
 
     for (const tier of ['hot', 'warm', 'cold'] as StorageTier[]) {
       const bucket = this.getBucket(tier)
+
+      if (checkedBuckets.has(bucket)) {
+        continue
+      }
+      checkedBuckets.add(bucket)
+
       const object = await bucket.head(key)
 
       if (object) {
-        return { metadata: object, tier }
+        // Use tier from metadata if available
+        const existingMeta = this.parseMetadata(object.customMetadata)
+        const actualTier = existingMeta?.tier ?? tier
+        return { metadata: object, tier: actualTier }
       }
     }
 
@@ -599,20 +632,33 @@ export class TieredR2Storage {
    */
   async promote(path: string, targetTier: 'hot' | 'warm'): Promise<TieredStorageResult> {
     const key = this.key(path)
+    const checkedBuckets = new Set<R2Bucket>()
 
-    // Find current location
-    for (const currentTier of ['cold', 'warm', 'hot'] as StorageTier[]) {
-      // Check if already at or above target tier
-      if (currentTier === targetTier || (targetTier === 'warm' && currentTier === 'hot')) {
-        return { tier: currentTier, migrated: false }
+    // Find current location by checking all unique buckets
+    for (const tier of ['hot', 'warm', 'cold'] as StorageTier[]) {
+      const bucket = this.getBucket(tier)
+
+      if (checkedBuckets.has(bucket)) {
+        continue
       }
+      checkedBuckets.add(bucket)
 
-      const bucket = this.getBucket(currentTier)
       const object = await bucket.get(key)
 
       if (object) {
         const data = new Uint8Array(await object.arrayBuffer())
         const existingMeta = this.parseMetadata(object.customMetadata)
+
+        // Use tier from metadata if available
+        const currentTier = existingMeta?.tier ?? tier
+
+        // Check if already at or above target tier
+        if (currentTier === targetTier) {
+          return { tier: currentTier, migrated: false }
+        }
+        if (targetTier === 'warm' && currentTier === 'hot') {
+          return { tier: currentTier, migrated: false }
+        }
 
         await this.migrateInternal(key, data, currentTier, targetTier, existingMeta, object.httpMetadata)
 
@@ -635,20 +681,33 @@ export class TieredR2Storage {
    */
   async demote(path: string, targetTier: 'warm' | 'cold'): Promise<TieredStorageResult> {
     const key = this.key(path)
+    const checkedBuckets = new Set<R2Bucket>()
 
-    // Find current location
-    for (const currentTier of ['hot', 'warm', 'cold'] as StorageTier[]) {
-      // Check if already at or below target tier
-      if (currentTier === targetTier || (targetTier === 'warm' && currentTier === 'cold')) {
-        return { tier: currentTier, migrated: false }
+    // Find current location by checking all unique buckets
+    for (const tier of ['hot', 'warm', 'cold'] as StorageTier[]) {
+      const bucket = this.getBucket(tier)
+
+      if (checkedBuckets.has(bucket)) {
+        continue
       }
+      checkedBuckets.add(bucket)
 
-      const bucket = this.getBucket(currentTier)
       const object = await bucket.get(key)
 
       if (object) {
         const data = new Uint8Array(await object.arrayBuffer())
         const existingMeta = this.parseMetadata(object.customMetadata)
+
+        // Use tier from metadata if available
+        const currentTier = existingMeta?.tier ?? tier
+
+        // Check if already at or below target tier
+        if (currentTier === targetTier) {
+          return { tier: currentTier, migrated: false }
+        }
+        if (targetTier === 'warm' && currentTier === 'cold') {
+          return { tier: currentTier, migrated: false }
+        }
 
         await this.migrateInternal(key, data, currentTier, targetTier, existingMeta, object.httpMetadata)
 
