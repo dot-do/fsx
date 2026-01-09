@@ -67,6 +67,7 @@ interface SqlFileEntry {
   ctime: number
   birthtime: number
   nlink: number
+  [key: string]: string | number | null | FileType
 }
 
 /**
@@ -579,7 +580,7 @@ export class FileSystemDO extends DurableObject<Env> {
     const children = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE parent_id = ?', file.id).toArray()
 
     if (options.withFileTypes) {
-      const result: Dirent[] = children.map((child) => ({
+      const result: DirentLike[] = children.map((child) => ({
         name: child.name,
         parentPath: path,
         path: child.path,
@@ -595,7 +596,7 @@ export class FileSystemDO extends DurableObject<Env> {
       if (options.recursive) {
         for (const child of children) {
           if (child.type === 'directory') {
-            const subEntries = (await this.readdir(child.path, options)) as Dirent[]
+            const subEntries = (await this.readdir(child.path, options)) as DirentLike[]
             result.push(...subEntries)
           }
         }
@@ -618,7 +619,7 @@ export class FileSystemDO extends DurableObject<Env> {
     return names
   }
 
-  private async stat(path: string): Promise<Stats> {
+  private async stat(path: string): Promise<StatsLike> {
     const file = await this.getFile(path)
     if (!file) {
       throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
@@ -641,7 +642,7 @@ export class FileSystemDO extends DurableObject<Env> {
       mtime: file.mtime,
       ctime: file.ctime,
       birthtime: file.birthtime,
-    } as any
+    }
   }
 
   private async access(path: string, mode: number = 0): Promise<void> {
