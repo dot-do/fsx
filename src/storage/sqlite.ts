@@ -2,9 +2,34 @@
  * SQLiteMetadata - SQLite-backed metadata store for fsx
  *
  * Stores filesystem metadata in SQLite (via Durable Objects or D1).
+ * Uses INTEGER PRIMARY KEY for efficient rowid-based lookups.
  */
 
 import type { FileEntry, FileType, BlobRef } from '../core/types.js'
+
+/**
+ * Internal file row structure matching the SQLite schema.
+ * Uses integer rowid for efficient storage and lookups.
+ */
+interface FileRow {
+  id: number
+  path: string
+  name: string
+  parent_id: number | null
+  type: string
+  mode: number
+  uid: number
+  gid: number
+  size: number
+  blob_id: string | null
+  link_target: string | null
+  tier: string
+  atime: number
+  mtime: number
+  ctime: number
+  birthtime: number
+  nlink: number
+}
 
 /**
  * SQLiteMetadata - Filesystem metadata backed by SQLite
@@ -17,36 +42,39 @@ export class SQLiteMetadata {
   }
 
   /**
-   * Initialize the database schema
+   * Initialize the database schema.
+   * Uses INTEGER PRIMARY KEY AUTOINCREMENT for efficient rowid-based storage.
    */
   async init(): Promise<void> {
     await this.sql.exec(`
       CREATE TABLE IF NOT EXISTS files (
-        id TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         path TEXT UNIQUE NOT NULL,
         name TEXT NOT NULL,
-        parent_id TEXT,
-        type TEXT NOT NULL,
+        parent_id INTEGER,
+        type TEXT NOT NULL CHECK(type IN ('file', 'directory', 'symlink')),
         mode INTEGER NOT NULL DEFAULT 420,
         uid INTEGER NOT NULL DEFAULT 0,
         gid INTEGER NOT NULL DEFAULT 0,
         size INTEGER NOT NULL DEFAULT 0,
         blob_id TEXT,
         link_target TEXT,
+        tier TEXT NOT NULL DEFAULT 'hot' CHECK(tier IN ('hot', 'warm', 'cold')),
         atime INTEGER NOT NULL,
         mtime INTEGER NOT NULL,
         ctime INTEGER NOT NULL,
         birthtime INTEGER NOT NULL,
         nlink INTEGER NOT NULL DEFAULT 1,
-        FOREIGN KEY (parent_id) REFERENCES files(id)
+        FOREIGN KEY (parent_id) REFERENCES files(id) ON DELETE CASCADE
       );
 
       CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
       CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent_id);
+      CREATE INDEX IF NOT EXISTS idx_files_tier ON files(tier);
 
       CREATE TABLE IF NOT EXISTS blobs (
         id TEXT PRIMARY KEY,
-        tier TEXT NOT NULL DEFAULT 'hot',
+        tier TEXT NOT NULL DEFAULT 'hot' CHECK(tier IN ('hot', 'warm', 'cold')),
         size INTEGER NOT NULL,
         checksum TEXT,
         created_at INTEGER NOT NULL
@@ -58,20 +86,49 @@ export class SQLiteMetadata {
     // Create root if not exists
     const root = await this.getByPath('/')
     if (!root) {
-      await this.createEntry({
-        id: crypto.randomUUID(),
-        path: '/',
-        name: '',
-        parentId: null,
-        type: 'directory',
-        mode: 0o755,
-        uid: 0,
-        gid: 0,
-        size: 0,
-        blobId: null,
-        linkTarget: null,
-        nlink: 2,
-      })
+      const now = Date.now()
+      await this.sql.exec(
+        `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, tier, atime, mtime, ctime, birthtime, nlink)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        '/',
+        '',
+        null,
+        'directory',
+        0o755,
+        0,
+        0,
+        0,
+        'hot',
+        now,
+        now,
+        now,
+        now,
+        2
+      )
+    }
+  }
+
+  /**
+   * Convert a FileRow to a FileEntry
+   */
+  private rowToEntry(row: FileRow): FileEntry {
+    return {
+      id: String(row.id),
+      path: row.path,
+      name: row.name,
+      parentId: row.parent_id !== null ? String(row.parent_id) : null,
+      type: row.type as FileType,
+      mode: row.mode,
+      uid: row.uid,
+      gid: row.gid,
+      size: row.size,
+      blobId: row.blob_id,
+      linkTarget: row.link_target,
+      atime: row.atime,
+      mtime: row.mtime,
+      ctime: row.ctime,
+      birthtime: row.birthtime,
+      nlink: row.nlink,
     }
   }
 
@@ -79,30 +136,35 @@ export class SQLiteMetadata {
    * Get entry by path
    */
   async getByPath(path: string): Promise<FileEntry | null> {
-    const result = await this.sql.exec<FileEntry>('SELECT * FROM files WHERE path = ?', path).one()
-    return result || null
+    const result = await this.sql.exec<FileRow>('SELECT * FROM files WHERE path = ?', path).one()
+    return result ? this.rowToEntry(result) : null
   }
 
   /**
    * Get entry by ID
    */
   async getById(id: string): Promise<FileEntry | null> {
-    const result = await this.sql.exec<FileEntry>('SELECT * FROM files WHERE id = ?', id).one()
-    return result || null
+    const numericId = parseInt(id, 10)
+    if (isNaN(numericId)) return null
+    const result = await this.sql.exec<FileRow>('SELECT * FROM files WHERE id = ?', numericId).one()
+    return result ? this.rowToEntry(result) : null
   }
 
   /**
    * Get children of a directory
    */
   async getChildren(parentId: string): Promise<FileEntry[]> {
-    return this.sql.exec<FileEntry>('SELECT * FROM files WHERE parent_id = ?', parentId).toArray()
+    const numericId = parseInt(parentId, 10)
+    if (isNaN(numericId)) return []
+    const rows = this.sql.exec<FileRow>('SELECT * FROM files WHERE parent_id = ?', numericId).toArray()
+    return rows.map((row) => this.rowToEntry(row))
   }
 
   /**
-   * Create a new entry
+   * Create a new entry.
+   * Note: id is auto-generated by SQLite, so it's not included in the insert.
    */
   async createEntry(entry: {
-    id: string
     path: string
     name: string
     parentId: string | null
@@ -114,15 +176,16 @@ export class SQLiteMetadata {
     blobId: string | null
     linkTarget: string | null
     nlink: number
-  }): Promise<void> {
+    tier?: 'hot' | 'warm' | 'cold'
+  }): Promise<number> {
     const now = Date.now()
+    const parentIdNum = entry.parentId !== null ? parseInt(entry.parentId, 10) : null
     await this.sql.exec(
-      `INSERT INTO files (id, path, name, parent_id, type, mode, uid, gid, size, blob_id, link_target, atime, mtime, ctime, birthtime, nlink)
+      `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, blob_id, link_target, tier, atime, mtime, ctime, birthtime, nlink)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      entry.id,
       entry.path,
       entry.name,
-      entry.parentId,
+      parentIdNum,
       entry.type,
       entry.mode,
       entry.uid,
@@ -130,12 +193,16 @@ export class SQLiteMetadata {
       entry.size,
       entry.blobId,
       entry.linkTarget,
+      entry.tier ?? 'hot',
       now,
       now,
       now,
       now,
       entry.nlink
     )
+    // Return the last inserted rowid
+    const result = await this.sql.exec<{ id: number }>('SELECT last_insert_rowid() as id').one()
+    return result?.id ?? 0
   }
 
   /**
@@ -152,10 +219,14 @@ export class SQLiteMetadata {
       gid: number
       size: number
       blobId: string | null
+      tier: 'hot' | 'warm' | 'cold'
       atime: number
       mtime: number
     }>
   ): Promise<void> {
+    const numericId = parseInt(id, 10)
+    if (isNaN(numericId)) return
+
     const sets: string[] = []
     const values: unknown[] = []
 
@@ -169,7 +240,8 @@ export class SQLiteMetadata {
     }
     if (updates.parentId !== undefined) {
       sets.push('parent_id = ?')
-      values.push(updates.parentId)
+      const parentIdNum = updates.parentId !== null ? parseInt(updates.parentId, 10) : null
+      values.push(parentIdNum)
     }
     if (updates.mode !== undefined) {
       sets.push('mode = ?')
@@ -191,6 +263,10 @@ export class SQLiteMetadata {
       sets.push('blob_id = ?')
       values.push(updates.blobId)
     }
+    if (updates.tier !== undefined) {
+      sets.push('tier = ?')
+      values.push(updates.tier)
+    }
     if (updates.atime !== undefined) {
       sets.push('atime = ?')
       values.push(updates.atime)
@@ -204,7 +280,7 @@ export class SQLiteMetadata {
     sets.push('ctime = ?')
     values.push(Date.now())
 
-    values.push(id)
+    values.push(numericId)
 
     await this.sql.exec(`UPDATE files SET ${sets.join(', ')} WHERE id = ?`, ...values)
   }
@@ -213,7 +289,9 @@ export class SQLiteMetadata {
    * Delete an entry
    */
   async deleteEntry(id: string): Promise<void> {
-    await this.sql.exec('DELETE FROM files WHERE id = ?', id)
+    const numericId = parseInt(id, 10)
+    if (isNaN(numericId)) return
+    await this.sql.exec('DELETE FROM files WHERE id = ?', numericId)
   }
 
   /**
@@ -252,11 +330,14 @@ export class SQLiteMetadata {
     // Convert glob to SQL LIKE pattern
     const sqlPattern = pattern.replace(/\*/g, '%').replace(/\?/g, '_')
 
+    let rows: FileRow[]
     if (parentPath) {
-      return this.sql.exec<FileEntry>('SELECT * FROM files WHERE path LIKE ? AND path LIKE ?', parentPath + '%', sqlPattern).toArray()
+      rows = this.sql.exec<FileRow>('SELECT * FROM files WHERE path LIKE ? AND path LIKE ?', parentPath + '%', sqlPattern).toArray()
+    } else {
+      rows = this.sql.exec<FileRow>('SELECT * FROM files WHERE path LIKE ?', sqlPattern).toArray()
     }
 
-    return this.sql.exec<FileEntry>('SELECT * FROM files WHERE path LIKE ?', sqlPattern).toArray()
+    return rows.map((row) => this.rowToEntry(row))
   }
 
   /**
