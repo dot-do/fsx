@@ -47,6 +47,7 @@ export class SQLiteMetadata {
    * Uses INTEGER PRIMARY KEY AUTOINCREMENT for efficient rowid-based storage.
    */
   async init(): Promise<void> {
+    // Create files table
     await this.sql.exec(`
       CREATE TABLE IF NOT EXISTS files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,30 +68,36 @@ export class SQLiteMetadata {
         birthtime INTEGER NOT NULL,
         nlink INTEGER NOT NULL DEFAULT 1,
         FOREIGN KEY (parent_id) REFERENCES files(id) ON DELETE CASCADE
-      );
+      )
+    `)
 
-      CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
-      CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent_id);
-      CREATE INDEX IF NOT EXISTS idx_files_tier ON files(tier);
+    // Create indexes for files table (separate statements for proper tracking)
+    await this.sql.exec('CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)')
+    await this.sql.exec('CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent_id)')
+    await this.sql.exec('CREATE INDEX IF NOT EXISTS idx_files_tier ON files(tier)')
 
+    // Create blobs table
+    await this.sql.exec(`
       CREATE TABLE IF NOT EXISTS blobs (
         id TEXT PRIMARY KEY,
         tier TEXT NOT NULL DEFAULT 'hot' CHECK(tier IN ('hot', 'warm', 'cold')),
         size INTEGER NOT NULL,
         checksum TEXT,
         created_at INTEGER NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_blobs_tier ON blobs(tier);
+      )
     `)
 
-    // Create root if not exists
+    // Create index for blobs table
+    await this.sql.exec('CREATE INDEX IF NOT EXISTS idx_blobs_tier ON blobs(tier)')
+
+    // Create root if not exists (using explicit id=0 to reserve auto-increment for user files)
     const root = await this.getByPath('/')
     if (!root) {
       const now = Date.now()
       await this.sql.exec(
-        `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, tier, atime, mtime, ctime, birthtime, nlink)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO files (id, path, name, parent_id, type, mode, uid, gid, size, tier, atime, mtime, ctime, birthtime, nlink)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        0,
         '/',
         '',
         null,
@@ -201,8 +208,8 @@ export class SQLiteMetadata {
       now,
       entry.nlink
     )
-    // Return the last inserted rowid
-    const result = await this.sql.exec<{ id: number }>('SELECT last_insert_rowid() as id').one()
+    // Fetch the inserted entry by path to get its ID (avoids race conditions with concurrent inserts)
+    const result = await this.sql.exec<FileRow>('SELECT * FROM files WHERE path = ?', entry.path).one()
     return result?.id ?? 0
   }
 

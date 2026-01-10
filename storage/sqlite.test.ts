@@ -62,8 +62,23 @@ class MockSqlStorage {
 
     // Handle INSERT into files
     if (normalizedSql.includes('insert into files')) {
-      const id = this.nextFileId++
+      // Check if explicit id is provided in the INSERT columns
+      const columnsMatch = sql.match(/\(([^)]+)\)\s*values/i)
+      const columns = columnsMatch ? columnsMatch[1].split(',').map((c) => c.trim().toLowerCase()) : []
+      const idIndex = columns.indexOf('id')
+
+      let id: number
+      if (idIndex >= 0 && params[idIndex] !== null && params[idIndex] !== undefined) {
+        // Explicit id provided - use it without incrementing auto-increment counter
+        id = params[idIndex] as number
+      } else {
+        // Auto-generate id
+        id = this.nextFileId++
+      }
+
       const entry = this.parseFileInsert(sql, params, id)
+      // Ensure the entry uses our computed id
+      entry.id = id
       this.files.set(entry.path as string, entry)
       return this.emptyResult<T>()
     }
@@ -411,7 +426,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/test.txt',
         name: 'test.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 1000,
@@ -435,7 +450,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/mydir',
         name: 'mydir',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
@@ -455,7 +470,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/link',
         name: 'link',
-        parentId: '1',
+        parentId: '0',
         type: 'symlink',
         mode: 0o777,
         uid: 0,
@@ -476,7 +491,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       await metadata.createEntry({
         path: '/timestamped.txt',
         name: 'timestamped.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -503,7 +518,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       await metadata.createEntry({
         path: '/default-tier.txt',
         name: 'default-tier.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -522,7 +537,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       await metadata.createEntry({
         path: '/cold-storage.txt',
         name: 'cold-storage.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -542,7 +557,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id1 = await metadata.createEntry({
         path: '/file1.txt',
         name: 'file1.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -556,7 +571,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id2 = await metadata.createEntry({
         path: '/file2.txt',
         name: 'file2.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -578,7 +593,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       await metadata.createEntry({
         path: '/existing.txt',
         name: 'existing.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 1000,
@@ -611,7 +626,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       await metadata.createEntry({
         path: '/typed.txt',
         name: 'typed.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 1000,
@@ -635,7 +650,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/by-id.txt',
         name: 'by-id.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -672,7 +687,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/update-size.txt',
         name: 'update-size.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -693,7 +708,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/old-name.txt',
         name: 'old-name.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -718,7 +733,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/chmod.txt',
         name: 'chmod.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -739,7 +754,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/chown.txt',
         name: 'chown.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -761,7 +776,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/blob-update.txt',
         name: 'blob-update.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -782,7 +797,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/tier-update.txt',
         name: 'tier-update.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -804,7 +819,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/ctime-update.txt',
         name: 'ctime-update.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -832,7 +847,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/atime-update.txt',
         name: 'atime-update.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -854,7 +869,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/mtime-update.txt',
         name: 'mtime-update.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -876,7 +891,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/subdir/file.txt',
         name: 'file.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -905,7 +920,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/to-delete.txt',
         name: 'to-delete.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -937,7 +952,7 @@ describe('SQLiteMetadata CRUD Operations', () => {
       const id = await metadata.createEntry({
         path: '/delete-sql.txt',
         name: 'delete-sql.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -976,7 +991,7 @@ describe('SQLiteMetadata Path Lookups', () => {
       const parentId = await metadata.createEntry({
         path: '/parent',
         name: 'parent',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
@@ -1024,7 +1039,7 @@ describe('SQLiteMetadata Path Lookups', () => {
       const emptyDirId = await metadata.createEntry({
         path: '/empty',
         name: 'empty',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
@@ -1048,7 +1063,7 @@ describe('SQLiteMetadata Path Lookups', () => {
       const parentId = await metadata.createEntry({
         path: '/parent',
         name: 'parent',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
@@ -1096,7 +1111,7 @@ describe('SQLiteMetadata Path Lookups', () => {
       const parentId = await metadata.createEntry({
         path: '/mixed',
         name: 'mixed',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
@@ -1161,7 +1176,7 @@ describe('SQLiteMetadata Index Queries', () => {
     await metadata.createEntry({
       path: '/docs',
       name: 'docs',
-      parentId: '1',
+      parentId: '0',
       type: 'directory',
       mode: 0o755,
       uid: 0,
@@ -1217,7 +1232,7 @@ describe('SQLiteMetadata Index Queries', () => {
     await metadata.createEntry({
       path: '/src/index.ts',
       name: 'index.ts',
-      parentId: '1',
+      parentId: '0',
       type: 'file',
       mode: 0o644,
       uid: 0,
@@ -1306,7 +1321,7 @@ describe('SQLiteMetadata Timestamp Handling', () => {
       await metadata.createEntry({
         path: '/birthtime.txt',
         name: 'birthtime.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1327,7 +1342,7 @@ describe('SQLiteMetadata Timestamp Handling', () => {
       await metadata.createEntry({
         path: '/equal-times.txt',
         name: 'equal-times.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1350,7 +1365,7 @@ describe('SQLiteMetadata Timestamp Handling', () => {
       const id = await metadata.createEntry({
         path: '/ctime-test.txt',
         name: 'ctime-test.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1371,7 +1386,7 @@ describe('SQLiteMetadata Timestamp Handling', () => {
       const id = await metadata.createEntry({
         path: '/atime-test.txt',
         name: 'atime-test.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1393,7 +1408,7 @@ describe('SQLiteMetadata Timestamp Handling', () => {
       const id = await metadata.createEntry({
         path: '/mtime-test.txt',
         name: 'mtime-test.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1415,7 +1430,7 @@ describe('SQLiteMetadata Timestamp Handling', () => {
       const id = await metadata.createEntry({
         path: '/preserve-birthtime.txt',
         name: 'preserve-birthtime.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1443,7 +1458,7 @@ describe('SQLiteMetadata Timestamp Handling', () => {
       await metadata.createEntry({
         path: '/timestamp-precision.txt',
         name: 'timestamp-precision.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1640,7 +1655,7 @@ describe('SQLiteMetadata Statistics', () => {
       await metadata.createEntry({
         path: '/file1.txt',
         name: 'file1.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1654,7 +1669,7 @@ describe('SQLiteMetadata Statistics', () => {
       await metadata.createEntry({
         path: '/file2.txt',
         name: 'file2.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1673,7 +1688,7 @@ describe('SQLiteMetadata Statistics', () => {
       await metadata.createEntry({
         path: '/dir1',
         name: 'dir1',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
@@ -1687,7 +1702,7 @@ describe('SQLiteMetadata Statistics', () => {
       await metadata.createEntry({
         path: '/dir2',
         name: 'dir2',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
@@ -1707,7 +1722,7 @@ describe('SQLiteMetadata Statistics', () => {
       await metadata.createEntry({
         path: '/size1.txt',
         name: 'size1.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1721,7 +1736,7 @@ describe('SQLiteMetadata Statistics', () => {
       await metadata.createEntry({
         path: '/size2.txt',
         name: 'size2.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1789,7 +1804,7 @@ describe('SQLiteMetadata Edge Cases', () => {
       await metadata.createEntry({
         path: '/file with spaces.txt',
         name: 'file with spaces.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1808,7 +1823,7 @@ describe('SQLiteMetadata Edge Cases', () => {
       await metadata.createEntry({
         path: '/folder/readme.txt',
         name: 'readme.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1828,7 +1843,7 @@ describe('SQLiteMetadata Edge Cases', () => {
       await metadata.createEntry({
         path: `/${longName}`,
         name: longName,
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1852,7 +1867,7 @@ describe('SQLiteMetadata Edge Cases', () => {
           metadata.createEntry({
             path: `/concurrent-${i}.txt`,
             name: `concurrent-${i}.txt`,
-            parentId: '1',
+            parentId: '0',
             type: 'file',
             mode: 0o644,
             uid: 0,
@@ -1894,7 +1909,7 @@ describe('SQLiteMetadata Edge Cases', () => {
       await metadata.createEntry({
         path: '/dir-no-blob',
         name: 'dir-no-blob',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
@@ -1913,7 +1928,7 @@ describe('SQLiteMetadata Edge Cases', () => {
       await metadata.createEntry({
         path: '/not-a-link.txt',
         name: 'not-a-link.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1934,7 +1949,7 @@ describe('SQLiteMetadata Edge Cases', () => {
       const id = await metadata.createEntry({
         path: '/type-test.txt',
         name: 'type-test.txt',
-        parentId: '1',
+        parentId: '0',
         type: 'file',
         mode: 0o644,
         uid: 0,
@@ -1953,7 +1968,7 @@ describe('SQLiteMetadata Edge Cases', () => {
       const parentId = await metadata.createEntry({
         path: '/parent-type-test',
         name: 'parent-type-test',
-        parentId: '1',
+        parentId: '0',
         type: 'directory',
         mode: 0o755,
         uid: 0,
