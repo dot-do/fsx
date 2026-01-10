@@ -377,7 +377,7 @@ export async function createWriteStream(
 
   // Create WritableStream
   return new WritableStream<Uint8Array>({
-    write(chunk) {
+    write(chunk): void | Promise<void> {
       // Check if aborted
       if (aborted || signal?.aborted) {
         return Promise.reject(new Error('Write aborted'))
@@ -385,6 +385,7 @@ export async function createWriteStream(
 
       // Add chunk to buffer
       chunks.push(chunk)
+      return undefined
     },
 
     async close() {

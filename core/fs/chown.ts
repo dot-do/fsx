@@ -126,8 +126,9 @@ async function chownInternal(
   }
 
   // Get current user info
-  const currentUid = storage.getUid()
+  const _currentUid = storage.getUid() // Reserved for future group membership checks
   const isRoot = storage.isRoot()
+  void _currentUid
 
   // Check permissions: only root can change ownership
   // Non-root users cannot change uid at all

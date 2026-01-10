@@ -79,7 +79,7 @@ function getParentPath(path: string): string {
 export async function symlink(
   target: string,
   path: string,
-  type?: 'file' | 'dir' | 'junction'
+  _type?: 'file' | 'dir' | 'junction' // Node.js compatibility - ignored in virtual fs
 ): Promise<void> {
   // Validate target is not empty
   if (target === '') {

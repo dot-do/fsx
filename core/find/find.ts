@@ -3,14 +3,58 @@
  *
  * Provides Unix find-like functionality for searching files in the virtual filesystem.
  * Supports filtering by name patterns, file type, size, timestamps, and more.
+ * Includes timeout and cancellation support for long-running searches.
  *
  * @module find
  */
 
 import { match } from '../glob/match'
+import type { FsBackend } from '../backend'
 
 /**
- * Options for the find() function
+ * Error thrown when a find operation times out.
+ */
+export class FindTimeoutError extends Error {
+  /** Starting path that was being searched */
+  path: string
+  /** Timeout duration in milliseconds */
+  timeout: number
+
+  constructor(path: string, timeout: number) {
+    super(`Find operation timed out after ${timeout}ms while searching '${path}'`)
+    this.name = 'FindTimeoutError'
+    this.path = path
+    this.timeout = timeout
+  }
+}
+
+/**
+ * Error thrown when a find operation is aborted.
+ */
+export class FindAbortedError extends Error {
+  /** Starting path that was being searched */
+  path: string
+
+  constructor(path: string) {
+    super(`Find operation was aborted while searching '${path}'`)
+    this.name = 'FindAbortedError'
+    this.path = path
+  }
+}
+
+/**
+ * Options for the find() function.
+ *
+ * @example
+ * ```typescript
+ * const options: FindOptions = {
+ *   path: '/src',
+ *   name: '*.ts',
+ *   type: 'f',
+ *   prune: ['node_modules'],
+ *   timeout: 5000,
+ * }
+ * ```
  */
 export interface FindOptions {
   /** Starting path for the search (default: '/') */
@@ -35,6 +79,20 @@ export interface FindOptions {
   empty?: boolean
   /** Directory patterns to skip during traversal */
   prune?: string[]
+  /** FsBackend to use for filesystem operations (optional, falls back to mock FS) */
+  backend?: FsBackend
+  /**
+   * Timeout in milliseconds for the entire find operation.
+   * Set to 0 or undefined for no timeout.
+   * @throws {FindTimeoutError} When timeout is exceeded
+   */
+  timeout?: number
+  /**
+   * AbortSignal for cancelling the find operation.
+   * When aborted, throws FindAbortedError.
+   * @throws {FindAbortedError} When signal is aborted
+   */
+  signal?: AbortSignal
 }
 
 /**
@@ -471,8 +529,9 @@ function basename(path: string): string {
 
 /**
  * Calculate depth of a path relative to a starting path
+ * @internal Reserved for future use with depth-based filtering
  */
-function getRelativeDepth(path: string, startPath: string): number {
+function _getRelativeDepth(path: string, startPath: string): number {
   const normalizedPath = normalizePath(path)
   const normalizedStart = normalizePath(startPath)
 
@@ -484,6 +543,8 @@ function getRelativeDepth(path: string, startPath: string): number {
 
   return pathParts.length - startParts.length
 }
+// Export for potential use
+void _getRelativeDepth
 
 /**
  * Find files in the filesystem matching the given criteria
@@ -515,28 +576,206 @@ function getRelativeDepth(path: string, startPath: string): number {
  * ```
  */
 export async function find(options: FindOptions = {}): Promise<FindResult[]> {
+  const startTime = Date.now()
   const startPath = normalizePath(options.path || '/')
   const maxdepth = options.maxdepth ?? Infinity
   const mindepth = options.mindepth ?? 0
+  const backend = options.backend
+  const timeout = options.timeout
+  const signal = options.signal
+
+  // Helper to check timeout
+  const checkTimeout = (): void => {
+    if (timeout && timeout > 0) {
+      const elapsed = Date.now() - startTime
+      if (elapsed > timeout) {
+        throw new FindTimeoutError(startPath, timeout)
+      }
+    }
+  }
+
+  // Helper to check abort
+  const checkAbort = (): void => {
+    if (signal?.aborted) {
+      throw new FindAbortedError(startPath)
+    }
+  }
+
+  // Check for immediate abort/timeout
+  checkAbort()
+  checkTimeout()
 
   // If mindepth > maxdepth, return empty (impossible range)
   if (mindepth > maxdepth) {
     return []
   }
 
-  // Check if starting path exists
-  const startEntry = mockFS.get(startPath)
-  if (!startEntry) {
-    return []
+  // Check if starting path exists - use backend if provided
+  if (backend) {
+    const exists = await backend.exists(startPath)
+    if (!exists) {
+      return []
+    }
+  } else {
+    const startEntry = mockFS.get(startPath)
+    if (!startEntry) {
+      return []
+    }
   }
 
   const results: FindResult[] = []
   const visited = new Set<string>() // To prevent infinite loops with symlinks
 
   /**
-   * Recursively traverse the filesystem
+   * Recursively traverse the filesystem using backend
    */
-  function traverse(currentPath: string, depth: number): void {
+  async function traverseWithBackend(currentPath: string, depth: number): Promise<void> {
+    // Check for timeout/abort at each directory
+    checkTimeout()
+    checkAbort()
+
+    // Prevent infinite loops
+    if (visited.has(currentPath)) {
+      return
+    }
+    visited.add(currentPath)
+
+    // Check depth limits for traversal
+    if (depth > maxdepth) {
+      return
+    }
+
+    // Get stats for current path
+    let stats
+    try {
+      stats = await backend!.stat(currentPath)
+    } catch (err) {
+      // Handle permission denied gracefully - skip this path
+      const e = err as Error & { code?: string }
+      if (e.code === 'EACCES' || e.message?.includes('EACCES')) {
+        return
+      }
+      throw err
+    }
+    const entryType: 'file' | 'directory' | 'symlink' = stats.isDirectory() ? 'directory' : stats.isSymbolicLink?.() ? 'symlink' : 'file'
+
+    const filename = currentPath === '/' ? '/' : basename(currentPath)
+
+    // Check prune patterns (skip directories and their contents, also skip files matching prune pattern)
+    if (options.prune && depth > 0) {
+      if (shouldPrune(filename, options.prune)) {
+        return
+      }
+    }
+
+    // Check if this entry should be included in results
+    let include = true
+
+    // Check mindepth
+    if (depth < mindepth) {
+      include = false
+    }
+
+    // Check name filter
+    if (include && options.name !== undefined) {
+      if (currentPath !== startPath || depth > 0) {
+        if (!matchesName(filename, options.name)) {
+          include = false
+        }
+      } else if (currentPath === startPath && depth === 0) {
+        if (!matchesName(filename, options.name)) {
+          include = false
+        }
+      }
+    }
+
+    // Check type filter
+    if (include && options.type !== undefined) {
+      const typeMap: Record<string, 'file' | 'directory' | 'symlink'> = {
+        'f': 'file',
+        'd': 'directory',
+        'l': 'symlink'
+      }
+      if (entryType !== typeMap[options.type]) {
+        include = false
+      }
+    }
+
+    // Check size filter (typically only for files)
+    if (include && options.size !== undefined) {
+      if (!matchesSize(stats.size, options.size)) {
+        include = false
+      }
+    }
+
+    // Check time filters
+    if (include && options.mtime !== undefined) {
+      if (!matchesTime(stats.mtimeMs, options.mtime)) {
+        include = false
+      }
+    }
+
+    if (include && options.ctime !== undefined) {
+      if (!matchesTime(stats.ctimeMs, options.ctime)) {
+        include = false
+      }
+    }
+
+    if (include && options.atime !== undefined) {
+      if (!matchesTime(stats.atimeMs, options.atime)) {
+        include = false
+      }
+    }
+
+    // Check empty filter
+    if (include && options.empty !== undefined) {
+      if (options.empty) {
+        if (entryType === 'file') {
+          if (stats.size !== 0) include = false
+        } else if (entryType === 'directory') {
+          const children = await backend!.readdir(currentPath)
+          if (children.length !== 0) include = false
+        } else {
+          include = false
+        }
+      } else {
+        if (entryType === 'file') {
+          if (stats.size === 0) include = false
+        } else if (entryType === 'directory') {
+          const children = await backend!.readdir(currentPath)
+          if (children.length === 0) include = false
+        }
+      }
+    }
+
+    // Add to results if all filters pass
+    if (include) {
+      results.push({
+        path: currentPath,
+        type: entryType,
+        size: entryType === 'directory' ? 0 : stats.size,
+        mtime: new Date(stats.mtimeMs)
+      })
+    }
+
+    // Recurse into directories
+    if (entryType === 'directory' && depth < maxdepth) {
+      const children = await backend!.readdir(currentPath) as string[]
+      for (const childName of children) {
+        const childPath = currentPath === '/' ? '/' + childName : currentPath + '/' + childName
+        await traverseWithBackend(childPath, depth + 1)
+      }
+    }
+  }
+
+  /**
+   * Recursively traverse the filesystem using mock FS
+   */
+  function traverseWithMock(currentPath: string, depth: number): void {
+    // Check for timeout/abort at each directory
+    checkTimeout()
+    checkAbort()
+
     // Prevent infinite loops
     if (visited.has(currentPath)) {
       return
@@ -662,12 +901,17 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
     if (entry.type === 'directory' && entry.children && depth < maxdepth) {
       for (const childName of entry.children) {
         const childPath = currentPath === '/' ? '/' + childName : currentPath + '/' + childName
-        traverse(childPath, depth + 1)
+        traverseWithMock(childPath, depth + 1)
       }
     }
   }
 
-  traverse(startPath, 0)
+  // Use appropriate traversal method
+  if (backend) {
+    await traverseWithBackend(startPath, 0)
+  } else {
+    traverseWithMock(startPath, 0)
+  }
 
   // Sort results by path for stable ordering
   results.sort((a, b) => a.path.localeCompare(b.path))

@@ -5,8 +5,8 @@
  * Does NOT remove directories (use rmdir for that).
  */
 
-import { ENOENT, EISDIR, EINVAL } from '../errors'
-import { normalize, dirname, basename } from '../path'
+import { ENOENT, EISDIR } from '../errors'
+import { normalize } from '../path'
 
 /**
  * File entry in the virtual filesystem

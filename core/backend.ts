@@ -12,13 +12,11 @@ import type {
   Stats,
   StatsInit,
   Dirent,
-  ReadOptions,
   WriteOptions,
   MkdirOptions,
   RmdirOptions,
   ReaddirOptions,
   StorageTier,
-  FileEntry,
 } from './types.js'
 
 // =============================================================================
@@ -666,7 +664,7 @@ export class MemoryBackend implements FsBackend {
       for (const name of entries) {
         const fullPath = prefix + name
         const isDir = this.directories.has(fullPath)
-        result.push(new DirentClass(name, isDir ? 'directory' : 'file'))
+        result.push(new DirentClass(name, normalized, isDir ? 'directory' : 'file'))
       }
       return result
     }

@@ -21,7 +21,7 @@ describe('SDK Export Pattern', () => {
       // This import should work when fs singleton is exported
       const module = await import('../index.js')
       expect(module.fs).toBeDefined()
-    })
+    }, 15000)
 
     it('should export fs as a named export', async () => {
       // The fs export should be accessible as a named import

@@ -27,9 +27,12 @@ import { FsModule, type FsModuleConfig } from './module.js'
 // ============================================================================
 
 /**
- * Constructor type for class mixins
+ * Constructor type for class mixins.
+ * Using `unknown[]` instead of `any[]` would break mixin patterns,
+ * so `any[]` is the standard TypeScript pattern here.
  */
-type Constructor<T = {}> = new (...args: any[]) => T
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Constructor<T = object> = new (...args: any[]) => T
 
 /**
  * Base interface for classes that have a WorkflowContext ($)
@@ -167,13 +170,14 @@ export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurable
     hasCapability(name: string): boolean {
       if (name === 'fs') return true
       // Check parent class
-      const baseProto = Base.prototype
-      if (baseProto && typeof (baseProto as any).hasCapability === 'function') {
-        return (baseProto as any).hasCapability.call(this, name)
+      const baseProto = Base.prototype as { hasCapability?: (name: string) => boolean }
+      if (baseProto && typeof baseProto.hasCapability === 'function') {
+        return baseProto.hasCapability.call(this, name)
       }
       return false
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     constructor(...args: any[]) {
       super(...args)
 
@@ -188,7 +192,7 @@ export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurable
             return self._fsCapability
           }
           // Forward to original context
-          const value = (target as any)[prop]
+          const value = (target as unknown as Record<string | symbol, unknown>)[prop]
           if (typeof value === 'function') {
             return value.bind(target)
           }

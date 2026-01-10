@@ -8,9 +8,52 @@
  */
 
 import { createMatcher } from './match'
+import type { FsBackend } from '../backend'
 
 /**
- * Options for glob file matching
+ * Error thrown when a glob operation times out.
+ */
+export class GlobTimeoutError extends Error {
+  /** The pattern(s) that were being matched */
+  pattern: string | string[]
+  /** Timeout duration in milliseconds */
+  timeout: number
+
+  constructor(pattern: string | string[], timeout: number) {
+    super(`Glob operation timed out after ${timeout}ms`)
+    this.name = 'GlobTimeoutError'
+    this.pattern = pattern
+    this.timeout = timeout
+  }
+}
+
+/**
+ * Error thrown when a glob operation is aborted.
+ */
+export class GlobAbortedError extends Error {
+  /** The pattern(s) that were being matched */
+  pattern: string | string[]
+
+  constructor(pattern: string | string[]) {
+    super('Glob operation was aborted')
+    this.name = 'GlobAbortedError'
+    this.pattern = pattern
+  }
+}
+
+/**
+ * Options for glob file matching.
+ *
+ * @example
+ * ```typescript
+ * const options: GlobOptions = {
+ *   cwd: '/src',
+ *   deep: 3,
+ *   ignore: ['node_modules/**'],
+ *   timeout: 5000,
+ *   backend: myBackend,
+ * }
+ * ```
  */
 export interface GlobOptions {
   /** Base directory for matching (default: '/') */
@@ -29,6 +72,20 @@ export interface GlobOptions {
   absolute?: boolean
   /** Follow symbolic links (default: true) */
   followSymlinks?: boolean
+  /** FsBackend to use for filesystem operations (optional, falls back to mock FS) */
+  backend?: FsBackend
+  /**
+   * Timeout in milliseconds for the entire glob operation.
+   * Set to 0 or undefined for no timeout.
+   * @throws {GlobTimeoutError} When timeout is exceeded
+   */
+  timeout?: number
+  /**
+   * AbortSignal for cancelling the glob operation.
+   * When aborted, throws GlobAbortedError.
+   * @throws {GlobAbortedError} When signal is aborted
+   */
+  signal?: AbortSignal
 }
 
 /**
@@ -175,9 +232,13 @@ function getRelativePath(path: string, base: string): string {
 }
 
 /**
- * Traverse the filesystem and collect entries
+ * Legacy traverse function for filesystem entry collection.
+ * @deprecated Use collectEntriesWithBackend or collectEntriesWithMock instead.
+ * Kept for backwards compatibility with potential external consumers.
+ * @internal
  */
-async function traverse(
+// @ts-expect-error Legacy function - preserved for potential external use
+async function _traverse(
   dir: string,
   options: {
     dot: boolean
@@ -216,7 +277,7 @@ async function traverse(
 
     // Recurse into directories
     if (entry.type === 'directory') {
-      await traverse(fullPath, options, collector)
+      await _traverse(fullPath, options, collector)
     }
   }
 }
@@ -233,12 +294,22 @@ function patternExplicitlyMatchesDot(pattern: string): boolean {
 }
 
 /**
- * Find files matching glob patterns
+ * Find files matching glob patterns.
+ *
+ * This function searches for files matching one or more glob patterns.
+ * It supports:
+ * - Single or multiple patterns
+ * - Exclusion patterns via `ignore` option
+ * - Depth limiting
+ * - Timeout and cancellation support
+ * - Both real filesystem (via FsBackend) and mock filesystem
  *
  * @param pattern - Single pattern or array of patterns to match
- * @param options - Glob options
- * @returns Array of matching file paths
- * @throws Error if cwd does not exist
+ * @param options - Glob options for filtering and behavior control
+ * @returns Promise resolving to array of matching file paths
+ * @throws {Error} If cwd does not exist or pattern is empty
+ * @throws {GlobTimeoutError} If timeout is exceeded
+ * @throws {GlobAbortedError} If signal is aborted
  *
  * @example
  * ```typescript
@@ -250,12 +321,22 @@ function patternExplicitlyMatchesDot(pattern: string): boolean {
  *
  * // Exclude node_modules
  * const filtered = await glob('**\/*.js', { ignore: ['**\/node_modules/**'] })
+ *
+ * // With timeout
+ * const files = await glob('**\/*.ts', { timeout: 5000 })
+ *
+ * // With abort signal
+ * const controller = new AbortController()
+ * setTimeout(() => controller.abort(), 2000)
+ * const files = await glob('**\/*.ts', { signal: controller.signal })
  * ```
  */
 export async function glob(
   pattern: string | string[],
   options?: GlobOptions
 ): Promise<string[]> {
+  const startTime = Date.now()
+
   // Normalize pattern to array
   const patterns = Array.isArray(pattern) ? pattern : [pattern]
 
@@ -278,10 +359,41 @@ export async function glob(
   const deep = options?.deep
   const absolute = options?.absolute ?? false
   const followSymlinks = options?.followSymlinks ?? true
+  const backend = options?.backend
+  const timeout = options?.timeout
+  const signal = options?.signal
 
-  // Check if cwd exists
-  if (!mockFS.has(cwd)) {
-    throw new Error(`ENOENT: no such file or directory, scandir '${cwd}'`)
+  // Helper to check timeout
+  const checkTimeout = (): void => {
+    if (timeout && timeout > 0) {
+      const elapsed = Date.now() - startTime
+      if (elapsed > timeout) {
+        throw new GlobTimeoutError(pattern, timeout)
+      }
+    }
+  }
+
+  // Helper to check abort
+  const checkAbort = (): void => {
+    if (signal?.aborted) {
+      throw new GlobAbortedError(pattern)
+    }
+  }
+
+  // Check for immediate abort/timeout
+  checkAbort()
+  checkTimeout()
+
+  // Check if cwd exists - use backend if provided
+  if (backend) {
+    const exists = await backend.exists(cwd)
+    if (!exists) {
+      throw new Error(`ENOENT: no such file or directory, scandir '${cwd}'`)
+    }
+  } else {
+    if (!mockFS.has(cwd)) {
+      throw new Error(`ENOENT: no such file or directory, scandir '${cwd}'`)
+    }
   }
 
   // Check if any pattern explicitly targets dotfiles
@@ -305,11 +417,67 @@ export async function glob(
   // depth tracks how many directory levels we've traversed (0 = cwd level, 1 = first level, etc.)
   const allEntries: Array<{ path: string; type: FileType; dirDepth: number }> = []
 
-  // Recursive collector function with depth tracking
-  async function collectEntries(
+  // Recursive collector function with depth tracking (uses backend when available)
+  async function collectEntriesWithBackend(
     dir: string,
     currentDirDepth: number
   ): Promise<void> {
+    // Check for timeout/abort at each directory
+    checkTimeout()
+    checkAbort()
+
+    // Use backend for readdir
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>
+    try {
+      entries = await backend!.readdir(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>
+    } catch (err) {
+      // Handle permission denied gracefully - skip directory
+      const e = err as Error & { code?: string }
+      if (e.code === 'EACCES' || e.message?.includes('EACCES')) {
+        return
+      }
+      throw err
+    }
+
+    for (const entry of entries) {
+      const fullPath = joinPath(dir, entry.name)
+      const isDotEntry_ = isDotEntry(entry.name)
+
+      // For dotfiles/dotdirs: include if dot option is true OR if a pattern explicitly targets them
+      if (isDotEntry_ && !dot && !anyPatternTargetsDot) {
+        continue
+      }
+
+      // Determine entry type using stat
+      const stats = await backend!.stat(fullPath)
+      const entryType: FileType = stats.isDirectory() ? 'directory' : stats.isSymbolicLink?.() ? 'symlink' : 'file'
+
+      // Handle symlinks
+      if (entryType === 'symlink' && !followSymlinks) {
+        allEntries.push({ path: fullPath, type: 'symlink', dirDepth: currentDirDepth })
+        continue
+      }
+
+      allEntries.push({ path: fullPath, type: entryType, dirDepth: currentDirDepth })
+
+      // Recurse into directories if within depth limit
+      if (entryType === 'directory') {
+        if (deep === undefined || currentDirDepth < deep) {
+          await collectEntriesWithBackend(fullPath, currentDirDepth + 1)
+        }
+      }
+    }
+  }
+
+  // Recursive collector function with depth tracking (uses mockFS)
+  async function collectEntriesWithMock(
+    dir: string,
+    currentDirDepth: number
+  ): Promise<void> {
+    // Check for timeout/abort at each directory
+    checkTimeout()
+    checkAbort()
+
     const entries = mockFS.get(normalizePath(dir))
     if (!entries) return
 
@@ -336,14 +504,18 @@ export async function glob(
         // deep: 0 means only root level files (no dirs traversed)
         // deep: 1 means traverse 1 level of directories
         if (deep === undefined || currentDirDepth < deep) {
-          await collectEntries(fullPath, currentDirDepth + 1)
+          await collectEntriesWithMock(fullPath, currentDirDepth + 1)
         }
       }
     }
   }
 
-  // Start collecting from cwd at depth 0
-  await collectEntries(cwd, 0)
+  // Start collecting from cwd at depth 0 - use appropriate collector
+  if (backend) {
+    await collectEntriesWithBackend(cwd, 0)
+  } else {
+    await collectEntriesWithMock(cwd, 0)
+  }
 
   // Filter and match entries
   const results: Set<string> = new Set()
@@ -362,7 +534,7 @@ export async function glob(
 
     // Check if matches any pattern
     let matches = false
-    for (const { pattern: p, matcher, explicitDot } of patternMatchers) {
+    for (const { pattern: _p, matcher, explicitDot } of patternMatchers) {
       // For dotfiles, only match if dot option is true or pattern explicitly targets them
       if (!dot && !explicitDot) {
         const pathParts = relativePath.split('/')

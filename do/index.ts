@@ -7,6 +7,15 @@
  * - withFs: Mixin function to add $.fs capability to DO classes
  * - FileSystemDO: Complete Durable Object with HTTP API
  *
+ * ## Architecture
+ *
+ * FileSystemDO is a thin HTTP/RPC wrapper around FsModule. All filesystem
+ * logic is implemented in FsModule to avoid code duplication. This separation
+ * provides:
+ *
+ * - FsModule: Core filesystem operations, transactions, tiered storage
+ * - FileSystemDO: HTTP API layer using Hono, streaming endpoints
+ *
  * @example
  * ```typescript
  * // Using FsModule directly
@@ -34,13 +43,23 @@
  */
 
 import { DurableObject } from 'cloudflare:workers'
-import { Hono, type Context } from 'hono'
-import { constants } from '../core/constants.js'
-import type { FileType } from '../core/types.js'
+import { Hono } from 'hono'
+import { FsModule } from './module.js'
+import type { Stats, Dirent } from '../core/types.js'
 
 // Re-export FsModule and related types for fsx/do entry point
 export { FsModule, type FsModuleConfig } from './module.js'
 export { withFs, hasFs, getFs, type WithFsContext, type WithFsOptions, type WithFsDO } from './mixin.js'
+
+// Re-export security module for path validation
+export {
+  PathValidator,
+  pathValidator,
+  SecurityConstants,
+  type ValidationResult,
+  type ValidationSuccess,
+  type ValidationFailure,
+} from './security.js'
 
 // Re-export CloudflareContainerExecutor and related types for fsx/do entry point
 export {
@@ -62,51 +81,13 @@ export {
 interface Env {
   FSX: DurableObjectNamespace
   R2?: R2Bucket
+  ARCHIVE?: R2Bucket
 }
 
 /**
- * Internal file entry matching SQLite schema (snake_case columns)
+ * Stats-like object for HTTP API responses (plain object, not class instances)
  */
-interface SqlFileEntry {
-  id: string
-  path: string
-  name: string
-  parent_id: string | null
-  type: FileType
-  mode: number
-  uid: number
-  gid: number
-  size: number
-  blob_id: string | null
-  link_target: string | null
-  atime: number
-  mtime: number
-  ctime: number
-  birthtime: number
-  nlink: number
-  [key: string]: string | number | null | FileType
-}
-
-/**
- * Dirent-like object for directory listings
- */
-interface DirentLike {
-  name: string
-  parentPath: string
-  path: string
-  isFile: () => boolean
-  isDirectory: () => boolean
-  isSymbolicLink: () => boolean
-  isBlockDevice: () => boolean
-  isCharacterDevice: () => boolean
-  isFIFO: () => boolean
-  isSocket: () => boolean
-}
-
-/**
- * Stats-like object returned from stat operations
- */
-interface StatsLike {
+interface StatsResponse {
   dev: number
   ino: number
   mode: number
@@ -124,232 +105,233 @@ interface StatsLike {
 }
 
 /**
- * SQLite schema for filesystem metadata
+ * Dirent-like response for HTTP API (serializable)
  */
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS files (
-    id TEXT PRIMARY KEY,
-    path TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    parent_id TEXT,
-    type TEXT NOT NULL,
-    mode INTEGER NOT NULL DEFAULT 420,
-    uid INTEGER NOT NULL DEFAULT 0,
-    gid INTEGER NOT NULL DEFAULT 0,
-    size INTEGER NOT NULL DEFAULT 0,
-    blob_id TEXT,
-    link_target TEXT,
-    atime INTEGER NOT NULL,
-    mtime INTEGER NOT NULL,
-    ctime INTEGER NOT NULL,
-    birthtime INTEGER NOT NULL,
-    nlink INTEGER NOT NULL DEFAULT 1,
-    FOREIGN KEY (parent_id) REFERENCES files(id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
-  CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent_id);
-
-  CREATE TABLE IF NOT EXISTS blobs (
-    id TEXT PRIMARY KEY,
-    data BLOB,
-    size INTEGER NOT NULL,
-    checksum TEXT,
-    tier TEXT NOT NULL DEFAULT 'hot',
-    created_at INTEGER NOT NULL
-  );
-`
+interface DirentResponse {
+  name: string
+  parentPath: string
+  path: string
+  type: 'file' | 'directory' | 'symlink'
+}
 
 /**
  * FileSystemDO - Durable Object for filesystem operations
+ *
+ * This class provides an HTTP/RPC API layer on top of FsModule.
+ * All filesystem logic is delegated to FsModule to avoid code duplication.
+ *
+ * ## Endpoints
+ *
+ * - POST /rpc - JSON-RPC endpoint for filesystem operations
+ * - POST /stream/read - Streaming file read with range support
+ * - POST /stream/write - Streaming file write
+ *
+ * @example
+ * ```typescript
+ * // RPC call example
+ * const response = await fetch(doStub, {
+ *   method: 'POST',
+ *   body: JSON.stringify({
+ *     method: 'readFile',
+ *     params: { path: '/config.json', encoding: 'utf-8' }
+ *   })
+ * })
+ * const { data } = await response.json()
+ * ```
  */
 export class FileSystemDO extends DurableObject<Env> {
   private app: Hono
-  private initialized = false
+  private fsModule: FsModule
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
+
+    // Create FsModule with storage configuration
+    this.fsModule = new FsModule({
+      sql: ctx.storage.sql,
+      r2: env.R2,
+      archive: env.ARCHIVE,
+    })
+
     this.app = this.createApp()
-  }
-
-  private async ensureInitialized() {
-    if (this.initialized) return
-
-    // Run schema
-    await this.ctx.storage.sql.exec(SCHEMA)
-
-    // Create root directory if not exists
-    const root = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE path = ?', '/').one()
-
-    if (!root) {
-      const now = Date.now()
-      await this.ctx.storage.sql.exec(
-        `INSERT INTO files (id, path, name, parent_id, type, mode, uid, gid, size, atime, mtime, ctime, birthtime, nlink)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        crypto.randomUUID(),
-        '/',
-        '',
-        null,
-        'directory',
-        0o755,
-        0,
-        0,
-        0,
-        now,
-        now,
-        now,
-        now,
-        2
-      )
-    }
-
-    this.initialized = true
   }
 
   private createApp(): Hono {
     const app = new Hono()
 
-    // RPC endpoint
+    // RPC endpoint - delegates to FsModule
     app.post('/rpc', async (c) => {
-      await this.ensureInitialized()
-
       const { method, params } = await c.req.json<{ method: string; params: Record<string, unknown> }>()
 
       try {
         const result = await this.handleMethod(method, params)
         return c.json(result)
-      } catch (error: any) {
-        return c.json({ code: error.code || 'UNKNOWN', message: error.message, path: error.path }, error.code === 'ENOENT' ? 404 : 400)
+      } catch (error: unknown) {
+        const fsError = error as { code?: string; message?: string; path?: string }
+        return c.json(
+          { code: fsError.code || 'UNKNOWN', message: fsError.message, path: fsError.path },
+          fsError.code === 'ENOENT' ? 404 : 400
+        )
       }
     })
 
-    // Streaming read
+    // Streaming read - optimized for large files
     app.post('/stream/read', async (c) => {
-      await this.ensureInitialized()
       const { path, start, end } = await c.req.json<{ path: string; start?: number; end?: number }>()
 
-      const file = await this.getFile(path)
-      if (!file) {
-        return c.json({ code: 'ENOENT', message: 'no such file or directory', path }, 404)
+      try {
+        const data = await this.fsModule.read(path, { start, end })
+
+        if (typeof data === 'string') {
+          return new Response(new TextEncoder().encode(data))
+        }
+
+        return new Response(data)
+      } catch (error: unknown) {
+        const fsError = error as { code?: string; message?: string; path?: string }
+        return c.json(
+          { code: fsError.code || 'UNKNOWN', message: fsError.message, path: fsError.path },
+          fsError.code === 'ENOENT' ? 404 : 400
+        )
       }
-
-      if (file.type === 'directory') {
-        return c.json({ code: 'EISDIR', message: 'illegal operation on a directory', path }, 400)
-      }
-
-      if (!file.blob_id) {
-        return new Response(new Uint8Array(0))
-      }
-
-      const blob = await this.ctx.storage.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', file.blob_id).one()
-
-      if (!blob?.data) {
-        return new Response(new Uint8Array(0))
-      }
-
-      let data = new Uint8Array(blob.data)
-      if (start !== undefined || end !== undefined) {
-        data = data.slice(start ?? 0, end !== undefined ? end + 1 : undefined)
-      }
-
-      return new Response(data)
     })
 
-    // Streaming write
+    // Streaming write - optimized for large files
     app.post('/stream/write', async (c) => {
-      await this.ensureInitialized()
       const path = c.req.header('X-FSx-Path')
-      const options = JSON.parse(c.req.header('X-FSx-Options') || '{}')
+      const optionsHeader = c.req.header('X-FSx-Options')
 
       if (!path) {
         return c.json({ code: 'EINVAL', message: 'path required' }, 400)
       }
 
-      const data = await c.req.arrayBuffer()
-      await this.writeFile(path, new Uint8Array(data), options)
-
-      return c.json({ success: true })
+      try {
+        const options = optionsHeader ? JSON.parse(optionsHeader) : {}
+        const data = await c.req.arrayBuffer()
+        await this.fsModule.write(path, new Uint8Array(data), options)
+        return c.json({ success: true })
+      } catch (error: unknown) {
+        const fsError = error as { code?: string; message?: string; path?: string }
+        return c.json(
+          { code: fsError.code || 'UNKNOWN', message: fsError.message, path: fsError.path },
+          fsError.code === 'ENOENT' ? 404 : 400
+        )
+      }
     })
 
     return app
   }
 
+  /**
+   * Handle RPC method calls by delegating to FsModule
+   */
   private async handleMethod(method: string, params: Record<string, unknown>): Promise<unknown> {
     switch (method) {
       case 'readFile':
-        return this.readFile(params.path as string, params.encoding as string | undefined)
+        return this.handleReadFile(params.path as string, params.encoding as string | undefined)
+
       case 'writeFile':
-        return this.writeFile(params.path as string, params.data as string, params)
+        await this.fsModule.write(params.path as string, params.data as string | Uint8Array, params)
+        return { success: true }
+
       case 'unlink':
-        return this.unlink(params.path as string)
+        await this.fsModule.unlink(params.path as string)
+        return { success: true }
+
       case 'rename':
-        return this.rename(params.oldPath as string, params.newPath as string)
+        await this.fsModule.rename(params.oldPath as string, params.newPath as string, params)
+        return { success: true }
+
       case 'copyFile':
-        return this.copyFile(params.src as string, params.dest as string)
+        await this.fsModule.copyFile(params.src as string, params.dest as string, params)
+        return { success: true }
+
       case 'mkdir':
-        return this.mkdir(params.path as string, params as { recursive?: boolean; mode?: number })
+        await this.fsModule.mkdir(params.path as string, params as { recursive?: boolean; mode?: number })
+        return { success: true }
+
       case 'rmdir':
-        return this.rmdir(params.path as string, params as { recursive?: boolean })
+        await this.fsModule.rmdir(params.path as string, params as { recursive?: boolean })
+        return { success: true }
+
       case 'rm':
-        return this.rm(params.path as string, params as { recursive?: boolean; force?: boolean })
+        await this.fsModule.rm(params.path as string, params as { recursive?: boolean; force?: boolean })
+        return { success: true }
+
       case 'readdir':
-        return this.readdir(params.path as string, params as { withFileTypes?: boolean; recursive?: boolean })
+        return this.handleReaddir(params.path as string, params as { withFileTypes?: boolean; recursive?: boolean })
+
       case 'stat':
+        return this.handleStat(params.path as string, false)
+
       case 'lstat':
-        return this.stat(params.path as string)
+        return this.handleStat(params.path as string, true)
+
       case 'access':
-        return this.access(params.path as string, params.mode as number)
+        await this.fsModule.access(params.path as string, params.mode as number)
+        return { success: true }
+
       case 'chmod':
-        return this.chmod(params.path as string, params.mode as number)
+        await this.fsModule.chmod(params.path as string, params.mode as number)
+        return { success: true }
+
       case 'chown':
-        return this.chown(params.path as string, params.uid as number, params.gid as number)
+        await this.fsModule.chown(params.path as string, params.uid as number, params.gid as number)
+        return { success: true }
+
       case 'symlink':
-        return this.symlink(params.target as string, params.path as string)
+        await this.fsModule.symlink(params.target as string, params.path as string)
+        return { success: true }
+
       case 'link':
-        return this.link(params.existingPath as string, params.newPath as string)
+        await this.fsModule.link(params.existingPath as string, params.newPath as string)
+        return { success: true }
+
       case 'readlink':
-        return this.readlink(params.path as string)
+        return { target: await this.fsModule.readlink(params.path as string) }
+
       case 'realpath':
-        return this.realpath(params.path as string)
+        return { path: await this.fsModule.realpath(params.path as string) }
+
       case 'truncate':
-        return this.truncate(params.path as string, params.length as number)
+        await this.fsModule.truncate(params.path as string, params.length as number)
+        return { success: true }
+
+      case 'utimes':
+        await this.fsModule.utimes(params.path as string, params.atime as number | Date, params.mtime as number | Date)
+        return { success: true }
+
+      case 'exists':
+        return { exists: await this.fsModule.exists(params.path as string) }
+
+      case 'getTier':
+        return { tier: await this.fsModule.getTier(params.path as string) }
+
+      case 'promote':
+        await this.fsModule.promote(params.path as string, params.tier as 'hot' | 'warm')
+        return { success: true }
+
+      case 'demote':
+        await this.fsModule.demote(params.path as string, params.tier as 'warm' | 'cold')
+        return { success: true }
+
       default:
         throw new Error(`Unknown method: ${method}`)
     }
   }
 
-  private async getFile(path: string): Promise<SqlFileEntry | null> {
-    const result = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE path = ?', path).one()
-    return result || null
-  }
+  /**
+   * Handle readFile with encoding support
+   */
+  private async handleReadFile(path: string, encoding?: string): Promise<{ data: string; encoding: string }> {
+    const result = await this.fsModule.read(path, { encoding })
 
-  private async readFile(path: string, encoding?: string): Promise<{ data: string; encoding: string }> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
+    if (typeof result === 'string') {
+      return { data: result, encoding: encoding || 'utf-8' }
     }
 
-    if (file.type === 'directory') {
-      throw Object.assign(new Error('illegal operation on a directory'), { code: 'EISDIR', path })
-    }
-
-    if (!file.blob_id) {
-      return { data: '', encoding: encoding || 'utf-8' }
-    }
-
-    const blob = await this.ctx.storage.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', file.blob_id).one()
-
-    if (!blob?.data) {
-      return { data: '', encoding: encoding || 'utf-8' }
-    }
-
-    if (encoding === 'utf-8' || encoding === 'utf8') {
-      const decoder = new TextDecoder()
-      return { data: decoder.decode(blob.data), encoding: 'utf-8' }
-    }
-
-    // Return as base64
-    const bytes = new Uint8Array(blob.data)
+    // Convert Uint8Array to base64 for JSON transport
+    const bytes = result
     let binary = ''
     for (const byte of bytes) {
       binary += String.fromCharCode(byte)
@@ -357,451 +339,50 @@ export class FileSystemDO extends DurableObject<Env> {
     return { data: btoa(binary), encoding: 'base64' }
   }
 
-  private async writeFile(path: string, data: string | Uint8Array, options: { encoding?: string; mode?: number; flag?: string } = {}): Promise<void> {
-    const now = Date.now()
-    const parentPath = path.substring(0, path.lastIndexOf('/')) || '/'
-    const name = path.substring(path.lastIndexOf('/') + 1)
-
-    // Ensure parent exists
-    const parent = await this.getFile(parentPath)
-    if (!parent) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path: parentPath })
-    }
-
-    // Decode data
-    let bytes: Uint8Array
-    if (typeof data === 'string') {
-      if (options.encoding === 'base64') {
-        const binary = atob(data)
-        bytes = new Uint8Array(binary.length)
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i)
-        }
-      } else {
-        const encoder = new TextEncoder()
-        bytes = encoder.encode(data)
-      }
-    } else {
-      bytes = data
-    }
-
-    const existing = await this.getFile(path)
-    const blobId = crypto.randomUUID()
-
-    // Store blob
-    await this.ctx.storage.sql.exec('INSERT INTO blobs (id, data, size, tier, created_at) VALUES (?, ?, ?, ?, ?)', blobId, bytes.buffer, bytes.length, 'hot', now)
-
-    if (existing) {
-      // Delete old blob
-      if (existing.blob_id) {
-        await this.ctx.storage.sql.exec('DELETE FROM blobs WHERE id = ?', existing.blob_id)
-      }
-
-      // Update file
-      await this.ctx.storage.sql.exec('UPDATE files SET blob_id = ?, size = ?, mtime = ?, ctime = ? WHERE id = ?', blobId, bytes.length, now, now, existing.id)
-    } else {
-      // Create new file
-      await this.ctx.storage.sql.exec(
-        `INSERT INTO files (id, path, name, parent_id, type, mode, uid, gid, size, blob_id, atime, mtime, ctime, birthtime, nlink)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        crypto.randomUUID(),
-        path,
-        name,
-        parent.id,
-        'file',
-        options.mode || 0o644,
-        0,
-        0,
-        bytes.length,
-        blobId,
-        now,
-        now,
-        now,
-        now,
-        1
-      )
-    }
-  }
-
-  private async unlink(path: string): Promise<void> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-
-    if (file.type === 'directory') {
-      throw Object.assign(new Error('illegal operation on a directory'), { code: 'EISDIR', path })
-    }
-
-    // Delete blob
-    if (file.blob_id) {
-      await this.ctx.storage.sql.exec('DELETE FROM blobs WHERE id = ?', file.blob_id)
-    }
-
-    // Delete file
-    await this.ctx.storage.sql.exec('DELETE FROM files WHERE id = ?', file.id)
-  }
-
-  private async rename(oldPath: string, newPath: string): Promise<void> {
-    const file = await this.getFile(oldPath)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path: oldPath })
-    }
-
-    const now = Date.now()
-    const newParentPath = newPath.substring(0, newPath.lastIndexOf('/')) || '/'
-    const newName = newPath.substring(newPath.lastIndexOf('/') + 1)
-
-    const newParent = await this.getFile(newParentPath)
-    if (!newParent) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path: newParentPath })
-    }
-
-    await this.ctx.storage.sql.exec('UPDATE files SET path = ?, name = ?, parent_id = ?, ctime = ? WHERE id = ?', newPath, newName, newParent.id, now, file.id)
-  }
-
-  private async copyFile(src: string, dest: string): Promise<void> {
-    const file = await this.getFile(src)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path: src })
-    }
-
-    const content = await this.readFile(src)
-    await this.writeFile(dest, content.data, { encoding: content.encoding })
-  }
-
-  private async mkdir(path: string, options: { recursive?: boolean; mode?: number } = {}): Promise<void> {
-    const now = Date.now()
-
-    if (options.recursive) {
-      const parts = path.split('/').filter(Boolean)
-      let currentPath = ''
-
-      for (const part of parts) {
-        currentPath += '/' + part
-        const existing = await this.getFile(currentPath)
-
-        if (!existing) {
-          const parentPath = currentPath.substring(0, currentPath.lastIndexOf('/')) || '/'
-          const parent = await this.getFile(parentPath)
-
-          await this.ctx.storage.sql.exec(
-            `INSERT INTO files (id, path, name, parent_id, type, mode, uid, gid, size, atime, mtime, ctime, birthtime, nlink)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            crypto.randomUUID(),
-            currentPath,
-            part,
-            parent?.id || null,
-            'directory',
-            options.mode || 0o755,
-            0,
-            0,
-            0,
-            now,
-            now,
-            now,
-            now,
-            2
-          )
-        }
-      }
-    } else {
-      const parentPath = path.substring(0, path.lastIndexOf('/')) || '/'
-      const name = path.substring(path.lastIndexOf('/') + 1)
-      const parent = await this.getFile(parentPath)
-
-      if (!parent) {
-        throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path: parentPath })
-      }
-
-      const existing = await this.getFile(path)
-      if (existing) {
-        throw Object.assign(new Error('file already exists'), { code: 'EEXIST', path })
-      }
-
-      await this.ctx.storage.sql.exec(
-        `INSERT INTO files (id, path, name, parent_id, type, mode, uid, gid, size, atime, mtime, ctime, birthtime, nlink)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        crypto.randomUUID(),
-        path,
-        name,
-        parent.id,
-        'directory',
-        options.mode || 0o755,
-        0,
-        0,
-        0,
-        now,
-        now,
-        now,
-        now,
-        2
-      )
-    }
-  }
-
-  private async rmdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-
-    if (file.type !== 'directory') {
-      throw Object.assign(new Error('not a directory'), { code: 'ENOTDIR', path })
-    }
-
-    const children = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE parent_id = ?', file.id).toArray()
-
-    if (children.length > 0 && !options.recursive) {
-      throw Object.assign(new Error('directory not empty'), { code: 'ENOTEMPTY', path })
-    }
-
-    if (options.recursive) {
-      for (const child of children) {
-        if (child.type === 'directory') {
-          await this.rmdir(child.path, { recursive: true })
-        } else {
-          await this.unlink(child.path)
-        }
-      }
-    }
-
-    await this.ctx.storage.sql.exec('DELETE FROM files WHERE id = ?', file.id)
-  }
-
-  private async rm(path: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
-    const file = await this.getFile(path)
-
-    if (!file) {
-      if (options.force) return
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-
-    if (file.type === 'directory') {
-      await this.rmdir(path, { recursive: options.recursive })
-    } else {
-      await this.unlink(path)
-    }
-  }
-
-  private async readdir(path: string, options: { withFileTypes?: boolean; recursive?: boolean } = {}): Promise<string[] | DirentLike[]> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-
-    if (file.type !== 'directory') {
-      throw Object.assign(new Error('not a directory'), { code: 'ENOTDIR', path })
-    }
-
-    const children = await this.ctx.storage.sql.exec<SqlFileEntry>('SELECT * FROM files WHERE parent_id = ?', file.id).toArray()
+  /**
+   * Handle readdir with serializable response
+   */
+  private async handleReaddir(
+    path: string,
+    options: { withFileTypes?: boolean; recursive?: boolean }
+  ): Promise<string[] | DirentResponse[]> {
+    const result = await this.fsModule.readdir(path, options)
 
     if (options.withFileTypes) {
-      const result: DirentLike[] = children.map((child) => ({
-        name: child.name,
-        parentPath: path,
-        path: child.path,
-        isFile: () => child.type === 'file',
-        isDirectory: () => child.type === 'directory',
-        isSymbolicLink: () => child.type === 'symlink',
-        isBlockDevice: () => false,
-        isCharacterDevice: () => false,
-        isFIFO: () => false,
-        isSocket: () => false,
+      // Convert Dirent objects to plain objects for JSON serialization
+      return (result as Dirent[]).map((entry) => ({
+        name: entry.name,
+        parentPath: entry.parentPath,
+        path: entry.parentPath + '/' + entry.name,
+        type: entry.isFile() ? 'file' : entry.isDirectory() ? 'directory' : 'symlink',
       }))
-
-      if (options.recursive) {
-        for (const child of children) {
-          if (child.type === 'directory') {
-            const subEntries = (await this.readdir(child.path, options)) as DirentLike[]
-            result.push(...subEntries)
-          }
-        }
-      }
-
-      return result
     }
 
-    const names = children.map((c) => c.name)
-
-    if (options.recursive) {
-      for (const child of children) {
-        if (child.type === 'directory') {
-          const subNames = (await this.readdir(child.path, options)) as string[]
-          names.push(...subNames.map((n) => child.name + '/' + n))
-        }
-      }
-    }
-
-    return names
+    return result as string[]
   }
 
-  private async stat(path: string): Promise<StatsLike> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
+  /**
+   * Handle stat/lstat with serializable response
+   */
+  private async handleStat(path: string, noFollow: boolean): Promise<StatsResponse> {
+    const stats = noFollow ? await this.fsModule.lstat(path) : await this.fsModule.stat(path)
 
-    const typeMode = file.type === 'directory' ? constants.S_IFDIR : file.type === 'symlink' ? constants.S_IFLNK : constants.S_IFREG
-
+    // Convert Stats object to plain object for JSON serialization
     return {
-      dev: 0,
-      ino: parseInt(file.id.replace(/-/g, '').substring(0, 12), 16),
-      mode: typeMode | file.mode,
-      nlink: file.nlink,
-      uid: file.uid,
-      gid: file.gid,
-      rdev: 0,
-      size: file.size,
-      blksize: 4096,
-      blocks: Math.ceil(file.size / 512),
-      atime: file.atime,
-      mtime: file.mtime,
-      ctime: file.ctime,
-      birthtime: file.birthtime,
-    }
-  }
-
-  private async access(path: string, mode: number = 0): Promise<void> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-    // Simplified: just check existence
-  }
-
-  private async chmod(path: string, mode: number): Promise<void> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-    await this.ctx.storage.sql.exec('UPDATE files SET mode = ?, ctime = ? WHERE id = ?', mode, Date.now(), file.id)
-  }
-
-  private async chown(path: string, uid: number, gid: number): Promise<void> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-    await this.ctx.storage.sql.exec('UPDATE files SET uid = ?, gid = ?, ctime = ? WHERE id = ?', uid, gid, Date.now(), file.id)
-  }
-
-  private async symlink(target: string, path: string): Promise<void> {
-    const now = Date.now()
-    const parentPath = path.substring(0, path.lastIndexOf('/')) || '/'
-    const name = path.substring(path.lastIndexOf('/') + 1)
-
-    const parent = await this.getFile(parentPath)
-    if (!parent) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path: parentPath })
-    }
-
-    await this.ctx.storage.sql.exec(
-      `INSERT INTO files (id, path, name, parent_id, type, mode, uid, gid, size, link_target, atime, mtime, ctime, birthtime, nlink)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      crypto.randomUUID(),
-      path,
-      name,
-      parent.id,
-      'symlink',
-      0o777,
-      0,
-      0,
-      target.length,
-      target,
-      now,
-      now,
-      now,
-      now,
-      1
-    )
-  }
-
-  private async link(existingPath: string, newPath: string): Promise<void> {
-    const file = await this.getFile(existingPath)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path: existingPath })
-    }
-
-    // Increment nlink
-    await this.ctx.storage.sql.exec('UPDATE files SET nlink = nlink + 1 WHERE id = ?', file.id)
-
-    // Create new entry pointing to same blob
-    const now = Date.now()
-    const parentPath = newPath.substring(0, newPath.lastIndexOf('/')) || '/'
-    const name = newPath.substring(newPath.lastIndexOf('/') + 1)
-
-    const parent = await this.getFile(parentPath)
-    if (!parent) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path: parentPath })
-    }
-
-    await this.ctx.storage.sql.exec(
-      `INSERT INTO files (id, path, name, parent_id, type, mode, uid, gid, size, blob_id, atime, mtime, ctime, birthtime, nlink)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      crypto.randomUUID(),
-      newPath,
-      name,
-      parent.id,
-      file.type,
-      file.mode,
-      file.uid,
-      file.gid,
-      file.size,
-      file.blob_id,
-      now,
-      now,
-      now,
-      now,
-      file.nlink + 1
-    )
-  }
-
-  private async readlink(path: string): Promise<string> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-    if (file.type !== 'symlink' || !file.link_target) {
-      throw Object.assign(new Error('invalid argument'), { code: 'EINVAL', path })
-    }
-    return file.link_target
-  }
-
-  private async realpath(path: string): Promise<string> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-
-    if (file.type === 'symlink' && file.link_target) {
-      // Resolve symlink
-      if (file.link_target.startsWith('/')) {
-        return this.realpath(file.link_target)
-      } else {
-        const parentPath = path.substring(0, path.lastIndexOf('/')) || '/'
-        return this.realpath(parentPath + '/' + file.link_target)
-      }
-    }
-
-    return path
-  }
-
-  private async truncate(path: string, length: number): Promise<void> {
-    const file = await this.getFile(path)
-    if (!file) {
-      throw Object.assign(new Error('no such file or directory'), { code: 'ENOENT', path })
-    }
-
-    if (file.blob_id) {
-      const blob = await this.ctx.storage.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', file.blob_id).one()
-
-      if (blob?.data) {
-        const bytes = new Uint8Array(blob.data)
-        const truncated = bytes.slice(0, length)
-        await this.ctx.storage.sql.exec('UPDATE blobs SET data = ?, size = ? WHERE id = ?', truncated.buffer, truncated.length, file.blob_id)
-        await this.ctx.storage.sql.exec('UPDATE files SET size = ?, mtime = ?, ctime = ? WHERE id = ?', truncated.length, Date.now(), Date.now(), file.id)
-      }
+      dev: stats.dev,
+      ino: stats.ino,
+      mode: stats.mode,
+      nlink: stats.nlink,
+      uid: stats.uid,
+      gid: stats.gid,
+      rdev: stats.rdev,
+      size: stats.size,
+      blksize: stats.blksize,
+      blocks: stats.blocks,
+      atime: stats.atimeMs ?? (stats.atime instanceof Date ? stats.atime.getTime() : stats.atime),
+      mtime: stats.mtimeMs ?? (stats.mtime instanceof Date ? stats.mtime.getTime() : stats.mtime),
+      ctime: stats.ctimeMs ?? (stats.ctime instanceof Date ? stats.ctime.getTime() : stats.ctime),
+      birthtime: stats.birthtimeMs ?? (stats.birthtime instanceof Date ? stats.birthtime.getTime() : stats.birthtime),
     }
   }
 

@@ -6,7 +6,7 @@
  */
 
 import { ENOENT, EISDIR, ENOTDIR, ENOTEMPTY, EINVAL } from '../errors'
-import { normalize, dirname, basename } from '../path'
+import { normalize, dirname } from '../path'
 
 /**
  * File entry in the virtual filesystem

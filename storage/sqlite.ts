@@ -4,16 +4,45 @@
  * Stores filesystem metadata in SQLite (via Durable Objects or D1).
  * Implements the {@link MetadataStorage} interface for consistent API.
  *
- * Features:
+ * ## Features
+ *
  * - INTEGER PRIMARY KEY for efficient rowid-based lookups
  * - Foreign key constraints for referential integrity
  * - Indexed paths and parent relationships for fast traversal
  * - Tiered storage tracking for hot/warm/cold placement
- * - Blob reference management with checksums
+ * - Blob reference management with checksums and reference counting
+ * - Full transaction support with savepoints for nested transactions
+ * - Automatic retry logic for transient failures
+ * - Configurable timeout handling
+ * - Instrumentation hooks for logging and metrics
  *
- * Schema:
+ * ## Schema
+ *
  * - `files` table: filesystem entries (files, directories, symlinks)
- * - `blobs` table: blob storage references with tier tracking
+ * - `blobs` table: blob storage references with tier tracking and ref_count
+ *
+ * ## Transaction Isolation
+ *
+ * SQLite in Durable Objects operates in SERIALIZABLE isolation mode, which is
+ * the strongest isolation level. This means:
+ *
+ * - **Read Committed**: All reads within a transaction see a consistent snapshot
+ * - **Repeatable Reads**: Multiple reads of the same data return identical results
+ * - **Phantom Prevention**: New rows inserted by other transactions are not visible
+ * - **No Dirty Reads**: Only committed data is ever visible
+ *
+ * Since Durable Objects use a single-connection model, there is no concurrent
+ * transaction contention. All transactions are effectively serialized through
+ * the Durable Object's input gate.
+ *
+ * ## Concurrent Access Patterns
+ *
+ * The implementation is optimized for Durable Object's single-connection model:
+ *
+ * - Operations are naturally serialized through the DO input gate
+ * - Reference counting uses atomic SQL operations (UPDATE ... SET ref_count = ref_count + 1)
+ * - Nested transactions use SQLite savepoints for proper isolation
+ * - Batch operations are wrapped in transactions for atomicity
  *
  * @example
  * ```typescript
@@ -38,6 +67,12 @@
  *
  * // Query by path
  * const entry = await metadata.getByPath('/data/config.json')
+ *
+ * // Use transaction with automatic retry
+ * await metadata.transaction(async () => {
+ *   await metadata.createEntry(...)
+ *   await metadata.incrementBlobRefCount(...)
+ * }, { maxRetries: 3, retryDelayMs: 100 })
  * ```
  *
  * @module storage/sqlite
@@ -131,17 +166,702 @@ interface FileRow {
  * }
  * ```
  */
+/**
+ * Transaction log entry structure for tracking transaction lifecycle.
+ *
+ * Provides detailed information about each transaction for debugging,
+ * auditing, and metrics collection.
+ */
+interface TransactionLogEntry {
+  /** Unique transaction identifier (UUID) */
+  id: string
+  /** Current transaction status */
+  status: 'active' | 'committed' | 'rolled_back' | 'timed_out'
+  /** Transaction start timestamp (Unix ms) */
+  startTime: number
+  /** Transaction end timestamp (Unix ms), set on commit/rollback */
+  endTime?: number
+  /** Number of operations performed in this transaction */
+  operationCount?: number
+  /** Reason for rollback (if applicable) */
+  rollbackReason?: string
+  /** Number of retry attempts (if retries were configured) */
+  retryCount?: number
+}
+
+/**
+ * Options for transaction execution with retry and timeout support.
+ */
+export interface TransactionOptions {
+  /**
+   * Maximum number of retry attempts for transient failures.
+   * Default: 0 (no retries)
+   */
+  maxRetries?: number
+
+  /**
+   * Delay between retry attempts in milliseconds.
+   * Default: 100ms
+   */
+  retryDelayMs?: number
+
+  /**
+   * Transaction timeout in milliseconds.
+   * If exceeded, the transaction will be rolled back.
+   * Default: undefined (no timeout)
+   */
+  timeoutMs?: number
+
+  /**
+   * Function to determine if an error is retryable.
+   * Default: retries on SQLITE_BUSY errors
+   */
+  isRetryable?: (error: Error) => boolean
+}
+
+/**
+ * Transaction event types for instrumentation hooks.
+ */
+export type TransactionEventType = 'begin' | 'commit' | 'rollback' | 'timeout' | 'retry' | 'operation'
+
+/**
+ * Transaction event data passed to hooks.
+ */
+export interface TransactionEvent {
+  /** Event type */
+  type: TransactionEventType
+  /** Transaction ID */
+  transactionId: string
+  /** Event timestamp (Unix ms) */
+  timestamp: number
+  /** Transaction depth (for nested transactions) */
+  depth: number
+  /** Duration in milliseconds (for commit/rollback events) */
+  durationMs?: number
+  /** Error (for rollback/timeout events) */
+  error?: Error
+  /** Retry attempt number (for retry events) */
+  retryAttempt?: number
+  /** Operation name (for operation events) */
+  operation?: string
+}
+
+/**
+ * Instrumentation hooks for transaction monitoring.
+ *
+ * These hooks enable external systems to observe transaction lifecycle
+ * events for metrics, logging, and debugging purposes.
+ *
+ * @example
+ * ```typescript
+ * const hooks: TransactionHooks = {
+ *   onTransactionEvent: (event) => {
+ *     console.log(`[TX:${event.transactionId}] ${event.type}`)
+ *     if (event.type === 'commit') {
+ *       metrics.recordLatency('tx_commit', event.durationMs)
+ *     }
+ *   }
+ * }
+ *
+ * const metadata = new SQLiteMetadata(sql, { hooks })
+ * ```
+ */
+export interface TransactionHooks {
+  /**
+   * Called for each transaction lifecycle event.
+   */
+  onTransactionEvent?(event: TransactionEvent): void
+}
+
+/**
+ * Configuration options for SQLiteMetadata.
+ */
+export interface SQLiteMetadataOptions {
+  /**
+   * Instrumentation hooks for monitoring.
+   */
+  hooks?: TransactionHooks
+
+  /**
+   * Maximum transaction log entries to retain.
+   * Older entries are pruned on new transaction start.
+   * Default: 100
+   */
+  maxLogEntries?: number
+
+  /**
+   * Default transaction options applied to all transactions.
+   */
+  defaultTransactionOptions?: TransactionOptions
+}
+
 export class SQLiteMetadata implements MetadataStorage {
   /** SQLite storage instance */
   private readonly sql: SqlStorage
+
+  /** Configuration options */
+  private readonly options: SQLiteMetadataOptions
+
+  /** Current transaction depth (0 = no transaction) */
+  private transactionDepth = 0
+
+  /** Savepoint counter for nested transactions */
+  private savepointCounter = 0
+
+  /** Transaction log for recovery and auditing */
+  private transactionLog: TransactionLogEntry[] = []
+
+  /** Current transaction ID */
+  private currentTransactionId: string | null = null
+
+  /** Current transaction start time (for timeout tracking) */
+  private currentTransactionStartTime: number | null = null
+
+  /** Operation counter for current transaction */
+  private currentTransactionOperationCount = 0
+
+  /** Timeout handle for current transaction */
+  private transactionTimeoutHandle: ReturnType<typeof setTimeout> | null = null
 
   /**
    * Create a new SQLiteMetadata instance.
    *
    * @param sql - SqlStorage instance from Durable Object context or D1
+   * @param options - Optional configuration including hooks and defaults
+   *
+   * @example
+   * ```typescript
+   * // Basic usage
+   * const metadata = new SQLiteMetadata(ctx.storage.sql)
+   *
+   * // With instrumentation hooks
+   * const metadata = new SQLiteMetadata(ctx.storage.sql, {
+   *   hooks: {
+   *     onTransactionEvent: (event) => {
+   *       console.log(`[TX] ${event.type}: ${event.transactionId}`)
+   *     }
+   *   },
+   *   maxLogEntries: 50,
+   *   defaultTransactionOptions: {
+   *     maxRetries: 3,
+   *     retryDelayMs: 100,
+   *     timeoutMs: 5000
+   *   }
+   * })
+   * ```
    */
-  constructor(sql: SqlStorage) {
+  constructor(sql: SqlStorage, options: SQLiteMetadataOptions = {}) {
     this.sql = sql
+    this.options = {
+      maxLogEntries: 100,
+      ...options
+    }
+  }
+
+  // ===========================================================================
+  // INSTRUMENTATION HELPERS
+  // ===========================================================================
+
+  /**
+   * Emit a transaction event to registered hooks.
+   * @internal
+   */
+  private emitTransactionEvent(
+    type: TransactionEventType,
+    extra: Partial<Omit<TransactionEvent, 'type' | 'transactionId' | 'timestamp' | 'depth'>> = {}
+  ): void {
+    if (!this.options.hooks?.onTransactionEvent) return
+
+    const event: TransactionEvent = {
+      type,
+      transactionId: this.currentTransactionId ?? 'none',
+      timestamp: Date.now(),
+      depth: this.transactionDepth,
+      ...extra
+    }
+
+    try {
+      this.options.hooks.onTransactionEvent(event)
+    } catch {
+      // Swallow hook errors to prevent affecting transaction flow
+    }
+  }
+
+  /**
+   * Prune old transaction log entries to stay within configured limit.
+   * @internal
+   */
+  private pruneTransactionLog(): void {
+    const maxEntries = this.options.maxLogEntries ?? 100
+    if (this.transactionLog.length > maxEntries) {
+      // Keep only the most recent entries
+      this.transactionLog = this.transactionLog.slice(-maxEntries)
+    }
+  }
+
+  /**
+   * Default function to determine if an error is retryable.
+   * @internal
+   */
+  private isDefaultRetryable(error: Error): boolean {
+    const message = error.message.toLowerCase()
+    return (
+      message.includes('sqlite_busy') ||
+      message.includes('database is locked') ||
+      message.includes('cannot start a transaction within a transaction')
+    )
+  }
+
+  /**
+   * Sleep for the specified duration.
+   * @internal
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms))
+  }
+
+  // ===========================================================================
+  // TRANSACTION API
+  // ===========================================================================
+
+  /**
+   * Begin a new transaction or create a savepoint for nested transactions.
+   *
+   * This method supports both top-level transactions and nested transactions
+   * (via SQLite savepoints). The timeout option can be used to automatically
+   * rollback long-running transactions.
+   *
+   * ## Transaction Isolation
+   *
+   * SQLite in Durable Objects uses SERIALIZABLE isolation:
+   * - All operations see a consistent snapshot of the database
+   * - No dirty reads, phantom reads, or non-repeatable reads
+   * - Concurrent transactions are serialized through the DO input gate
+   *
+   * @param options - Optional transaction configuration
+   * @param options.timeout - Maximum duration in ms before auto-rollback
+   *
+   * @example
+   * ```typescript
+   * // Basic transaction
+   * await metadata.beginTransaction()
+   * try {
+   *   await metadata.createEntry(...)
+   *   await metadata.commit()
+   * } catch (e) {
+   *   await metadata.rollback()
+   * }
+   *
+   * // With timeout
+   * await metadata.beginTransaction({ timeout: 5000 })
+   * ```
+   */
+  async beginTransaction(options?: { timeout?: number }): Promise<void> {
+    if (this.transactionDepth === 0) {
+      // Prune old log entries before starting new transaction
+      this.pruneTransactionLog()
+
+      // Start new transaction
+      this.currentTransactionId = crypto.randomUUID()
+      this.currentTransactionStartTime = Date.now()
+      this.currentTransactionOperationCount = 0
+
+      this.transactionLog.push({
+        id: this.currentTransactionId,
+        status: 'active',
+        startTime: this.currentTransactionStartTime,
+        operationCount: 0,
+      })
+
+      // Set up timeout if specified
+      if (options?.timeout) {
+        this.transactionTimeoutHandle = setTimeout(async () => {
+          if (this.transactionDepth > 0 && this.currentTransactionId) {
+            const logEntry = this.transactionLog.find((e) => e.id === this.currentTransactionId)
+            if (logEntry) {
+              logEntry.status = 'timed_out'
+              logEntry.endTime = Date.now()
+              logEntry.rollbackReason = `Transaction timed out after ${options.timeout}ms`
+            }
+
+            this.emitTransactionEvent('timeout', {
+              durationMs: options.timeout,
+              error: new Error(`Transaction timed out after ${options.timeout}ms`)
+            })
+
+            // Force rollback
+            try {
+              await this.sql.exec('ROLLBACK')
+            } catch {
+              // Ignore rollback errors during timeout
+            }
+
+            this.transactionDepth = 0
+            this.savepointCounter = 0
+            this.currentTransactionId = null
+            this.currentTransactionStartTime = null
+            this.transactionTimeoutHandle = null
+          }
+        }, options.timeout)
+      }
+
+      await this.sql.exec('BEGIN TRANSACTION')
+      this.emitTransactionEvent('begin')
+    } else {
+      // Create savepoint for nested transaction
+      this.savepointCounter++
+      await this.sql.exec(`SAVEPOINT sp_${this.savepointCounter}`)
+      this.emitTransactionEvent('begin')
+    }
+    this.transactionDepth++
+  }
+
+  /**
+   * Commit the current transaction or release savepoint.
+   *
+   * For top-level transactions, this commits all changes to the database.
+   * For nested transactions (savepoints), this releases the savepoint,
+   * merging changes into the parent transaction.
+   *
+   * @throws Error if no active transaction exists
+   *
+   * @example
+   * ```typescript
+   * await metadata.beginTransaction()
+   * await metadata.createEntry(...)
+   * await metadata.commit() // Changes are now permanent
+   * ```
+   */
+  async commit(): Promise<void> {
+    if (this.transactionDepth <= 0) {
+      throw new Error('No active transaction to commit')
+    }
+
+    this.transactionDepth--
+
+    if (this.transactionDepth === 0) {
+      // Clear timeout if set
+      if (this.transactionTimeoutHandle) {
+        clearTimeout(this.transactionTimeoutHandle)
+        this.transactionTimeoutHandle = null
+      }
+
+      // Commit main transaction
+      await this.sql.exec('COMMIT')
+
+      // Calculate duration
+      const duration = this.currentTransactionStartTime
+        ? Date.now() - this.currentTransactionStartTime
+        : 0
+
+      // Update transaction log
+      const logEntry = this.transactionLog.find((e) => e.id === this.currentTransactionId)
+      if (logEntry) {
+        logEntry.status = 'committed'
+        logEntry.endTime = Date.now()
+        logEntry.operationCount = this.currentTransactionOperationCount
+      }
+
+      this.emitTransactionEvent('commit', { durationMs: duration })
+
+      this.currentTransactionId = null
+      this.currentTransactionStartTime = null
+      this.currentTransactionOperationCount = 0
+      this.savepointCounter = 0
+    } else {
+      // Release savepoint
+      await this.sql.exec(`RELEASE SAVEPOINT sp_${this.savepointCounter}`)
+      this.savepointCounter--
+    }
+  }
+
+  /**
+   * Rollback the current transaction or to savepoint.
+   *
+   * For top-level transactions, this discards all changes made since
+   * beginTransaction() was called. For nested transactions, this rolls
+   * back to the savepoint, discarding changes in the nested scope.
+   *
+   * @param reason - Optional reason for the rollback (for logging)
+   * @throws Error if no active transaction exists
+   *
+   * @example
+   * ```typescript
+   * await metadata.beginTransaction()
+   * try {
+   *   await metadata.createEntry(...)
+   *   throw new Error('Something went wrong')
+   * } catch (e) {
+   *   await metadata.rollback('Error during creation')
+   * }
+   * ```
+   */
+  async rollback(reason?: string): Promise<void> {
+    if (this.transactionDepth <= 0) {
+      throw new Error('No active transaction to rollback')
+    }
+
+    this.transactionDepth--
+
+    if (this.transactionDepth === 0) {
+      // Clear timeout if set
+      if (this.transactionTimeoutHandle) {
+        clearTimeout(this.transactionTimeoutHandle)
+        this.transactionTimeoutHandle = null
+      }
+
+      // Rollback main transaction
+      await this.sql.exec('ROLLBACK')
+
+      // Calculate duration
+      const duration = this.currentTransactionStartTime
+        ? Date.now() - this.currentTransactionStartTime
+        : 0
+
+      // Update transaction log
+      const logEntry = this.transactionLog.find((e) => e.id === this.currentTransactionId)
+      if (logEntry) {
+        logEntry.status = 'rolled_back'
+        logEntry.endTime = Date.now()
+        logEntry.operationCount = this.currentTransactionOperationCount
+        logEntry.rollbackReason = reason
+      }
+
+      this.emitTransactionEvent('rollback', {
+        durationMs: duration,
+        error: reason ? new Error(reason) : undefined
+      })
+
+      this.currentTransactionId = null
+      this.currentTransactionStartTime = null
+      this.currentTransactionOperationCount = 0
+      this.savepointCounter = 0
+    } else {
+      // Rollback to savepoint
+      await this.sql.exec(`ROLLBACK TO SAVEPOINT sp_${this.savepointCounter}`)
+      this.savepointCounter--
+    }
+  }
+
+  /**
+   * Execute a function within a transaction with automatic commit/rollback.
+   *
+   * This is the recommended way to execute transactional operations. The
+   * transaction is automatically committed on success or rolled back on error.
+   *
+   * ## Retry Support
+   *
+   * When `maxRetries` is specified, the transaction will be retried on
+   * transient failures (e.g., SQLITE_BUSY). Each retry starts a fresh
+   * transaction.
+   *
+   * ## Timeout Support
+   *
+   * When `timeoutMs` is specified, the transaction will be automatically
+   * rolled back if it exceeds the timeout duration.
+   *
+   * @param fn - Function to execute within the transaction
+   * @param options - Transaction options (retries, timeout)
+   * @returns Result of the function
+   *
+   * @example
+   * ```typescript
+   * // Basic usage
+   * const result = await metadata.transaction(async () => {
+   *   const id = await metadata.createEntry(...)
+   *   await metadata.incrementBlobRefCount(...)
+   *   return id
+   * })
+   *
+   * // With retry logic
+   * await metadata.transaction(async () => {
+   *   await metadata.createEntriesAtomic(entries)
+   * }, { maxRetries: 3, retryDelayMs: 100 })
+   *
+   * // With timeout
+   * await metadata.transaction(async () => {
+   *   await metadata.heavyOperation()
+   * }, { timeoutMs: 5000 })
+   * ```
+   */
+  async transaction<T>(fn: () => Promise<T>, options?: TransactionOptions): Promise<T> {
+    const opts = {
+      ...this.options.defaultTransactionOptions,
+      ...options
+    }
+
+    const maxRetries = opts.maxRetries ?? 0
+    const retryDelayMs = opts.retryDelayMs ?? 100
+    const isRetryable = opts.isRetryable ?? this.isDefaultRetryable.bind(this)
+
+    let lastError: Error | null = null
+    let retryCount = 0
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await this.beginTransaction({ timeout: opts.timeoutMs })
+
+        try {
+          const result = await fn()
+          await this.commit()
+
+          // Update retry count in log
+          if (retryCount > 0) {
+            const logEntry = this.transactionLog[this.transactionLog.length - 1]
+            if (logEntry) {
+              logEntry.retryCount = retryCount
+            }
+          }
+
+          return result
+        } catch (error) {
+          await this.rollback(error instanceof Error ? error.message : String(error))
+          throw error
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error))
+
+        if (attempt < maxRetries && isRetryable(lastError)) {
+          retryCount++
+          this.emitTransactionEvent('retry', { retryAttempt: retryCount, error: lastError })
+
+          // Wait before retrying
+          await this.sleep(retryDelayMs * Math.pow(2, attempt)) // Exponential backoff
+        } else {
+          throw lastError
+        }
+      }
+    }
+
+    // Should not reach here, but TypeScript needs this
+    throw lastError ?? new Error('Transaction failed')
+  }
+
+  /**
+   * Get the transaction log entries for debugging and auditing.
+   *
+   * Returns a copy of the internal transaction log. The log is automatically
+   * pruned to stay within the configured `maxLogEntries` limit.
+   *
+   * @returns Array of transaction log entries (most recent last)
+   *
+   * @example
+   * ```typescript
+   * const log = await metadata.getTransactionLog()
+   * const failed = log.filter(e => e.status === 'rolled_back')
+   * console.log(`${failed.length} transactions rolled back`)
+   * ```
+   */
+  async getTransactionLog(): Promise<TransactionLogEntry[]> {
+    return [...this.transactionLog]
+  }
+
+  /**
+   * Recover from uncommitted transactions (for crash recovery).
+   *
+   * This method should be called after a Durable Object hibernates and
+   * wakes up, to ensure local state is synchronized. SQLite automatically
+   * rolls back uncommitted transactions on connection close/recovery.
+   *
+   * @example
+   * ```typescript
+   * // In DO alarm handler or after hibernation
+   * await metadata.recoverTransactions()
+   * ```
+   */
+  async recoverTransactions(): Promise<void> {
+    // Clear any pending timeout
+    if (this.transactionTimeoutHandle) {
+      clearTimeout(this.transactionTimeoutHandle)
+      this.transactionTimeoutHandle = null
+    }
+
+    // SQLite automatically rolls back uncommitted transactions on recovery
+    // Reset local state
+    this.transactionDepth = 0
+    this.savepointCounter = 0
+    this.currentTransactionId = null
+    this.currentTransactionStartTime = null
+    this.currentTransactionOperationCount = 0
+  }
+
+  /**
+   * Check if currently within a transaction.
+   *
+   * Useful for conditional logic that needs to know the current
+   * transaction state.
+   *
+   * @returns true if a transaction is active
+   *
+   * @example
+   * ```typescript
+   * if (!metadata.isInTransaction()) {
+   *   await metadata.beginTransaction()
+   * }
+   * ```
+   */
+  isInTransaction(): boolean {
+    return this.transactionDepth > 0
+  }
+
+  /**
+   * Get the current transaction depth.
+   *
+   * Returns 0 if not in a transaction, 1 for top-level transaction,
+   * and higher values for nested transactions (savepoints).
+   *
+   * @returns Current transaction nesting depth
+   */
+  getTransactionDepth(): number {
+    return this.transactionDepth
+  }
+
+  /**
+   * Track an operation within the current transaction.
+   *
+   * Call this method within transactions to increment the operation
+   * counter, which is useful for debugging and metrics.
+   *
+   * @param operationName - Name of the operation being performed
+   * @internal
+   */
+  protected trackOperation(operationName: string): void {
+    if (this.transactionDepth > 0) {
+      this.currentTransactionOperationCount++
+      this.emitTransactionEvent('operation', { operation: operationName })
+    }
+  }
+
+  /**
+   * Create multiple entries atomically within a transaction.
+   *
+   * @param entries - Array of entries to create
+   * @returns Array of created entry IDs
+   */
+  async createEntriesAtomic(
+    entries: Array<{
+      path: string
+      name: string
+      parentId: string
+      type: 'file' | 'directory' | 'symlink'
+      mode: number
+      uid: number
+      gid: number
+      size: number
+      blobId: string | null
+      linkTarget: string | null
+      nlink: number
+      tier?: StorageTier
+    }>
+  ): Promise<number[]> {
+    return this.transaction(async () => {
+      const ids: number[] = []
+      for (const entry of entries) {
+        const id = await this.createEntry(entry)
+        ids.push(id)
+      }
+      return ids
+    })
   }
 
   /**
@@ -200,7 +920,8 @@ export class SQLiteMetadata implements MetadataStorage {
         tier TEXT NOT NULL DEFAULT 'hot' CHECK(tier IN ('hot', 'warm', 'cold')),
         size INTEGER NOT NULL,
         checksum TEXT,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        ref_count INTEGER NOT NULL DEFAULT 1
       )
     `)
 
@@ -517,7 +1238,7 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async registerBlob(blob: { id: string; tier: StorageTier; size: number; checksum?: string }): Promise<void> {
-    await this.sql.exec('INSERT INTO blobs (id, tier, size, checksum, created_at) VALUES (?, ?, ?, ?, ?)', blob.id, blob.tier, blob.size, blob.checksum || null, Date.now())
+    await this.sql.exec('INSERT INTO blobs (id, tier, size, checksum, created_at, ref_count) VALUES (?, ?, ?, ?, ?, ?)', blob.id, blob.tier, blob.size, blob.checksum || null, Date.now(), 1)
   }
 
   /**
@@ -572,6 +1293,206 @@ export class SQLiteMetadata implements MetadataStorage {
    */
   async deleteBlob(id: string): Promise<void> {
     await this.sql.exec('DELETE FROM blobs WHERE id = ?', id)
+  }
+
+  /**
+   * Get the current reference count for a blob.
+   *
+   * Reference counting is used to safely manage blob lifecycle when
+   * multiple files (hard links) share the same blob data. A blob is
+   * only safe to delete when its reference count reaches zero.
+   *
+   * ## Concurrent Access
+   *
+   * This method is safe to call concurrently. Reference count reads
+   * are atomic and consistent within the Durable Object's single-
+   * connection model.
+   *
+   * @param id - Blob ID to query
+   * @returns Reference count, or null if the blob does not exist
+   *
+   * @example
+   * ```typescript
+   * const refCount = await metadata.getBlobRefCount('sha256-abc123...')
+   * if (refCount !== null && refCount > 0) {
+   *   console.log(`Blob has ${refCount} references`)
+   * } else if (refCount === 0) {
+   *   console.log('Blob is orphaned and can be deleted')
+   * } else {
+   *   console.log('Blob does not exist')
+   * }
+   * ```
+   */
+  async getBlobRefCount(id: string): Promise<number | null> {
+    this.trackOperation('getBlobRefCount')
+    const result = await this.sql.exec<{ ref_count: number }>('SELECT ref_count FROM blobs WHERE id = ?', id).one()
+    return result?.ref_count ?? null
+  }
+
+  /**
+   * Increment the reference count for a blob atomically.
+   *
+   * This method should be called when creating a hard link to an existing
+   * file that shares blob data. The increment is performed atomically using
+   * SQL to ensure correctness under concurrent access.
+   *
+   * ## Usage Pattern
+   *
+   * When creating a hard link:
+   * 1. Create the new file entry with the same blob_id
+   * 2. Call incrementBlobRefCount() to track the new reference
+   * 3. Update nlink on all file entries sharing this blob
+   *
+   * ## Concurrent Access
+   *
+   * This operation is atomic. The SQL `UPDATE ... SET ref_count = ref_count + 1`
+   * ensures correct behavior even if multiple operations execute concurrently
+   * within the Durable Object.
+   *
+   * @param id - Blob ID to increment
+   *
+   * @example
+   * ```typescript
+   * // When creating a hard link
+   * await metadata.transaction(async () => {
+   *   await metadata.createEntry({
+   *     path: '/new-link.txt',
+   *     blobId: existingBlobId,
+   *     // ... other fields
+   *   })
+   *   await metadata.incrementBlobRefCount(existingBlobId)
+   * })
+   * ```
+   */
+  async incrementBlobRefCount(id: string): Promise<void> {
+    this.trackOperation('incrementBlobRefCount')
+    await this.sql.exec('UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?', id)
+  }
+
+  /**
+   * Decrement the reference count for a blob atomically.
+   *
+   * This method should be called when deleting a file or hard link that
+   * shares blob data. Returns true if the reference count reached zero,
+   * indicating the blob should be deleted from storage.
+   *
+   * ## Usage Pattern
+   *
+   * When deleting a file:
+   * 1. Delete the file entry from metadata
+   * 2. Call decrementBlobRefCount() to update the reference count
+   * 3. If return value is true, delete the blob from storage
+   *
+   * ## Concurrent Access
+   *
+   * This operation is atomic. The SQL `UPDATE ... SET ref_count = ref_count - 1`
+   * ensures correct behavior under concurrent access. The method also protects
+   * against negative reference counts by clamping to zero.
+   *
+   * ## Return Value
+   *
+   * - `true`: Reference count reached zero; blob should be deleted
+   * - `false`: Other references remain; blob must not be deleted
+   *
+   * @param id - Blob ID to decrement
+   * @returns true if the blob should be deleted (ref_count reached 0)
+   *
+   * @example
+   * ```typescript
+   * // When deleting a file
+   * await metadata.transaction(async () => {
+   *   const entry = await metadata.getByPath('/file.txt')
+   *   if (entry?.blobId) {
+   *     await metadata.deleteEntry(entry.id)
+   *     const shouldDeleteBlob = await metadata.decrementBlobRefCount(entry.blobId)
+   *     if (shouldDeleteBlob) {
+   *       await metadata.deleteBlob(entry.blobId)
+   *       await blobStorage.delete(entry.blobId) // External storage
+   *     }
+   *   }
+   * })
+   * ```
+   */
+  async decrementBlobRefCount(id: string): Promise<boolean> {
+    this.trackOperation('decrementBlobRefCount')
+    // Decrement ref count atomically
+    await this.sql.exec('UPDATE blobs SET ref_count = ref_count - 1 WHERE id = ?', id)
+    // Check result and fix negative values
+    const result = await this.sql.exec<{ ref_count: number }>('SELECT ref_count FROM blobs WHERE id = ?', id).one()
+    const refCount = result?.ref_count ?? 0
+    // Ensure we don't go negative (fix up if needed)
+    if (refCount < 0) {
+      await this.sql.exec('UPDATE blobs SET ref_count = 0 WHERE id = ?', id)
+      return true
+    }
+    return refCount === 0
+  }
+
+  /**
+   * Count the number of file entries referencing a blob.
+   *
+   * This method performs a live count of file entries in the files table
+   * that have the specified blob_id. This can be used to verify reference
+   * count integrity or to recalculate reference counts after recovery.
+   *
+   * ## vs getBlobRefCount
+   *
+   * - `getBlobRefCount`: Returns the cached ref_count stored in the blobs table
+   * - `countBlobReferences`: Performs a live COUNT query on the files table
+   *
+   * If these values differ, it indicates ref_count was not properly maintained.
+   * Use this method for verification or recovery scenarios.
+   *
+   * ## Performance
+   *
+   * This method performs a COUNT query which may be slower than reading
+   * ref_count directly. Use getBlobRefCount() for normal operations.
+   *
+   * @param id - Blob ID to query
+   * @returns Number of file entries referencing this blob
+   *
+   * @example
+   * ```typescript
+   * // Verify reference count integrity
+   * const storedCount = await metadata.getBlobRefCount(blobId)
+   * const actualCount = await metadata.countBlobReferences(blobId)
+   *
+   * if (storedCount !== actualCount) {
+   *   console.warn(`Ref count mismatch: stored=${storedCount}, actual=${actualCount}`)
+   *   // Could update: UPDATE blobs SET ref_count = ? WHERE id = ?
+   * }
+   * ```
+   */
+  async countBlobReferences(id: string): Promise<number> {
+    this.trackOperation('countBlobReferences')
+    // Count file entries that reference a specific blob
+    const result = await this.sql.exec<{ count: number }>('SELECT COUNT(*) as count FROM files WHERE blob_id = ?', id).one()
+    return result?.count ?? 0
+  }
+
+  /**
+   * Synchronize a blob's reference count with actual file references.
+   *
+   * This method recalculates the ref_count based on actual file entries
+   * and updates the blobs table. Use this for recovery or integrity repair.
+   *
+   * @param id - Blob ID to synchronize
+   * @returns The new reference count
+   *
+   * @example
+   * ```typescript
+   * // After recovery, ensure counts are accurate
+   * const newCount = await metadata.syncBlobRefCount(blobId)
+   * if (newCount === 0) {
+   *   await metadata.deleteBlob(blobId)
+   * }
+   * ```
+   */
+  async syncBlobRefCount(id: string): Promise<number> {
+    this.trackOperation('syncBlobRefCount')
+    const actualCount = await this.countBlobReferences(id)
+    await this.sql.exec('UPDATE blobs SET ref_count = ? WHERE id = ?', actualCount, id)
+    return actualCount
   }
 
   /**

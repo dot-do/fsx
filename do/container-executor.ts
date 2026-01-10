@@ -193,7 +193,8 @@ export class CloudflareContainerExecutor {
   private wsPath: string
   private defaultEnv: Record<string, string>
   private defaultCwd: string
-  private enableLogging: boolean
+  // @ts-expect-error Reserved for future logging implementation
+  private _enableLogging: boolean
   private instance: ContainerInstance | null = null
 
   constructor(config: ContainerExecutorConfig) {
@@ -206,7 +207,7 @@ export class CloudflareContainerExecutor {
     this.wsPath = config.wsPath ?? '/ws'
     this.defaultEnv = config.env ?? {}
     this.defaultCwd = config.cwd ?? '/'
-    this.enableLogging = config.enableLogging ?? false
+    this._enableLogging = config.enableLogging ?? false
   }
 
   // ===========================================================================
@@ -536,7 +537,7 @@ export class CloudflareContainerExecutor {
               resolveNextEvent({ done: true, value: undefined })
             }
           })
-          websocket.addEventListener('error', (event) => {
+          websocket.addEventListener('error', (_event) => {
             const errorEvent: StreamingExecEvent = {
               type: 'error',
               message: 'WebSocket error',

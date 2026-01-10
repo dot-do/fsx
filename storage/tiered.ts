@@ -193,8 +193,10 @@ export class TieredFS {
    * @internal
    */
   private selectTier(size: number): StorageTier {
-    const hotMax = this.config.thresholds.hotMaxSize
-    const warmMax = this.config.thresholds.warmMaxSize
+    // Use nullish coalescing with literal defaults to satisfy TypeScript
+    // (defaults are always set in constructor, but Required<> doesn't apply to nested props)
+    const hotMax = this.config.thresholds.hotMaxSize ?? 1024 * 1024 // 1MB
+    const warmMax = this.config.thresholds.warmMaxSize ?? 100 * 1024 * 1024 // 100MB
 
     // Check if fits in hot tier
     if (size <= hotMax) {
@@ -463,7 +465,8 @@ export class TieredFS {
    * @param toTier - Target tier
    * @internal
    */
-  private async promote(path: string, data: Uint8Array, _fromTier: string, toTier: 'hot' | 'warm'): Promise<void> {
+  // @ts-expect-error Reserved for future tier promotion implementation
+  private async _promote(path: string, data: Uint8Array, _fromTier: string, toTier: 'hot' | 'warm'): Promise<void> {
     if (toTier === 'hot') {
       await this.hotStub.fetch('http://fsx.do/rpc', {
         method: 'POST',

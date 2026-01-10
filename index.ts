@@ -92,8 +92,7 @@ export { FileSystemDO as default } from './do/index.js'
 // =============================================================================
 
 import { FSx, type FSxOptions } from './core/fsx.js'
-import { MemoryBackend } from './core/backend.js'
-import { createMemoryStub } from './internal/memory-stub.js'
+import { MemoryBackend, type FsBackend } from './core/backend.js'
 
 /**
  * Configuration options for creating an FSx instance via the factory function.
@@ -102,11 +101,11 @@ import { createMemoryStub } from './internal/memory-stub.js'
  */
 export interface CreateFsOptions extends FSxOptions {
   /**
-   * Use a pre-existing DurableObjectStub or DurableObjectNamespace binding.
-   * When provided, the factory connects to a real Durable Object for persistent storage.
+   * Use a pre-existing FsBackend implementation.
+   * When provided, the factory uses this backend for storage operations.
    * When omitted, an in-memory backend is used (suitable for testing/development).
    */
-  binding?: DurableObjectNamespace | DurableObjectStub
+  backend?: FsBackend
 }
 
 /**
@@ -139,31 +138,22 @@ export interface CreateFsOptions extends FSxOptions {
  * })
  * ```
  *
- * @example Create with Durable Object binding (production)
+ * @example Create with custom backend (production)
  * ```typescript
- * import { createFs } from 'fsx.do'
+ * import { createFs, MemoryBackend } from 'fsx.do'
  *
- * export default {
- *   async fetch(request: Request, env: Env) {
- *     const fs = createFs({ binding: env.FILESYSTEM })
- *     const content = await fs.readFile('/data.json', 'utf-8')
- *     return new Response(content)
- *   }
- * }
+ * // Use a custom backend implementation
+ * const customBackend = new MemoryBackend()
+ * const fs = createFs({ backend: customBackend })
+ * const content = await fs.readFile('/data.json', 'utf-8')
  * ```
  */
 export function createFs(options: CreateFsOptions = {}): FSx {
-  const { binding, ...fsxOptions } = options
+  const { backend, ...fsxOptions } = options
 
-  if (binding) {
-    // Use the provided DO binding for persistent storage
-    return new FSx(binding, fsxOptions)
-  }
-
-  // Create an in-memory filesystem for development/testing
-  const backend = new MemoryBackend()
-  const stub = createMemoryStub(backend)
-  return new FSx(stub, fsxOptions)
+  // Use provided backend or create an in-memory one for development/testing
+  const fsBackend = backend ?? new MemoryBackend()
+  return new FSx(fsBackend, fsxOptions)
 }
 
 /**

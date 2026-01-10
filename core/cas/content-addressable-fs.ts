@@ -35,7 +35,6 @@
  * ```
  */
 
-import type { GitObjectType } from './git-object.js'
 import { putObject as putObjectFn } from './put-object.js'
 import { getObject as getObjectFn } from './get-object.js'
 import { hashToPath } from './path-mapping.js'

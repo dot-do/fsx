@@ -53,8 +53,8 @@ export {
   type TierPolicy,
   type TieredFileMetadata,
   type TieredStorageResult,
-  type TieredReadResult,
-  type TieredWriteResult,
+  // Note: TieredReadResult and TieredWriteResult are exported from ./interfaces.js
+  // to avoid TS2300 duplicate identifier errors
 } from './tiered-r2.js'
 
 // Content-Addressable Storage (re-exported from core)

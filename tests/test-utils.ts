@@ -6,6 +6,7 @@
  */
 
 import { constants } from '../core/constants'
+import { PathValidator, pathValidator } from '../do/security'
 
 /**
  * File entry stored in the in-memory filesystem
@@ -152,6 +153,9 @@ export class InMemoryStorage {
       birthtime?: number
     }
   ): void {
+    // Validate input path for security
+    pathValidator.validateInput(path)
+
     const normalized = this.normalizePath(path)
     const now = Date.now()
     const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content
@@ -181,6 +185,9 @@ export class InMemoryStorage {
       gid?: number
     }
   ): void {
+    // Validate input path for security
+    pathValidator.validateInput(path)
+
     const normalized = this.normalizePath(path)
     const now = Date.now()
 
@@ -202,6 +209,10 @@ export class InMemoryStorage {
    * Add a symbolic link
    */
   addSymlink(path: string, target: string): void {
+    // Validate input paths for security
+    pathValidator.validateInput(path)
+    pathValidator.validateInput(target)
+
     const normalized = this.normalizePath(path)
     const now = Date.now()
 
@@ -290,6 +301,9 @@ export class InMemoryStorage {
    * Get file content as string
    */
   readFileAsString(path: string, encoding: BufferEncoding = 'utf-8'): string {
+    // Validate input path for security
+    pathValidator.validateInput(path)
+
     const entry = this.get(path)
     if (!entry || entry.type !== 'file') {
       throw new Error(`File not found: ${path}`)
@@ -461,9 +475,27 @@ export class MockR2Object {
  */
 export class MockDurableObjectStub {
   private storage: InMemoryStorage
+  private rootPath: string
 
-  constructor(storage?: InMemoryStorage) {
+  constructor(storage?: InMemoryStorage, rootPath: string = '/') {
     this.storage = storage ?? new InMemoryStorage()
+    this.rootPath = rootPath
+  }
+
+  /**
+   * Validate a path against path traversal attacks
+   * @returns The validated, normalized path
+   * @throws Error with code 'EACCES' if path would escape root
+   */
+  private validatePath(path: string): string {
+    return pathValidator.validatePath(path, this.rootPath)
+  }
+
+  /**
+   * Check if a path would escape the root via traversal
+   */
+  private isPathTraversal(path: string): boolean {
+    return pathValidator.isPathTraversal(path, this.rootPath)
   }
 
   async fetch(url: string, init?: RequestInit): Promise<Response> {
@@ -474,20 +506,29 @@ export class MockDurableObjectStub {
       try {
         const body = JSON.parse(init.body as string)
         const path = body.path as string
+
+        // Validate path against traversal attacks
+        if (this.isPathTraversal(path)) {
+          return new Response(JSON.stringify({ code: 'EACCES', message: 'permission denied - path traversal detected', path }), {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+
         const entry = this.storage.get(path)
 
         if (!entry) {
-          return new Response(
-            JSON.stringify({ code: 'ENOENT', message: 'no such file or directory', path }),
-            { status: 400, headers: { 'Content-Type': 'application/json' } }
-          )
+          return new Response(JSON.stringify({ code: 'ENOENT', message: 'no such file or directory', path }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
         }
 
         if (entry.type === 'directory') {
-          return new Response(
-            JSON.stringify({ code: 'EISDIR', message: 'illegal operation on a directory', path }),
-            { status: 400, headers: { 'Content-Type': 'application/json' } }
-          )
+          return new Response(JSON.stringify({ code: 'EISDIR', message: 'illegal operation on a directory', path }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
         }
 
         // Return the content as a stream
@@ -497,10 +538,11 @@ export class MockDurableObjectStub {
         })
       } catch (error: unknown) {
         const err = error as Error & { code?: string; path?: string }
-        return new Response(
-          JSON.stringify({ code: err.code ?? 'UNKNOWN', message: err.message, path: err.path }),
-          { status: 400, headers: { 'Content-Type': 'application/json' } }
-        )
+        const status = err.code === 'EACCES' ? 403 : 400
+        return new Response(JSON.stringify({ code: err.code ?? 'UNKNOWN', message: err.message, path: err.path }), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        })
       }
     }
 
@@ -525,6 +567,8 @@ export class MockDurableObjectStub {
         })
       } catch (error: unknown) {
         const err = error as Error & { code?: string; path?: string }
+        // Return 403 Forbidden for EACCES (path traversal)
+        const status = err.code === 'EACCES' ? 403 : 400
         return new Response(
           JSON.stringify({
             code: err.code ?? 'UNKNOWN',
@@ -532,7 +576,7 @@ export class MockDurableObjectStub {
             path: err.path,
           }),
           {
-            status: 400,
+            status,
             headers: { 'Content-Type': 'application/json' },
           }
         )
@@ -546,6 +590,8 @@ export class MockDurableObjectStub {
     switch (method) {
       case 'readFile': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const entry = this.storage.get(path)
         if (!entry) {
           throw { code: 'ENOENT', message: 'no such file or directory', path }
@@ -564,6 +610,8 @@ export class MockDurableObjectStub {
 
       case 'writeFile': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const data = params.data as string
         const encoding = params.encoding as string
         const mode = params.mode as number | undefined
@@ -591,6 +639,8 @@ export class MockDurableObjectStub {
 
       case 'mkdir': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const recursive = params.recursive as boolean
         const mode = params.mode as number | undefined
 
@@ -622,6 +672,8 @@ export class MockDurableObjectStub {
 
       case 'rmdir': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const recursive = params.recursive as boolean
 
         if (!this.storage.has(path)) {
@@ -653,6 +705,8 @@ export class MockDurableObjectStub {
 
       case 'readdir': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const withFileTypes = params.withFileTypes as boolean
 
         if (!this.storage.has(path)) {
@@ -683,6 +737,8 @@ export class MockDurableObjectStub {
       case 'stat':
       case 'lstat': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const entry = this.storage.get(path)
 
         if (!entry) {
@@ -709,6 +765,8 @@ export class MockDurableObjectStub {
 
       case 'unlink': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
 
         if (!this.storage.has(path)) {
           throw { code: 'ENOENT', message: 'no such file or directory', path }
@@ -725,6 +783,9 @@ export class MockDurableObjectStub {
       case 'rename': {
         const oldPath = params.oldPath as string
         const newPath = params.newPath as string
+        // Validate both paths for traversal attacks
+        this.validatePath(oldPath)
+        this.validatePath(newPath)
 
         if (!this.storage.has(oldPath)) {
           throw { code: 'ENOENT', message: 'no such file or directory', path: oldPath }
@@ -751,6 +812,9 @@ export class MockDurableObjectStub {
       case 'copyFile': {
         const src = params.src as string
         const dest = params.dest as string
+        // Validate both paths for traversal attacks
+        this.validatePath(src)
+        this.validatePath(dest)
 
         if (!this.storage.has(src)) {
           throw { code: 'ENOENT', message: 'no such file or directory', path: src }
@@ -767,6 +831,8 @@ export class MockDurableObjectStub {
 
       case 'rm': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const recursive = params.recursive as boolean
         const force = params.force as boolean
 
@@ -796,6 +862,8 @@ export class MockDurableObjectStub {
 
       case 'access': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
 
         if (!this.storage.has(path)) {
           throw { code: 'ENOENT', message: 'no such file or directory', path }
@@ -806,6 +874,8 @@ export class MockDurableObjectStub {
 
       case 'chmod': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const mode = params.mode as number
 
         if (!this.storage.has(path)) {
@@ -820,6 +890,8 @@ export class MockDurableObjectStub {
 
       case 'chown': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const uid = params.uid as number
         const gid = params.gid as number
 
@@ -835,6 +907,8 @@ export class MockDurableObjectStub {
 
       case 'utimes': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const atime = params.atime as number
         const mtime = params.mtime as number
 
@@ -851,6 +925,14 @@ export class MockDurableObjectStub {
       case 'symlink': {
         const target = params.target as string
         const path = params.path as string
+        // Validate the path where the symlink will be created
+        this.validatePath(path)
+        // Also validate that the target doesn't point outside the root
+        // This prevents creating symlinks that escape the filesystem jail
+        if (pathValidator.isSymlinkEscape(target, path, this.rootPath)) {
+          const error = { code: 'EACCES', message: 'permission denied - symlink target outside root', path: target }
+          throw error
+        }
 
         this.storage.addSymlink(path, target)
         return {}
@@ -859,6 +941,9 @@ export class MockDurableObjectStub {
       case 'link': {
         const existingPath = params.existingPath as string
         const newPath = params.newPath as string
+        // Validate both paths for traversal attacks
+        this.validatePath(existingPath)
+        this.validatePath(newPath)
 
         if (!this.storage.has(existingPath)) {
           throw { code: 'ENOENT', message: 'no such file or directory', path: existingPath }
@@ -877,6 +962,8 @@ export class MockDurableObjectStub {
 
       case 'readlink': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
 
         if (!this.storage.has(path)) {
           throw { code: 'ENOENT', message: 'no such file or directory', path }
@@ -892,6 +979,8 @@ export class MockDurableObjectStub {
 
       case 'realpath': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
 
         // Normalize the path
         const normalized = this.storage.normalizePath(path)
@@ -905,6 +994,8 @@ export class MockDurableObjectStub {
 
       case 'truncate': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
         const length = (params.length as number) ?? 0
 
         if (!this.storage.has(path)) {
@@ -928,6 +1019,8 @@ export class MockDurableObjectStub {
 
       case 'open': {
         const path = params.path as string
+        // Validate path for traversal attacks
+        this.validatePath(path)
 
         if (!this.storage.has(path)) {
           throw { code: 'ENOENT', message: 'no such file or directory', path }

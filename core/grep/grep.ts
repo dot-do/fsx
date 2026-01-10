@@ -3,12 +3,59 @@
  *
  * Searches file contents for patterns, similar to Unix grep.
  * Used for git grep, searching commit messages, content-based file discovery.
+ * Supports timeout and cancellation for long-running searches.
  *
  * @module grep
  */
 
+import type { FsBackend } from '../backend'
+
 /**
- * Options for grep content search
+ * Error thrown when a grep operation times out.
+ */
+export class GrepTimeoutError extends Error {
+  /** The search pattern that was being matched */
+  pattern: string | RegExp
+  /** Timeout duration in milliseconds */
+  timeout: number
+
+  constructor(pattern: string | RegExp, timeout: number) {
+    const patternStr = pattern instanceof RegExp ? pattern.source : pattern
+    super(`Grep operation timed out after ${timeout}ms while searching for '${patternStr}'`)
+    this.name = 'GrepTimeoutError'
+    this.pattern = pattern
+    this.timeout = timeout
+  }
+}
+
+/**
+ * Error thrown when a grep operation is aborted.
+ */
+export class GrepAbortedError extends Error {
+  /** The search pattern that was being matched */
+  pattern: string | RegExp
+
+  constructor(pattern: string | RegExp) {
+    const patternStr = pattern instanceof RegExp ? pattern.source : pattern
+    super(`Grep operation was aborted while searching for '${patternStr}'`)
+    this.name = 'GrepAbortedError'
+    this.pattern = pattern
+  }
+}
+
+/**
+ * Options for grep content search.
+ *
+ * @example
+ * ```typescript
+ * const options: GrepOptions = {
+ *   pattern: /TODO:/,
+ *   path: '/src',
+ *   recursive: true,
+ *   ignoreCase: true,
+ *   timeout: 5000,
+ * }
+ * ```
  */
 export interface GrepOptions {
   /** Search pattern - string for literal match, RegExp for regex */
@@ -35,6 +82,20 @@ export interface GrepOptions {
   invert?: boolean
   /** Match whole words only (like -w) */
   wordMatch?: boolean
+  /** FsBackend to use for filesystem operations (optional, falls back to mock FS) */
+  backend?: FsBackend
+  /**
+   * Timeout in milliseconds for the entire grep operation.
+   * Set to 0 or undefined for no timeout.
+   * @throws {GrepTimeoutError} When timeout is exceeded
+   */
+  timeout?: number
+  /**
+   * AbortSignal for cancelling the grep operation.
+   * When aborted, throws GrepAbortedError.
+   * @throws {GrepAbortedError} When signal is aborted
+   */
+  signal?: AbortSignal
 }
 
 /**
@@ -402,6 +463,55 @@ function getFiles(dir: string, recursive: boolean): string[] {
 }
 
 /**
+ * Get all files in a directory using a backend (optionally recursive).
+ *
+ * @param dir - Directory to search
+ * @param recursive - Whether to search subdirectories
+ * @param backend - Filesystem backend to use
+ * @param checkTimeout - Optional function to check for timeout
+ * @param checkAbort - Optional function to check for abort signal
+ * @returns Array of file paths
+ */
+async function getFilesWithBackend(
+  dir: string,
+  recursive: boolean,
+  backend: FsBackend,
+  checkTimeout?: () => void,
+  checkAbort?: () => void
+): Promise<string[]> {
+  // Check for timeout/abort at each directory
+  checkTimeout?.()
+  checkAbort?.()
+
+  const normalizedDir = normalizePath(dir)
+  const files: string[] = []
+
+  // Get entries using backend readdir
+  let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>
+  try {
+    entries = await backend.readdir(normalizedDir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>
+  } catch (err) {
+    // Handle permission denied gracefully - skip directory
+    const e = err as Error & { code?: string }
+    if (e.code === 'EACCES' || e.message?.includes('EACCES')) {
+      return files
+    }
+    throw err
+  }
+
+  for (const entry of entries) {
+    const fullPath = joinPath(normalizedDir, entry.name)
+    if (entry.isFile()) {
+      files.push(fullPath)
+    } else if (entry.isDirectory() && recursive) {
+      files.push(...await getFilesWithBackend(fullPath, recursive, backend, checkTimeout, checkAbort))
+    }
+  }
+
+  return files
+}
+
+/**
  * Escape regex special characters in a string
  */
 function escapeRegex(str: string): string {
@@ -524,6 +634,8 @@ function buildSearchRegex(pattern: string | RegExp, options: GrepOptions): RegEx
  * ```
  */
 export async function grep(options: GrepOptions): Promise<GrepResult> {
+  const startTime = Date.now()
+
   const {
     pattern,
     path = '/',
@@ -536,13 +648,44 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
     filesOnly = false,
     invert = false,
     wordMatch = false,
+    backend,
+    timeout,
+    signal,
   } = options
+
+  // Helper to check timeout
+  const checkTimeout = (): void => {
+    if (timeout && timeout > 0) {
+      const elapsed = Date.now() - startTime
+      if (elapsed > timeout) {
+        throw new GrepTimeoutError(pattern, timeout)
+      }
+    }
+  }
+
+  // Helper to check abort
+  const checkAbort = (): void => {
+    if (signal?.aborted) {
+      throw new GrepAbortedError(pattern)
+    }
+  }
+
+  // Check for immediate abort/timeout
+  checkAbort()
+  checkTimeout()
 
   const normalizedPath = normalizePath(path)
 
-  // Validate path exists
-  if (!pathExists(normalizedPath)) {
-    throw new Error(`ENOENT: no such file or directory '${normalizedPath}'`)
+  // Validate path exists - use backend if provided
+  if (backend) {
+    const exists = await backend.exists(normalizedPath)
+    if (!exists) {
+      throw new Error(`ENOENT: no such file or directory '${normalizedPath}'`)
+    }
+  } else {
+    if (!pathExists(normalizedPath)) {
+      throw new Error(`ENOENT: no such file or directory '${normalizedPath}'`)
+    }
   }
 
   // Build the search regex
@@ -550,11 +693,27 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
 
   // Get list of files to search
   let filesToSearch: string[]
-  if (isFile(normalizedPath)) {
-    filesToSearch = [normalizedPath]
+
+  if (backend) {
+    // Use backend for file discovery
+    const stat = await backend.stat(normalizedPath)
+    if (stat.isFile()) {
+      filesToSearch = [normalizedPath]
+    } else {
+      filesToSearch = await getFilesWithBackend(normalizedPath, recursive, backend, checkTimeout, checkAbort)
+    }
   } else {
-    filesToSearch = getFiles(normalizedPath, recursive)
+    // Use mock filesystem
+    if (isFile(normalizedPath)) {
+      filesToSearch = [normalizedPath]
+    } else {
+      filesToSearch = getFiles(normalizedPath, recursive)
+    }
   }
+
+  // Check timeout/abort after file discovery
+  checkTimeout()
+  checkAbort()
 
   // Apply glob filter if specified
   if (globPattern) {
@@ -566,7 +725,24 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
   const filesWithMatches = new Set<string>()
 
   for (const file of filesToSearch) {
-    const content = mockFileContents.get(file)
+    // Check for timeout/abort periodically during file search
+    checkTimeout()
+    checkAbort()
+
+    let content: string | undefined
+
+    if (backend) {
+      // Read content from backend
+      try {
+        const data = await backend.readFile(file)
+        content = new TextDecoder().decode(data)
+      } catch {
+        continue // Skip files that can't be read
+      }
+    } else {
+      content = mockFileContents.get(file)
+    }
+
     if (content === undefined) continue
 
     // Handle empty files - no lines to search

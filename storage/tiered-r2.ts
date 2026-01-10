@@ -231,8 +231,10 @@ export class TieredR2Storage {
 
   /**
    * Determine the appropriate tier based on access pattern
+   * @internal Reserved for automatic tier migration based on access patterns
    */
-  private determineTierByAge(lastAccess: number, now: number = Date.now()): StorageTier {
+  // @ts-expect-error Reserved for future tier migration implementation
+  private _determineTierByAge(lastAccess: number, now: number = Date.now()): StorageTier {
     const ageMs = now - lastAccess
     const ageDays = ageMs / MS_PER_DAY
 
@@ -313,8 +315,10 @@ export class TieredR2Storage {
 
   /**
    * Get access metadata from SQLite
+   * @internal Reserved for future tier migration based on access patterns
    */
-  private async getAccessMetadata(key: string): Promise<AccessMetadataRow | null> {
+  // @ts-expect-error Reserved for future tier migration implementation
+  private async _getAccessMetadata(key: string): Promise<AccessMetadataRow | null> {
     if (!this.sql) return null
 
     await this.ensureInitialized()
@@ -339,7 +343,7 @@ export class TieredR2Storage {
     }
   ): Promise<TieredWriteResult> {
     const key = this.key(path)
-    const now = Date.now()
+    void Date.now() // Timestamp available for future tracking
 
     // Determine initial tier
     const tier = options?.tier ?? 'hot'
