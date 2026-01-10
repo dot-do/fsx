@@ -6,7 +6,7 @@
 
 import type { Stats, Dirent, FileHandle, MkdirOptions, RmdirOptions, ReaddirOptions, ReadStreamOptions, WriteStreamOptions, WatchOptions, FSWatcher, BufferEncoding } from './types.js'
 import { constants } from './constants.js'
-import { ENOENT, EEXIST, EISDIR, ENOTDIR, EINVAL } from './errors.js'
+import { ENOENT, EEXIST, EISDIR, ENOTDIR, EINVAL, ENOTEMPTY } from './errors.js'
 
 /**
  * FSx configuration options
@@ -129,6 +129,8 @@ export class FSx {
         return new ENOTDIR(undefined, error.path)
       case 'EINVAL':
         return new EINVAL(undefined, error.path)
+      case 'ENOTEMPTY':
+        return new ENOTEMPTY(undefined, error.path)
       default:
         return new Error(error.message)
     }

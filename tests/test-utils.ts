@@ -467,6 +467,51 @@ export class MockDurableObjectStub {
   }
 
   async fetch(url: string, init?: RequestInit): Promise<Response> {
+    const parsedUrl = new URL(url)
+
+    // Handle stream/read endpoint for createReadStream
+    if (parsedUrl.pathname === '/stream/read' && init?.method === 'POST') {
+      try {
+        const body = JSON.parse(init.body as string)
+        const path = body.path as string
+        const entry = this.storage.get(path)
+
+        if (!entry) {
+          return new Response(
+            JSON.stringify({ code: 'ENOENT', message: 'no such file or directory', path }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          )
+        }
+
+        if (entry.type === 'directory') {
+          return new Response(
+            JSON.stringify({ code: 'EISDIR', message: 'illegal operation on a directory', path }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          )
+        }
+
+        // Return the content as a stream
+        return new Response(entry.content, {
+          status: 200,
+          headers: { 'Content-Type': 'application/octet-stream' },
+        })
+      } catch (error: unknown) {
+        const err = error as Error & { code?: string; path?: string }
+        return new Response(
+          JSON.stringify({ code: err.code ?? 'UNKNOWN', message: err.message, path: err.path }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        )
+      }
+    }
+
+    // Handle stream/write endpoint for createWriteStream
+    if (parsedUrl.pathname === '/stream/write' && init?.method === 'POST') {
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
     // Parse the RPC request
     if (init?.method === 'POST' && init.body) {
       const body = JSON.parse(init.body as string)
@@ -521,6 +566,7 @@ export class MockDurableObjectStub {
         const path = params.path as string
         const data = params.data as string
         const encoding = params.encoding as string
+        const mode = params.mode as number | undefined
 
         // Decode the data
         let bytes: Uint8Array
@@ -539,13 +585,14 @@ export class MockDurableObjectStub {
           throw { code: 'ENOENT', message: 'no such file or directory', path }
         }
 
-        this.storage.addFile(path, bytes)
+        this.storage.addFile(path, bytes, { mode })
         return {}
       }
 
       case 'mkdir': {
         const path = params.path as string
         const recursive = params.recursive as boolean
+        const mode = params.mode as number | undefined
 
         if (this.storage.has(path)) {
           if (!recursive) {
@@ -561,14 +608,14 @@ export class MockDurableObjectStub {
           for (const part of parts) {
             currentPath += '/' + part
             if (!this.storage.has(currentPath)) {
-              this.storage.addDirectory(currentPath)
+              this.storage.addDirectory(currentPath, { mode })
             }
           }
         } else {
           if (!this.storage.parentExists(path)) {
             throw { code: 'ENOENT', message: 'no such file or directory', path }
           }
-          this.storage.addDirectory(path)
+          this.storage.addDirectory(path, { mode })
         }
         return {}
       }
@@ -673,6 +720,221 @@ export class MockDurableObjectStub {
 
         this.storage.remove(path)
         return {}
+      }
+
+      case 'rename': {
+        const oldPath = params.oldPath as string
+        const newPath = params.newPath as string
+
+        if (!this.storage.has(oldPath)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path: oldPath }
+        }
+
+        // If same path, do nothing
+        if (oldPath === newPath) {
+          return {}
+        }
+
+        const entry = this.storage.get(oldPath)!
+        // Copy entry to new path
+        if (entry.type === 'file') {
+          this.storage.addFile(newPath, entry.content, { mode: entry.mode & 0o777 })
+        } else if (entry.type === 'directory') {
+          this.storage.addDirectory(newPath, { mode: entry.mode & 0o777 })
+        } else if (entry.type === 'symlink') {
+          this.storage.addSymlink(newPath, entry.linkTarget!)
+        }
+        this.storage.remove(oldPath)
+        return {}
+      }
+
+      case 'copyFile': {
+        const src = params.src as string
+        const dest = params.dest as string
+
+        if (!this.storage.has(src)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path: src }
+        }
+
+        const entry = this.storage.get(src)!
+        if (entry.type !== 'file') {
+          throw { code: 'EISDIR', message: 'illegal operation on a directory', path: src }
+        }
+
+        this.storage.addFile(dest, entry.content, { mode: entry.mode & 0o777 })
+        return {}
+      }
+
+      case 'rm': {
+        const path = params.path as string
+        const recursive = params.recursive as boolean
+        const force = params.force as boolean
+
+        if (!this.storage.has(path)) {
+          if (force) {
+            return {}
+          }
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+
+        if (this.storage.isDirectory(path)) {
+          if (!recursive) {
+            throw { code: 'EISDIR', message: 'is a directory', path }
+          }
+          // Remove directory recursively
+          const allPaths = this.storage.getAllPaths()
+          const toRemove = allPaths.filter((p) => p.startsWith(path + '/') || p === path)
+          toRemove.sort((a, b) => b.length - a.length)
+          for (const p of toRemove) {
+            this.storage.remove(p)
+          }
+        } else {
+          this.storage.remove(path)
+        }
+        return {}
+      }
+
+      case 'access': {
+        const path = params.path as string
+
+        if (!this.storage.has(path)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+        // For the mock, we just check existence. Real impl would check mode.
+        return {}
+      }
+
+      case 'chmod': {
+        const path = params.path as string
+        const mode = params.mode as number
+
+        if (!this.storage.has(path)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+
+        const entry = this.storage.get(path)!
+        // Update mode (keeping file type bits)
+        entry.mode = (entry.mode & ~0o777) | (mode & 0o777)
+        return {}
+      }
+
+      case 'chown': {
+        const path = params.path as string
+        const uid = params.uid as number
+        const gid = params.gid as number
+
+        if (!this.storage.has(path)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+
+        const entry = this.storage.get(path)!
+        entry.uid = uid
+        entry.gid = gid
+        return {}
+      }
+
+      case 'utimes': {
+        const path = params.path as string
+        const atime = params.atime as number
+        const mtime = params.mtime as number
+
+        if (!this.storage.has(path)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+
+        const entry = this.storage.get(path)!
+        entry.atime = atime
+        entry.mtime = mtime
+        return {}
+      }
+
+      case 'symlink': {
+        const target = params.target as string
+        const path = params.path as string
+
+        this.storage.addSymlink(path, target)
+        return {}
+      }
+
+      case 'link': {
+        const existingPath = params.existingPath as string
+        const newPath = params.newPath as string
+
+        if (!this.storage.has(existingPath)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path: existingPath }
+        }
+
+        const entry = this.storage.get(existingPath)!
+        if (entry.type !== 'file') {
+          throw { code: 'EPERM', message: 'operation not permitted', path: existingPath }
+        }
+
+        // Create hard link (copy file with same content)
+        this.storage.addFile(newPath, entry.content, { mode: entry.mode & 0o777 })
+        entry.nlink++
+        return {}
+      }
+
+      case 'readlink': {
+        const path = params.path as string
+
+        if (!this.storage.has(path)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+
+        const entry = this.storage.get(path)!
+        if (entry.type !== 'symlink') {
+          throw { code: 'EINVAL', message: 'invalid argument', path }
+        }
+
+        return entry.linkTarget
+      }
+
+      case 'realpath': {
+        const path = params.path as string
+
+        // Normalize the path
+        const normalized = this.storage.normalizePath(path)
+
+        if (!this.storage.has(normalized)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+
+        return normalized
+      }
+
+      case 'truncate': {
+        const path = params.path as string
+        const length = (params.length as number) ?? 0
+
+        if (!this.storage.has(path)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+
+        const entry = this.storage.get(path)!
+        if (entry.type !== 'file') {
+          throw { code: 'EISDIR', message: 'is a directory', path }
+        }
+
+        if (length < entry.content.length) {
+          entry.content = entry.content.slice(0, length)
+        } else if (length > entry.content.length) {
+          const newContent = new Uint8Array(length)
+          newContent.set(entry.content)
+          entry.content = newContent
+        }
+        return {}
+      }
+
+      case 'open': {
+        const path = params.path as string
+
+        if (!this.storage.has(path)) {
+          throw { code: 'ENOENT', message: 'no such file or directory', path }
+        }
+
+        // Return a mock file descriptor
+        return { fd: Math.floor(Math.random() * 1000) + 3 }
       }
 
       case 'setMetadata':
