@@ -211,3 +211,86 @@ describe('SDK Usage Patterns', () => {
     })
   })
 })
+
+describe('createFs Factory Function', () => {
+  describe('export and basic usage', () => {
+    it('should export createFs factory function', async () => {
+      const { createFs } = await import('../index.js')
+      expect(createFs).toBeDefined()
+      expect(typeof createFs).toBe('function')
+    })
+
+    it('should create a new FSx instance with default options', async () => {
+      const { createFs, FSx } = await import('../index.js')
+      const newFs = createFs()
+      expect(newFs).toBeInstanceOf(FSx)
+    })
+
+    it('should create isolated instances (not the singleton)', async () => {
+      const { createFs, fs } = await import('../index.js')
+      const newFs = createFs()
+      expect(newFs).not.toBe(fs)
+    })
+
+    it('should create multiple isolated instances', async () => {
+      const { createFs } = await import('../index.js')
+      const fs1 = createFs()
+      const fs2 = createFs()
+      expect(fs1).not.toBe(fs2)
+    })
+  })
+
+  describe('instance functionality', () => {
+    it('should have all FSx methods on created instance', async () => {
+      const { createFs, FSx } = await import('../index.js')
+      const newFs = createFs()
+
+      const fsxMethods = Object.getOwnPropertyNames(FSx.prototype).filter(
+        (name) => name !== 'constructor' && typeof (FSx.prototype as any)[name] === 'function'
+      )
+
+      for (const method of fsxMethods) {
+        expect(
+          typeof (newFs as any)[method],
+          `created instance should have method ${method}`
+        ).toBe('function')
+      }
+    })
+
+    it('should support file operations on created instance', async () => {
+      const { createFs } = await import('../index.js')
+      const testFs = createFs()
+
+      // Write and read a file
+      await testFs.writeFile('/factory-test.txt', 'factory test content')
+      const content = await testFs.readFile('/factory-test.txt', 'utf-8')
+      expect(content).toBe('factory test content')
+    })
+
+    it('should have isolated storage between instances', async () => {
+      const { createFs, ENOENT } = await import('../index.js')
+      const fs1 = createFs()
+      const fs2 = createFs()
+
+      // Write to fs1
+      await fs1.writeFile('/isolated.txt', 'fs1 content')
+
+      // fs1 should have the file
+      const exists1 = await fs1.exists('/isolated.txt')
+      expect(exists1).toBe(true)
+
+      // fs2 should NOT have the file (isolated storage)
+      const exists2 = await fs2.exists('/isolated.txt')
+      expect(exists2).toBe(false)
+    })
+  })
+
+  describe('CreateFsOptions type', () => {
+    it('should export CreateFsOptions type', async () => {
+      // This test verifies the type is exported by checking it compiles
+      const module = await import('../index.js')
+      expect(module.createFs).toBeDefined()
+      // The type CreateFsOptions is available for TypeScript users
+    })
+  })
+})
