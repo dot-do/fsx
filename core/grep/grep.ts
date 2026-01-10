@@ -533,10 +533,10 @@ function matchGlob(path: string, pattern: string): boolean {
   // Handle brace expansion
   if (pattern.includes('{')) {
     const match = pattern.match(/\{([^}]+)\}/)
-    if (match) {
+    if (match && match[1] !== undefined && match.index !== undefined) {
       const options = match[1].split(',')
       const prefix = pattern.slice(0, match.index)
-      const suffix = pattern.slice(match.index! + match[0].length)
+      const suffix = pattern.slice(match.index + match[0].length)
       return options.some(opt => matchGlob(path, prefix + opt + suffix))
     }
   }
@@ -756,6 +756,7 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
 
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       const lineContent = lines[lineIndex]
+      if (lineContent === undefined) continue
       const lineNumber = lineIndex + 1 // 1-indexed
 
       if (invert) {
@@ -855,7 +856,10 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
 
     // For filesOnly mode, only add one entry per file
     if (filesOnly && fileMatches.length > 0) {
-      allMatches.push(fileMatches[0])
+      const firstMatch = fileMatches[0]
+      if (firstMatch) {
+        allMatches.push(firstMatch)
+      }
     } else {
       allMatches.push(...fileMatches)
     }

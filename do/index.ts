@@ -45,7 +45,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import { Hono } from 'hono'
 import { FsModule } from './module.js'
-import type { Stats, Dirent } from '../core/types.js'
+import type { Dirent, BufferEncoding } from '../core/index.js'
 
 // Re-export FsModule and related types for fsx/do entry point
 export { FsModule, type FsModuleConfig } from './module.js'
@@ -228,7 +228,7 @@ export class FileSystemDO extends DurableObject<Env> {
   private async handleMethod(method: string, params: Record<string, unknown>): Promise<unknown> {
     switch (method) {
       case 'readFile':
-        return this.handleReadFile(params.path as string, params.encoding as string | undefined)
+        return this.handleReadFile(params.path as string, params.encoding as BufferEncoding | undefined)
 
       case 'writeFile':
         await this.fsModule.write(params.path as string, params.data as string | Uint8Array, params)
@@ -323,7 +323,7 @@ export class FileSystemDO extends DurableObject<Env> {
   /**
    * Handle readFile with encoding support
    */
-  private async handleReadFile(path: string, encoding?: string): Promise<{ data: string; encoding: string }> {
+  private async handleReadFile(path: string, encoding?: BufferEncoding): Promise<{ data: string; encoding: string }> {
     const result = await this.fsModule.read(path, { encoding })
 
     if (typeof result === 'string') {
@@ -350,7 +350,7 @@ export class FileSystemDO extends DurableObject<Env> {
 
     if (options.withFileTypes) {
       // Convert Dirent objects to plain objects for JSON serialization
-      return (result as Dirent[]).map((entry) => ({
+      return (result as Dirent[]).map((entry): DirentResponse => ({
         name: entry.name,
         parentPath: entry.parentPath,
         path: entry.parentPath + '/' + entry.name,

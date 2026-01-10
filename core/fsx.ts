@@ -1294,7 +1294,7 @@ export class FSx {
         const bytesToRead = Math.min(readLength, fileData.length - readPosition)
 
         for (let i = 0; i < bytesToRead; i++) {
-          buffer[targetOffset + i] = fileData[readPosition + i]
+          buffer[targetOffset + i] = fileData[readPosition + i]!
         }
         return { bytesRead: bytesToRead, buffer }
       },

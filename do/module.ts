@@ -38,9 +38,8 @@ import type {
   MoveOptions,
   CopyOptions,
   DirentType,
-} from '../core/types.js'
-import { Dirent, FileHandle } from '../core/types.js'
-import { constants } from '../core/constants.js'
+} from '../core/index.js'
+import { Dirent, FileHandle, constants } from '../core/index.js'
 import { ENOENT, EEXIST, EISDIR, ENOTDIR, ENOTEMPTY } from '../core/errors.js'
 
 // Re-export security module for backward compatibility
@@ -1309,7 +1308,7 @@ export class FsModule implements FsCapability {
         const bytesToRead = Math.min(readLen, data.length - readPos)
 
         for (let i = 0; i < bytesToRead; i++) {
-          buffer[(offset ?? 0) + i] = data[readPos + i]
+          buffer[(offset ?? 0) + i] = data[readPos + i]!
         }
 
         return { bytesRead: bytesToRead, buffer }
@@ -1325,7 +1324,7 @@ export class FsModule implements FsCapability {
         }
 
         for (let i = 0; i < bytes.length; i++) {
-          data[pos + i] = bytes[i]
+          data[pos + i] = bytes[i]!
         }
 
         return { bytesWritten: bytes.length }

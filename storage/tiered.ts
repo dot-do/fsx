@@ -39,7 +39,7 @@
  * @module storage/tiered
  */
 
-import type { StorageTier } from '../core/types.js'
+import type { StorageTier } from '../core/index.js'
 import { StorageError } from './interfaces.js'
 
 /**

@@ -5,7 +5,9 @@ describe('Path Utilities', () => {
   describe('normalize()', () => {
     describe('empty and edge cases', () => {
       it('should handle empty string', () => {
-        expect(normalize('')).toBe('')
+        // POSIX standard: empty string normalizes to '.' (current directory)
+        // This matches Node.js path.normalize('') behavior
+        expect(normalize('')).toBe('.')
       })
 
       it('should handle single dot', () => {

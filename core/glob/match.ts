@@ -50,7 +50,7 @@ function segmentToRegex(segment: string, options: MatchOptions): string {
   const dot = options.dot ?? false
 
   while (i < segment.length) {
-    const char = segment[i]
+    const char = segment[i]!
 
     if (char === '*') {
       // * matches anything except path separator
@@ -137,7 +137,10 @@ function segmentToRegex(segment: string, options: MatchOptions): string {
       }
     } else if (char === '\\' && i + 1 < segment.length) {
       // Escaped character - treat next char literally
-      result += escapeRegex(segment[i + 1])
+      const nextChar = segment[i + 1]
+      if (nextChar !== undefined) {
+        result += escapeRegex(nextChar)
+      }
       i += 2
     } else {
       // Literal character
@@ -290,8 +293,9 @@ function matchGlobstar(compiled: CompiledPattern, pathSegments: string[]): boole
 
       // 2. One or more path segments
       for (let j = pathi; j < pathSegments.length; j++) {
+        const pathSegAtJ = pathSegments[j]
         // Check dotfile constraint for each segment ** matches
-        if (!dot && pathSegments[j].startsWith('.')) {
+        if (!dot && pathSegAtJ?.startsWith('.')) {
           // ** shouldn't match dotfiles unless dot option
           // But we continue trying to match later segments
         }
@@ -322,6 +326,10 @@ function matchGlobstar(compiled: CompiledPattern, pathSegments: string[]): boole
     }
 
     const pathSeg = pathSegments[pathi]
+    if (!pathSeg || !patternSeg) {
+      memo.set(key, false)
+      return false
+    }
 
     // Check dotfile constraint
     if (!dot && pathSeg.startsWith('.') && patternSeg !== pathSeg) {

@@ -12,7 +12,7 @@
  * @module storage/interfaces
  */
 
-import type { StorageTier, FileType, FileEntry, BlobRef } from '../core/types.js'
+import type { StorageTier, FileType, FileEntry, BlobRef } from '../core/index.js'
 
 // =============================================================================
 // Error Types

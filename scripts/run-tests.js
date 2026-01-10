@@ -82,11 +82,71 @@ async function runShard(shardIndex, totalShards) {
   })
 }
 
+/**
+ * Run the test/core tests which require Node.js environment (not Workers pool).
+ * These tests scan the filesystem and need native fs access.
+ */
+async function runNodeTests() {
+  return new Promise((resolve) => {
+    const args = ['vitest', 'run', '--config', 'test/core/vitest.config.ts']
+    const child = spawn('npx', args, {
+      cwd: projectRoot,
+      stdio: 'pipe',
+      env: { ...process.env, FORCE_COLOR: '1' }
+    })
+
+    let output = ''
+
+    child.stdout.on('data', (data) => {
+      const str = data.toString()
+      output += str
+      process.stdout.write(str)
+    })
+
+    child.stderr.on('data', (data) => {
+      const str = data.toString()
+      output += str
+      process.stderr.write(str)
+    })
+
+    child.on('close', (code) => {
+      // Parse test results from output
+      const passMatch = output.match(/(\d+)\s+passed/)
+      const failMatch = output.match(/(\d+)\s+failed/)
+
+      if (passMatch) {
+        const passed = parseInt(passMatch[1], 10)
+        totalPassed += passed
+        totalTests += passed
+      }
+
+      if (failMatch) {
+        const failed = parseInt(failMatch[1], 10)
+        totalFailed += failed
+        totalTests += failed
+      }
+
+      resolve(code)
+    })
+  })
+}
+
 async function main() {
   console.log(`Running tests in ${TOTAL_SHARDS} shards to avoid memory issues...\n`)
 
   const startTime = Date.now()
 
+  // First run the Node.js tests (test/core) that need filesystem access
+  console.log(`\n${'='.repeat(60)}`)
+  console.log('Running Node.js tests (test/core/)')
+  console.log(`${'='.repeat(60)}\n`)
+
+  const nodeTestCode = await runNodeTests()
+  if (nodeTestCode !== 0) {
+    failedShards.push('node-tests')
+  }
+
+  // Then run the Workers pool tests in shards
   for (let i = 1; i <= TOTAL_SHARDS; i++) {
     console.log(`\n${'='.repeat(60)}`)
     console.log(`Shard ${i}/${TOTAL_SHARDS}`)

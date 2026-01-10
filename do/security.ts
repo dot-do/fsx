@@ -583,7 +583,7 @@ export class PathValidator {
 
     for (const segment of segments) {
       // Strip any Windows alternate data stream syntax (file.txt:$DATA)
-      const cleanSegment = segment.split(':')[0]
+      const cleanSegment = segment.split(':')[0] || ''
 
       if (cleanSegment === '..') {
         result.pop()

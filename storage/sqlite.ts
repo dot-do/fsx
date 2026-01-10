@@ -78,7 +78,7 @@
  * @module storage/sqlite
  */
 
-import type { FileEntry, FileType, BlobRef, StorageTier } from '../core/types.js'
+import type { FileEntry, FileType, BlobRef, StorageTier } from '../core/index.js'
 import type {
   MetadataStorage,
   CreateEntryOptions,

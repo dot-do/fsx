@@ -5,4 +5,4 @@
  */
 
 export { match, createMatcher, type MatchOptions } from './match'
-export { glob, type GlobOptions } from './glob'
+export { glob, GlobTimeoutError, GlobAbortedError, type GlobOptions } from './glob'

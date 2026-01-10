@@ -38,7 +38,7 @@ export function bytesToHex(bytes: Uint8Array): string {
   if (bytes.length === 0) return ''
   let result = ''
   for (let i = 0; i < bytes.length; i++) {
-    result += HEX_LOOKUP[bytes[i]]
+    result += HEX_LOOKUP[bytes[i]!]
   }
   return result
 }

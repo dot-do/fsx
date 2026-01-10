@@ -14,7 +14,7 @@
  * - Performance optimization through tier promotion
  */
 
-import type { StorageTier } from '../core/types.js'
+import type { StorageTier } from '../core/index.js'
 
 /**
  * Time duration constants in milliseconds

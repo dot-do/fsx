@@ -45,5 +45,5 @@ export { hashToPath, pathToHash } from './path-mapping.js'
 
 // Low-level functions
 export { putObject, type ObjectStorage } from './put-object.js'
-export { getObject, type GitObject } from './get-object.js'
+export { getObject, type GitObject, type GetObjectStorage } from './get-object.js'
 export { hasObject, setStorage, getStorage, type HasObjectStorage } from './has-object.js'

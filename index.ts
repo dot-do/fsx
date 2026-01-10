@@ -25,7 +25,114 @@
 // Re-export core @dotdo/fsx
 // =============================================================================
 
-export * from './core/index.js'
+// Core types and classes from core/
+export {
+  // Backend interface
+  type FsBackend,
+  type BackendWriteResult,
+  type BackendReadResult,
+  type BackendOptions,
+  MemoryBackend,
+  // Classes
+  Stats,
+  Dirent,
+  FileHandle,
+  // FSx main API
+  FSx,
+  type FSxOptions,
+  // Constants
+  constants,
+  type Constants,
+} from './core/index.js'
+
+// Re-export all type definitions
+export type {
+  // Core capability interface
+  FsCapability,
+  // Storage tier type
+  StorageTier,
+  // File statistics types
+  FileStat,
+  StatsInit,
+  StatsLike,
+  // Directory entry types
+  DirentType,
+  FileType,
+  FileEntry,
+  FileMode,
+  // Operation options
+  ReadOptions,
+  WriteOptions,
+  ListOptions,
+  CopyOptions,
+  MoveOptions,
+  RemoveOptions,
+  ReadStreamOptions,
+  WriteStreamOptions,
+  MkdirOptions,
+  RmdirOptions,
+  ReaddirOptions,
+  WatchOptions,
+  // Result types
+  WriteResult,
+  ReadResult,
+  // Watcher
+  FSWatcher,
+  // Encoding and storage
+  BufferEncoding,
+  BlobRef,
+} from './core/index.js'
+
+// Errors from core/errors.js
+export {
+  FSError,
+  ENOENT,
+  EEXIST,
+  EISDIR,
+  ENOTDIR,
+  EACCES,
+  EPERM,
+  ENOTEMPTY,
+  EBADF,
+  EINVAL,
+  ELOOP,
+  ENAMETOOLONG,
+  ENOSPC,
+  EROFS,
+  EBUSY,
+  EMFILE,
+  ENFILE,
+  EXDEV,
+} from './core/errors.js'
+
+// Path utilities, glob, find, grep
+export * from './core/path.js'
+export { match, createMatcher, type MatchOptions } from './core/glob/match.js'
+export { glob, GlobTimeoutError, GlobAbortedError, type GlobOptions } from './core/glob/glob.js'
+export { find, type FindOptions, type FindResult } from './core/find/find.js'
+export { grep, type GrepOptions, type GrepMatch, type GrepResult } from './core/grep/grep.js'
+
+// Content-Addressable Storage
+export {
+  ContentAddressableFS,
+  type CASObject,
+  type CASStorage,
+  type ObjectType,
+} from './core/cas/content-addressable-fs.js'
+export { sha1, sha256, bytesToHex, hexToBytes } from './core/cas/hash.js'
+export { hashToPath, pathToHash } from './core/cas/path-mapping.js'
+
+// Sparse checkout
+export { parsePattern, type ParsedPattern } from './core/sparse/patterns.js'
+
+// Config
+export {
+  createConfig,
+  isReadOnly,
+  defaultConfig,
+  type FSxConfig,
+  type FSxConfigOptions,
+} from './core/config.js'
 
 // =============================================================================
 // Durable Object exports
@@ -65,6 +172,8 @@ export {
   TieredFS,
   R2Storage,
   SQLiteMetadata,
+  R2Backend,
+  type R2BackendConfig,
 } from './storage/index.js'
 
 // =============================================================================

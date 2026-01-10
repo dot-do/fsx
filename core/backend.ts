@@ -20,6 +20,89 @@ import type {
 } from './types.js'
 
 // =============================================================================
+// FileHandle Interface
+// =============================================================================
+
+/**
+ * File handle for low-level file operations.
+ *
+ * Provides direct access to file contents with positioned read/write
+ * operations, similar to Node.js fs.FileHandle.
+ */
+export interface FileHandle {
+  /** File descriptor number */
+  readonly fd: number
+
+  /**
+   * Read data from the file.
+   *
+   * @param buffer - Buffer to read into
+   * @param offset - Offset in buffer to start writing
+   * @param length - Number of bytes to read
+   * @param position - Position in file to read from
+   * @returns Bytes read and buffer
+   */
+  read(
+    buffer: Uint8Array,
+    offset?: number,
+    length?: number,
+    position?: number
+  ): Promise<{ bytesRead: number; buffer: Uint8Array }>
+
+  /**
+   * Write data to the file.
+   *
+   * @param data - Data to write
+   * @param position - Position in file to write at
+   * @returns Bytes written
+   */
+  write(
+    data: Uint8Array | string,
+    position?: number
+  ): Promise<{ bytesWritten: number }>
+
+  /**
+   * Read entire file contents.
+   */
+  readFile(): Promise<Uint8Array>
+
+  /**
+   * Replace entire file contents.
+   */
+  writeFile(data: Uint8Array | string): Promise<void>
+
+  /**
+   * Get file statistics.
+   */
+  stat(): Promise<Stats>
+
+  /**
+   * Change file permissions.
+   */
+  chmod(mode: number): Promise<void>
+
+  /**
+   * Change file ownership.
+   */
+  chown(uid: number, gid: number): Promise<void>
+
+  /**
+   * Close the file handle.
+   */
+  close(): Promise<void>
+
+  /**
+   * Synchronize file data and metadata to storage.
+   */
+  sync(): Promise<void>
+
+  /**
+   * Synchronize file data (not metadata) to storage.
+   */
+  datasync(): Promise<void>
+}
+
+// =============================================================================
 // Backend Types
 // =============================================================================
 
@@ -136,6 +219,15 @@ export interface FsBackend {
   rename(oldPath: string, newPath: string): Promise<void>
 
   /**
+   * Append data to a file.
+   *
+   * @param path - Absolute path to the file
+   * @param data - Data to append
+   * @throws ENOENT if parent directory does not exist (creates file if it doesn't exist)
+   */
+  appendFile(path: string, data: Uint8Array): Promise<void>
+
+  /**
    * Copy a file.
    *
    * @param src - Source file path
@@ -202,6 +294,16 @@ export interface FsBackend {
   exists(path: string): Promise<boolean>
 
   /**
+   * Check file accessibility and permissions.
+   *
+   * @param path - Path to check
+   * @param mode - Accessibility mode (F_OK, R_OK, W_OK, X_OK)
+   * @throws ENOENT if path does not exist
+   * @throws EACCES if access is denied
+   */
+  access(path: string, mode?: number): Promise<void>
+
+  /**
    * Change file permissions.
    *
    * @param path - Path to the file
@@ -254,6 +356,44 @@ export interface FsBackend {
    * @returns Target path
    */
   readlink(path: string): Promise<string>
+
+  // ===========================================================================
+  // Path Operations
+  // ===========================================================================
+
+  /**
+   * Resolve a path by following symbolic links.
+   *
+   * @param path - Path to resolve
+   * @returns Resolved absolute path
+   * @throws ENOENT if path does not exist
+   * @throws ELOOP if too many symbolic links
+   */
+  realpath(path: string): Promise<string>
+
+  /**
+   * Create a unique temporary directory.
+   *
+   * @param prefix - Prefix for the directory name
+   * @returns Path to the created directory
+   */
+  mkdtemp(prefix: string): Promise<string>
+
+  // ===========================================================================
+  // File Handle Operations
+  // ===========================================================================
+
+  /**
+   * Open a file and return a file handle.
+   *
+   * @param path - Path to the file
+   * @param flags - Open flags ('r', 'w', 'a', 'r+', etc.)
+   * @param mode - File mode for new files
+   * @returns FileHandle for the opened file
+   * @throws ENOENT if file does not exist (for read modes)
+   * @throws EEXIST if file exists (for exclusive modes)
+   */
+  open(path: string, flags?: string, mode?: number): Promise<FileHandle>
 
   // ===========================================================================
   // Optional Tiering Operations
@@ -440,6 +580,22 @@ export class MemoryBackend implements FsBackend {
     })
 
     return { bytesWritten: data.length, tier: 'hot' }
+  }
+
+  async appendFile(path: string, data: Uint8Array): Promise<void> {
+    const normalized = this.normalizePath(path)
+    const existing = this.files.get(normalized)
+
+    if (existing) {
+      const newData = new Uint8Array(existing.data.length + data.length)
+      newData.set(existing.data)
+      newData.set(data, existing.data.length)
+      existing.data = newData
+      existing.stats.size = newData.length
+      existing.stats.mtimeMs = Date.now()
+    } else {
+      await this.writeFile(path, data)
+    }
   }
 
   async unlink(path: string): Promise<void> {
@@ -716,6 +872,14 @@ export class MemoryBackend implements FsBackend {
     return this.files.has(normalized) || this.directories.has(normalized)
   }
 
+  async access(path: string, _mode?: number): Promise<void> {
+    const normalized = this.normalizePath(path)
+    if (!this.files.has(normalized) && !this.directories.has(normalized)) {
+      throw new Error(`ENOENT: no such file or directory: ${path}`)
+    }
+    // In a full implementation, we'd check mode against file permissions
+  }
+
   async chmod(path: string, mode: number): Promise<void> {
     const normalized = this.normalizePath(path)
 
@@ -783,6 +947,25 @@ export class MemoryBackend implements FsBackend {
 
   async readlink(_path: string): Promise<string> {
     throw new Error('Symlinks not supported in memory backend')
+  }
+
+  async realpath(path: string): Promise<string> {
+    const normalized = this.normalizePath(path)
+    if (!this.files.has(normalized) && !this.directories.has(normalized)) {
+      throw new Error(`ENOENT: no such file or directory: ${path}`)
+    }
+    return normalized
+  }
+
+  async mkdtemp(prefix: string): Promise<string> {
+    const random = Math.random().toString(36).substring(2, 8)
+    const path = `${prefix}${random}`
+    await this.mkdir(path)
+    return path
+  }
+
+  async open(_path: string, _flags?: string, _mode?: number): Promise<FileHandle> {
+    throw new Error('File handles not supported in basic MemoryBackend. Use MockBackend instead.')
   }
 
   // Optional tiering operations

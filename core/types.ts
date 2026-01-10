@@ -576,7 +576,7 @@ export class FileHandle {
     const bytesToRead = Math.min(actualLength, buffer.length - offset)
 
     for (let i = 0; i < bytesToRead; i++) {
-      buffer[offset + i] = this._data[position + i]
+      buffer[offset + i] = this._data[position + i]!
     }
 
     return { bytesRead: bytesToRead, buffer }
@@ -601,7 +601,7 @@ export class FileHandle {
 
     // Write the data
     for (let i = 0; i < bytes.length; i++) {
-      this._data[pos + i] = bytes[i]
+      this._data[pos + i] = bytes[i]!
     }
 
     // Note: stats size update will be reflected in stat() via this._data.length

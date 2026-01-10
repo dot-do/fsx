@@ -106,7 +106,9 @@ export {
   EISDIR,
   ENOTDIR,
   EACCES,
+  EPERM,
   ENOTEMPTY,
+  EBADF,
   EINVAL,
   ELOOP,
   ENAMETOOLONG,
@@ -114,6 +116,7 @@ export {
   EROFS,
   EBUSY,
   EMFILE,
+  ENFILE,
   EXDEV,
 } from './errors.js'
 
@@ -141,7 +144,7 @@ export * from './path.js'
 
 // Glob pattern matching
 export { match, createMatcher, type MatchOptions } from './glob/match.js'
-export { glob, type GlobOptions } from './glob/glob.js'
+export { glob, GlobTimeoutError, GlobAbortedError, type GlobOptions } from './glob/glob.js'
 
 // Find files
 export { find, type FindOptions, type FindResult } from './find/find.js'

@@ -47,7 +47,7 @@ function toBase64(bytes: Uint8Array): string {
   if (bytes.length === 0) return ''
   let binary = ''
   for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i])
+    binary += String.fromCharCode(bytes[i]!)
   }
   return btoa(binary)
 }
@@ -58,7 +58,7 @@ function toBase64(bytes: Uint8Array): string {
 function toHex(bytes: Uint8Array): string {
   let hex = ''
   for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, '0')
+    hex += bytes[i]!.toString(16).padStart(2, '0')
   }
   return hex
 }
@@ -69,7 +69,7 @@ function toHex(bytes: Uint8Array): string {
 function toLatin1(bytes: Uint8Array): string {
   let result = ''
   for (let i = 0; i < bytes.length; i++) {
-    result += String.fromCharCode(bytes[i])
+    result += String.fromCharCode(bytes[i]!)
   }
   return result
 }

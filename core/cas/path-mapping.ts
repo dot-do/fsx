@@ -59,7 +59,13 @@ export function pathToHash(path: string): string {
     throw new Error('Invalid path: expected format "objects/xx/yyyy..."')
   }
 
-  const [, dir, filename] = parts
+  const dir = parts[1]
+  const filename = parts[2]
+
+  // Validate directory and filename exist
+  if (!dir || !filename) {
+    throw new Error('Invalid path: expected format "objects/xx/yyyy..."')
+  }
 
   // Validate directory is exactly 2 characters
   if (dir.length !== 2) {

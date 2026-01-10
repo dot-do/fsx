@@ -1,7 +1,7 @@
 {
   "name": "@dotdo/fsx",
   "version": "0.1.0",
-  "description": "Pure filesystem logic - POSIX-like API with zero Cloudflare dependencies",
+  "description": "Pure POSIX filesystem implementation in TypeScript. Zero dependencies. Self-hostable. FsBackend interface for pluggable storage.",
   "type": "module",
   "main": "./index.ts",
   "types": "./index.ts",
@@ -34,15 +34,29 @@
     "filesystem",
     "posix",
     "virtual-fs",
+    "fs",
     "glob",
     "grep",
-    "find"
+    "find",
+    "backend",
+    "storage",
+    "typescript",
+    "zero-dependencies",
+    "self-hostable",
+    "edge",
+    "workers",
+    "ai-agents"
   ],
   "author": "dotdo",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dotdo/fsx"
+    "url": "git+https://github.com/dot-do/fsx.git",
+    "directory": "core"
+  },
+  "homepage": "https://fsx.do",
+  "bugs": {
+    "url": "https://github.com/dot-do/fsx/issues"
   },
   "devDependencies": {},
   "peerDependencies": {}

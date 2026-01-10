@@ -341,7 +341,11 @@ function parseSize(sizeStr: string): { op: '+' | '-' | '=', bytes: number } {
     return { op, bytes: parseInt(remaining, 10) || 0 }
   }
 
-  const num = parseFloat(match[1])
+  const numStr = match[1]
+  if (!numStr) {
+    return { op, bytes: 0 }
+  }
+  const num = parseFloat(numStr)
   const suffix = (match[2] || 'B').toUpperCase()
 
   let bytes: number
@@ -390,7 +394,11 @@ function parseTime(timeStr: string): { op: '+' | '-' | '=', ms: number } {
     return { op, ms: parseInt(remaining, 10) || 0 }
   }
 
-  const num = parseFloat(matchResult[1])
+  const numStr = matchResult[1]
+  if (!numStr) {
+    return { op, ms: 0 }
+  }
+  const num = parseFloat(numStr)
   const suffix = matchResult[2] || 'd' // default to days
 
   let ms: number

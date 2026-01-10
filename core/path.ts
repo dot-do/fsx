@@ -2,6 +2,21 @@
  * Path utilities for fsx.do - POSIX-style path manipulation
  */
 
+/** POSIX path separator */
+export const sep = '/'
+
+/** POSIX path delimiter (for PATH environment variable) */
+export const delimiter = ':'
+
+/** Parsed path object */
+export interface ParsedPath {
+  root: string
+  dir: string
+  base: string
+  ext: string
+  name: string
+}
+
 /**
  * Normalize a path by:
  * - Collapsing multiple consecutive slashes to one
@@ -10,7 +25,7 @@
  * - Resolving .. (parent directory) segments
  */
 export function normalize(path: string): string {
-  if (path === '') return ''
+  if (path === '') return '.'
   if (path === '.') return '.'
   if (path === '..') return '..'
 
@@ -99,7 +114,8 @@ export function basename(path: string, ext?: string): string {
   const name = lastSlash === -1 ? p : p.slice(lastSlash + 1)
 
   // Remove extension if provided and matches
-  if (ext && name.endsWith(ext)) {
+  // But don't remove if ext === name (the entire filename is the extension)
+  if (ext && name.endsWith(ext) && name.length > ext.length) {
     return name.slice(0, -ext.length)
   }
 
@@ -147,12 +163,15 @@ export function join(...paths: string[]): string {
   if (filtered.length === 0) return '.'
 
   // Check if first segment is absolute
-  const isAbs = filtered[0].startsWith('/')
+  const firstSegment = filtered[0]
+  if (!firstSegment) return '.'
+  const isAbs = firstSegment.startsWith('/')
 
   // Join all segments, stripping leading slashes from non-first segments
-  let result = filtered[0]
+  let result = firstSegment
   for (let i = 1; i < filtered.length; i++) {
     let segment = filtered[i]
+    if (!segment) continue
     // Strip leading slashes from subsequent segments
     while (segment.startsWith('/')) {
       segment = segment.slice(1)
@@ -177,4 +196,146 @@ export function join(...paths: string[]): string {
  */
 export function isAbsolute(path: string): boolean {
   return path.startsWith('/')
+}
+
+/**
+ * Extract the extension from a path.
+ * Returns the portion from the last . to the end of the basename.
+ * Returns empty string if:
+ * - No . exists in basename
+ * - The . is the first character of the basename (dotfile)
+ * - The path is empty, /, ., or ..
+ */
+export function extname(path: string): string {
+  const base = basename(path)
+
+  if (base === '' || base === '.' || base === '..') {
+    return ''
+  }
+
+  // Find the last dot
+  const lastDot = base.lastIndexOf('.')
+
+  // No dot found
+  if (lastDot === -1) {
+    return ''
+  }
+
+  // Dot is first character (dotfile with no extension)
+  if (lastDot === 0) {
+    return ''
+  }
+
+  return base.slice(lastDot)
+}
+
+/**
+ * Parse a path into its component parts.
+ */
+export function parse(path: string): ParsedPath {
+  if (path === '') {
+    return { root: '', dir: '', base: '', ext: '', name: '' }
+  }
+
+  const root = path.startsWith('/') ? '/' : ''
+  let dir = dirname(path)
+  const base = basename(path)
+  const ext = extname(path)
+
+  // Calculate name: base without extension
+  let name: string
+  if (ext === '') {
+    name = base
+  } else {
+    name = base.slice(0, -ext.length)
+  }
+
+  // dirname returns '.' for paths without directory component
+  // but parse expects '' for those cases
+  // However, keep '.' for './foo' style paths
+  if (dir === '.' && !path.startsWith('./') && !path.startsWith('../')) {
+    dir = ''
+  }
+
+  return { root, dir, base, ext, name }
+}
+
+/**
+ * Format a parsed path object back to a path string.
+ * Priority: dir > root, base > name+ext
+ */
+export function format(pathObject: Partial<ParsedPath>): string {
+  const { root = '', dir = '', base = '', ext = '', name = '' } = pathObject
+
+  // Compute the filename portion
+  // base takes priority over name+ext
+  const filename = base !== '' ? base : name + ext
+
+  // Compute the directory portion
+  // dir takes priority over root
+  if (dir !== '') {
+    // If dir ends with /, don't add another one
+    if (dir.endsWith('/')) {
+      return dir + filename
+    }
+    return filename !== '' ? dir + '/' + filename : dir
+  }
+
+  // No dir, use root
+  if (root !== '') {
+    return root + filename
+  }
+
+  // No dir, no root
+  return filename
+}
+
+/**
+ * Compute the relative path from `from` to `to`.
+ * Both paths are normalized first.
+ */
+export function relative(from: string, to: string): string {
+  // Normalize both paths and make them absolute for comparison
+  const fromNorm = resolve(from)
+  const toNorm = resolve(to)
+
+  // If same path, return empty string
+  if (fromNorm === toNorm) {
+    return ''
+  }
+
+  // Split into segments (filter empty to handle root)
+  const fromParts = fromNorm.split('/').filter((p) => p !== '')
+  const toParts = toNorm.split('/').filter((p) => p !== '')
+
+  // Find common prefix length
+  let commonLength = 0
+  const minLength = Math.min(fromParts.length, toParts.length)
+  for (let i = 0; i < minLength; i++) {
+    if (fromParts[i] !== toParts[i]) {
+      break
+    }
+    commonLength++
+  }
+
+  // Calculate how many directories to go up from `from`
+  const upCount = fromParts.length - commonLength
+
+  // Build the relative path
+  const relativeParts: string[] = []
+
+  // Add '..' for each directory we need to go up
+  for (let i = 0; i < upCount; i++) {
+    relativeParts.push('..')
+  }
+
+  // Add the remaining parts of `to`
+  for (let i = commonLength; i < toParts.length; i++) {
+    const part = toParts[i]
+    if (part) {
+      relativeParts.push(part)
+    }
+  }
+
+  return relativeParts.join('/')
 }
