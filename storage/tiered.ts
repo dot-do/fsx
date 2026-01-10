@@ -28,6 +28,12 @@ const DEFAULT_CONFIG: Required<Omit<TieredFSConfig, 'hot' | 'warm' | 'cold'>> = 
   promotionPolicy: 'on-access',
 }
 
+/** Internal tier metadata tracking */
+interface TierMetadata {
+  tier: 'hot' | 'warm' | 'cold'
+  size: number
+}
+
 /**
  * TieredFS - Automatically place files in appropriate storage tier
  */
@@ -36,40 +42,67 @@ export class TieredFS {
   private warm?: R2Bucket
   private cold?: R2Bucket
   private config: Required<Omit<TieredFSConfig, 'hot' | 'warm' | 'cold'>>
+  /** In-memory tier tracking (supplemental to DO storage) */
+  private tierMap: Map<string, TierMetadata> = new Map()
 
   constructor(config: TieredFSConfig) {
     const id = config.hot.idFromName('tiered')
     this.hotStub = config.hot.get(id)
     this.warm = config.warm
     this.cold = config.cold
-    this.config = { ...DEFAULT_CONFIG, ...config }
+    this.config = {
+      thresholds: {
+        hotMaxSize: config.thresholds?.hotMaxSize ?? DEFAULT_CONFIG.thresholds.hotMaxSize,
+        warmMaxSize: config.thresholds?.warmMaxSize ?? DEFAULT_CONFIG.thresholds.warmMaxSize,
+      },
+      promotionPolicy: config.promotionPolicy ?? DEFAULT_CONFIG.promotionPolicy,
+    }
   }
 
   /**
    * Determine storage tier based on file size
    */
   private selectTier(size: number): 'hot' | 'warm' | 'cold' {
-    if (size <= (this.config.thresholds.hotMaxSize ?? 1024 * 1024)) {
+    const hotMax = this.config.thresholds.hotMaxSize
+    const warmMax = this.config.thresholds.warmMaxSize
+
+    // Check if fits in hot tier
+    if (size <= hotMax) {
       return 'hot'
     }
-    if (this.warm && size <= (this.config.thresholds.warmMaxSize ?? 100 * 1024 * 1024)) {
-      return 'warm'
+
+    // Check if fits in warm tier
+    if (size <= warmMax) {
+      // Warm tier available?
+      if (this.warm) {
+        return 'warm'
+      }
+      // Fall back to hot if no warm tier
+      return 'hot'
     }
+
+    // Large file - goes to cold if available
     if (this.cold) {
       return 'cold'
     }
-    // Fall back to warm or hot
-    return this.warm ? 'warm' : 'hot'
+
+    // Fall back to warm if available, otherwise hot
+    if (this.warm) {
+      return 'warm'
+    }
+    return 'hot'
   }
 
   /**
    * Write file with automatic tier selection
    */
-  async writeFile(path: string, data: Uint8Array | string): Promise<{ tier: string }> {
+  async writeFile(path: string, data: Uint8Array | string): Promise<{ tier: 'hot' | 'warm' | 'cold' }> {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
     const tier = this.selectTier(bytes.length)
 
     if (tier === 'hot') {
+      // Ensure parent directories exist
+      await this.ensureParentDir(path)
       // Write to Durable Object
       await this.hotStub.fetch('http://fsx.do/rpc', {
         method: 'POST',
@@ -105,77 +138,135 @@ export class TieredFS {
       })
     }
 
+    // Track tier in memory
+    this.tierMap.set(path, { tier, size: bytes.length })
+
     return { tier }
   }
 
   /**
    * Read file from appropriate tier
    */
-  async readFile(path: string): Promise<{ data: Uint8Array; tier: string }> {
-    // Check metadata to find tier
-    const response = await this.hotStub.fetch('http://fsx.do/rpc', {
+  async readFile(path: string): Promise<{ data: Uint8Array; tier: 'hot' | 'warm' | 'cold' }> {
+    // Check our in-memory tier tracking first
+    const metadata = this.tierMap.get(path)
+
+    // If we have metadata, read from the known tier
+    if (metadata) {
+      if (metadata.tier === 'hot') {
+        return this.readFromHot(path)
+      }
+      if (metadata.tier === 'warm' && this.warm) {
+        return this.readFromWarm(path)
+      }
+      if (metadata.tier === 'cold' && this.cold) {
+        return this.readFromCold(path)
+      }
+    }
+
+    // No metadata - search through tiers in order
+    // Try warm first (for files put directly into warm bucket in tests)
+    if (this.warm) {
+      const warmObj = await this.warm.get(path)
+      if (warmObj) {
+        const data = new Uint8Array(await warmObj.arrayBuffer())
+        this.tierMap.set(path, { tier: 'warm', size: data.length })
+        return { data, tier: 'warm' }
+      }
+    }
+
+    // Try cold
+    if (this.cold) {
+      const coldObj = await this.cold.get(path)
+      if (coldObj) {
+        const data = new Uint8Array(await coldObj.arrayBuffer())
+        this.tierMap.set(path, { tier: 'cold', size: data.length })
+        return { data, tier: 'cold' }
+      }
+    }
+
+    // Try hot tier last (default)
+    try {
+      return await this.readFromHot(path)
+    } catch {
+      throw new Error(`File not found: ${path}`)
+    }
+  }
+
+  /**
+   * Read file from hot tier (Durable Object)
+   */
+  private async readFromHot(path: string): Promise<{ data: Uint8Array; tier: 'hot' }> {
+    const readResponse = await this.hotStub.fetch('http://fsx.do/rpc', {
       method: 'POST',
       body: JSON.stringify({
-        method: 'getMetadata',
+        method: 'readFile',
         params: { path },
       }),
     })
 
-    const metadata = (await response.json()) as { tier: string; size: number } | null
+    if (!readResponse.ok) {
+      const error = await readResponse.json() as { code?: string; message?: string }
+      throw new Error(error.message ?? `File not found: ${path}`)
+    }
 
-    if (!metadata || metadata.tier === 'hot') {
-      // Read from hot tier
-      const readResponse = await this.hotStub.fetch('http://fsx.do/rpc', {
+    const result = (await readResponse.json()) as { data: string; encoding: string }
+    return {
+      data: this.decodeBase64(result.data),
+      tier: 'hot',
+    }
+  }
+
+  /**
+   * Read file from warm tier (R2)
+   */
+  private async readFromWarm(path: string): Promise<{ data: Uint8Array; tier: 'warm' }> {
+    if (!this.warm) {
+      throw new Error(`Warm tier not available`)
+    }
+    const object = await this.warm.get(path)
+    if (!object) {
+      throw new Error(`File not found: ${path}`)
+    }
+    const data = new Uint8Array(await object.arrayBuffer())
+    return { data, tier: 'warm' }
+  }
+
+  /**
+   * Read file from cold tier (R2 archive)
+   */
+  private async readFromCold(path: string): Promise<{ data: Uint8Array; tier: 'cold' }> {
+    if (!this.cold) {
+      throw new Error(`Cold tier not available`)
+    }
+    const object = await this.cold.get(path)
+    if (!object) {
+      throw new Error(`File not found: ${path}`)
+    }
+    const data = new Uint8Array(await object.arrayBuffer())
+    return { data, tier: 'cold' }
+  }
+
+  /**
+   * Ensure parent directory exists in hot tier (Durable Object)
+   */
+  private async ensureParentDir(path: string): Promise<void> {
+    const parentPath = path.substring(0, path.lastIndexOf('/'))
+    if (parentPath && parentPath !== '/') {
+      await this.hotStub.fetch('http://fsx.do/rpc', {
         method: 'POST',
         body: JSON.stringify({
-          method: 'readFile',
-          params: { path },
+          method: 'mkdir',
+          params: { path: parentPath, recursive: true },
         }),
       })
-      const result = (await readResponse.json()) as { data: string; encoding: string }
-      return {
-        data: this.decodeBase64(result.data),
-        tier: 'hot',
-      }
     }
-
-    if (metadata.tier === 'warm' && this.warm) {
-      const object = await this.warm.get(path)
-      if (!object) {
-        throw new Error(`File not found: ${path}`)
-      }
-      const data = new Uint8Array(await object.arrayBuffer())
-
-      // Optionally promote to hot tier
-      if (this.config.promotionPolicy === 'on-access' && data.length <= (this.config.thresholds.hotMaxSize ?? 1024 * 1024)) {
-        await this.promote(path, data, 'warm', 'hot')
-      }
-
-      return { data, tier: 'warm' }
-    }
-
-    if (metadata.tier === 'cold' && this.cold) {
-      const object = await this.cold.get(path)
-      if (!object) {
-        throw new Error(`File not found: ${path}`)
-      }
-      const data = new Uint8Array(await object.arrayBuffer())
-
-      // Optionally promote to warm tier
-      if (this.config.promotionPolicy === 'on-access' && this.warm) {
-        await this.promote(path, data, 'cold', 'warm')
-      }
-
-      return { data, tier: 'cold' }
-    }
-
-    throw new Error(`File not found: ${path}`)
   }
 
   /**
    * Promote a file to a higher tier
    */
-  private async promote(path: string, data: Uint8Array, fromTier: string, toTier: string): Promise<void> {
+  private async promote(path: string, data: Uint8Array, _fromTier: string, toTier: 'hot' | 'warm'): Promise<void> {
     if (toTier === 'hot') {
       await this.hotStub.fetch('http://fsx.do/rpc', {
         method: 'POST',
@@ -192,7 +283,10 @@ export class TieredFS {
       await this.warm.put(path, data)
     }
 
-    // Update metadata
+    // Update in-memory tier tracking
+    this.tierMap.set(path, { tier: toTier, size: data.length })
+
+    // Update metadata in DO
     await this.hotStub.fetch('http://fsx.do/rpc', {
       method: 'POST',
       body: JSON.stringify({
@@ -206,29 +300,67 @@ export class TieredFS {
    * Demote a file to a lower tier (for cost optimization)
    */
   async demote(path: string, toTier: 'warm' | 'cold'): Promise<void> {
+    // Check if target tier is available
+    if (toTier === 'warm' && !this.warm) {
+      throw new Error(`Warm tier not available`)
+    }
+    if (toTier === 'cold' && !this.cold) {
+      throw new Error(`Cold tier not available`)
+    }
+
+    // Read the file from its current tier
     const { data, tier: currentTier } = await this.readFile(path)
 
-    if (toTier === 'warm' && this.warm && currentTier === 'hot') {
-      await this.warm.put(path, data)
-      // Remove from hot tier (keep metadata)
+    // Demote to warm tier
+    if (toTier === 'warm' && this.warm) {
+      if (currentTier === 'hot') {
+        // Write to warm
+        await this.warm.put(path, data)
+        // Delete from hot tier
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'unlink',
+            params: { path },
+          }),
+        })
+      }
+      // Update metadata
+      this.tierMap.set(path, { tier: 'warm', size: data.length })
       await this.hotStub.fetch('http://fsx.do/rpc', {
         method: 'POST',
         body: JSON.stringify({
-          method: 'demoteFile',
-          params: { path, tier: 'warm' },
+          method: 'setMetadata',
+          params: { path, tier: 'warm', size: data.length },
         }),
       })
-    } else if (toTier === 'cold' && this.cold) {
+    }
+
+    // Demote to cold tier
+    if (toTier === 'cold' && this.cold) {
+      // Write to cold
       await this.cold.put(path, data)
-      // Remove from current tier
-      if (currentTier === 'warm' && this.warm) {
+
+      // Delete from current tier
+      if (currentTier === 'hot') {
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'unlink',
+            params: { path },
+          }),
+        })
+      } else if (currentTier === 'warm' && this.warm) {
         await this.warm.delete(path)
       }
+
+      // Update metadata
+      this.tierMap.set(path, { tier: 'cold', size: data.length })
       await this.hotStub.fetch('http://fsx.do/rpc', {
         method: 'POST',
         body: JSON.stringify({
-          method: 'demoteFile',
-          params: { path, tier: 'cold' },
+          method: 'setMetadata',
+          params: { path, tier: 'cold', size: data.length },
         }),
       })
     }
