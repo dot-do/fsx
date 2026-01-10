@@ -1,0 +1,49 @@
+{
+  "name": "@dotdo/fsx",
+  "version": "0.1.0",
+  "description": "Pure filesystem logic - POSIX-like API with zero Cloudflare dependencies",
+  "type": "module",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./types": "./types.ts",
+    "./errors": "./errors.ts",
+    "./constants": "./constants.ts",
+    "./path": "./path.ts",
+    "./backend": "./backend.ts",
+    "./fs": "./fs/index.ts",
+    "./glob": "./glob/index.ts",
+    "./grep": "./grep/index.ts",
+    "./find": "./find/index.ts",
+    "./cas": "./cas/index.ts"
+  },
+  "files": [
+    "*.ts",
+    "fs/",
+    "glob/",
+    "grep/",
+    "find/",
+    "cas/",
+    "sparse/",
+    "transaction/",
+    "watch/",
+    "utils/"
+  ],
+  "keywords": [
+    "filesystem",
+    "posix",
+    "virtual-fs",
+    "glob",
+    "grep",
+    "find"
+  ],
+  "author": "dotdo",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dotdo/fsx"
+  },
+  "devDependencies": {},
+  "peerDependencies": {}
+}

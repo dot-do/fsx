@@ -5,7 +5,7 @@
  * test files and directories.
  */
 
-import { constants } from '../src/core/constants'
+import { constants } from '../core/constants'
 
 /**
  * File entry stored in the in-memory filesystem

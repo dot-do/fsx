@@ -1,0 +1,171 @@
+---
+title: fsx.do
+description: Virtual filesystem on Cloudflare Durable Objects
+---
+
+# fsx.do
+
+A POSIX-like filesystem backed by Cloudflare Durable Objects with tiered storage.
+
+## Installation
+
+```bash
+# For the pure library (no Cloudflare dependencies)
+npm install @dotdo/fsx
+
+# For the managed service with DO storage
+npm install fsx.do
+```
+
+## Quick Start
+
+### Using @dotdo/fsx (Pure Library)
+
+```typescript
+import { FSx, MemoryBackend } from '@dotdo/fsx'
+
+// Create with in-memory backend for testing
+const fs = new FSx(new MemoryBackend())
+
+await fs.write('/hello.txt', 'Hello, World!')
+const content = await fs.read('/hello.txt', { encoding: 'utf-8' })
+console.log(content) // "Hello, World!"
+```
+
+### Using fsx.do (Managed Service)
+
+```typescript
+// wrangler.toml
+[[durable_objects.bindings]]
+name = "FSX"
+class_name = "FileSystemDO"
+
+// worker.ts
+import { FSx } from 'fsx.do'
+
+export default {
+  async fetch(request, env) {
+    const fs = new FSx(env.FSX)
+
+    await fs.write('/config.json', JSON.stringify({ key: 'value' }))
+    const config = await fs.read('/config.json', { encoding: 'utf-8' })
+
+    return new Response(config)
+  }
+}
+```
+
+## API Reference
+
+### File Operations
+
+- `read(path, options?)` - Read file contents
+- `write(path, data, options?)` - Write data to file
+- `append(path, data)` - Append data to file
+- `unlink(path)` - Delete a file
+- `rename(oldPath, newPath)` - Rename/move a file
+- `copyFile(src, dest)` - Copy a file
+- `truncate(path, length?)` - Truncate file to length
+
+### Directory Operations
+
+- `mkdir(path, options?)` - Create directory
+- `rmdir(path, options?)` - Remove directory
+- `rm(path, options?)` - Remove file or directory
+- `list(path, options?)` / `readdir(path, options?)` - List directory contents
+
+### Metadata Operations
+
+- `stat(path)` - Get file/directory stats
+- `lstat(path)` - Get stats without following symlinks
+- `exists(path)` - Check if path exists
+- `access(path, mode?)` - Check accessibility
+- `chmod(path, mode)` - Change permissions
+- `chown(path, uid, gid)` - Change ownership
+- `utimes(path, atime, mtime)` - Update timestamps
+
+### Symbolic Links
+
+- `symlink(target, path)` - Create symbolic link
+- `link(existingPath, newPath)` - Create hard link
+- `readlink(path)` - Read link target
+- `realpath(path)` - Resolve path following symlinks
+
+### Unix Utilities
+
+```typescript
+import { glob, grep, find } from '@dotdo/fsx'
+
+// Glob pattern matching
+const tsFiles = await glob('/src/**/*.ts', { cwd: fs })
+
+// Search file contents
+const matches = await grep(/TODO/, '/src', { recursive: true, fs })
+
+// Find files
+const results = await find('/src', { name: '*.test.ts', type: 'f', fs })
+```
+
+## Storage Tiers
+
+fsx.do automatically places files in appropriate storage tiers:
+
+| Tier | Backend | Use Case |
+|------|---------|----------|
+| Hot | Durable Object SQLite | Small files (<1MB), frequent access |
+| Warm | R2 Object Storage | Large files, balanced access |
+| Cold | R2 Archive | Infrequent access, lowest cost |
+
+Files are automatically promoted/demoted based on access patterns, or you can manually control tier placement:
+
+```typescript
+await fs.write('/large-file.bin', data, { tier: 'warm' })
+await fs.promote('/important.json', 'hot')
+await fs.demote('/archive-2023.zip', 'cold')
+```
+
+## Custom Backends
+
+Implement the `FsBackend` interface to create custom storage backends:
+
+```typescript
+import { FsBackend, FSx } from '@dotdo/fsx'
+
+class MyBackend implements FsBackend {
+  async readFile(path: string): Promise<Uint8Array> {
+    // Your implementation
+  }
+  async writeFile(path: string, data: Uint8Array): Promise<BackendWriteResult> {
+    // Your implementation
+  }
+  // ... other methods
+}
+
+const fs = new FSx(new MyBackend())
+```
+
+## Architecture
+
+```
+fsx.do
+├── @dotdo/fsx (core/)     # Pure library, zero CF deps
+│   ├── types.ts           # POSIX types, FsCapability
+│   ├── backend.ts         # FsBackend interface
+│   ├── errors.ts          # ENOENT, EEXIST, etc.
+│   ├── fs/                # Operation implementations
+│   ├── glob/              # Pattern matching
+│   ├── grep/              # Search
+│   └── find/              # File finding
+│
+├── storage/               # CF storage backends
+│   ├── sqlite.ts          # Hot tier (DO SQLite)
+│   ├── r2.ts              # Warm tier (R2)
+│   └── tiered.ts          # Automatic tiering
+│
+├── durable-object/        # DO integration
+│   ├── module.ts          # FsModule class
+│   ├── mixin.ts           # withFs() for DO classes
+│   └── index.ts           # FileSystemDO export
+│
+└── index.ts               # Service export
+```

@@ -13,11 +13,18 @@
     "declarationMap": true,
     "sourceMap": true,
     "outDir": "./dist",
-    "rootDir": "./src",
+    "rootDir": ".",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "noEmit": false
+    "noEmit": false,
+    "jsx": "react-jsx"
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "test", "**/*.test.ts"]
+  "include": [
+    "index.ts",
+    "core/**/*",
+    "storage/**/*",
+    "durable-object/**/*",
+    "mcp/**/*"
+  ],
+  "exclude": ["node_modules", "dist", "tests", "**/*.test.ts"]
 }
