@@ -77,8 +77,8 @@
     "wrangler": "^3.99.0"
   },
   "dependencies": {
-    "@mdxui/beacon": "^0.1.0",
-    "@mdxui/cockpit": "^0.1.0",
+    "@mdxui/beacon": "^0.2.0",
+    "@mdxui/cockpit": "^0.2.0",
     "@opentui/core": "^0.1.0",
     "@opentui/react": "^0.1.0",
     "hono": "^4.11.3",

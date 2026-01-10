@@ -21,11 +21,34 @@
     { "tag": "v1", "new_classes": ["FileSystemDO"] }
   ],
 
-  // R2 for warm storage
+  // R2 for warm/cold storage tiers
   "r2_buckets": [
     {
       "binding": "R2",
       "bucket_name": "fsx-storage"
+    },
+    {
+      "binding": "ARCHIVE",
+      "bucket_name": "fsx-archive"
     }
-  ]
+  ],
+
+  // Service bindings for dotdo ecosystem
+  "services": [
+    {
+      "binding": "BASHX",
+      "service": "bashx-do",
+      "environment": "production"
+    },
+    {
+      "binding": "GITX",
+      "service": "gitx-do",
+      "environment": "production"
+    }
+  ],
+
+  // Production observability
+  "observability": {
+    "enabled": true
+  }
 }
