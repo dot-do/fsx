@@ -1,0 +1,170 @@
+---
+title: fsx.do
+description: A real filesystem for Cloudflare Workers. POSIX-compatible. Durable. 3,000+ tests.
+---
+
+import { LandingPage } from '@mdxui/beacon'
+
+export default function Site() {
+  return (
+    <LandingPage
+      logo={<span className="font-bold text-xl">fsx.do</span>}
+      header={{
+        links: [
+          { label: 'Docs', href: '/docs' },
+          { label: 'GitHub', href: 'https://github.com/dot-do/fsx' },
+          { label: 'npm', href: 'https://www.npmjs.com/package/fsx.do' },
+        ],
+        primaryCta: 'Get Started',
+      }}
+      hero={{
+        title: 'A real filesystem for',
+        highlightedText: 'Cloudflare Workers',
+        description: 'Edge workers don\'t have filesystems. AI agents need them. fsx gives you both—POSIX-compatible, durable, scales to millions of agents.',
+        primaryButtonText: 'npm install fsx.do',
+        primaryButtonHref: 'https://www.npmjs.com/package/fsx.do',
+        secondaryButtonText: 'View Docs',
+        secondaryButtonHref: '/docs',
+        showCodeTabs: true,
+        codeTabs: [
+          {
+            language: 'typescript',
+            label: 'SDK',
+            code: `import { fs } from 'fsx.do'
+
+await fs.writeFile('/config.json', JSON.stringify(config))
+await fs.mkdir('/data/uploads', { recursive: true })
+const files = await fs.readdir('/data')`,
+          },
+          {
+            language: 'bash',
+            label: 'CLI',
+            code: `npx fsx.do ls /
+npx fsx.do cat /config.json
+npx fsx.do mkdir /data`,
+          },
+        ],
+      }}
+      features={{
+        items: [
+          {
+            iconName: 'HardDrive',
+            title: 'POSIX API',
+            description: 'readFile, writeFile, stat, readdir, mkdir, chmod, symlink—all the operations you expect.',
+          },
+          {
+            iconName: 'Layers',
+            title: 'Tiered Storage',
+            description: 'Small files in SQLite for speed. Large files in R2 for cost. Automatic tier selection.',
+          },
+          {
+            iconName: 'Globe',
+            title: 'Edge-Native',
+            description: 'Runs on Cloudflare\'s global network. Zero cold starts. Microsecond latency.',
+          },
+          {
+            iconName: 'Search',
+            title: 'Unix Utilities',
+            description: 'Built-in glob, grep, and find. Pattern matching and content search without shell.',
+          },
+          {
+            iconName: 'Eye',
+            title: 'File Watching',
+            description: 'React to changes in real-time. Watch files or directories recursively.',
+          },
+          {
+            iconName: 'Lock',
+            title: 'Permissions',
+            description: 'Real Unix permission model. chmod, chown, access checks all work.',
+          },
+        ],
+      }}
+      pricing={{
+        title: 'Simple Pricing',
+        description: 'Pay for what you use. No hidden fees.',
+        tiers: [
+          {
+            name: 'Core Library',
+            price: 'Free',
+            description: 'Pure filesystem logic. Self-hostable.',
+            features: [
+              'POSIX operations',
+              'Glob/grep/find',
+              'MemoryBackend',
+              'Zero dependencies',
+              'MIT License',
+            ],
+            cta: 'npm i @dotdo/fsx',
+            ctaHref: 'https://www.npmjs.com/package/@dotdo/fsx',
+          },
+          {
+            name: 'Managed Service',
+            price: '$0',
+            priceSubtext: 'to start',
+            description: 'Full service with DO storage.',
+            features: [
+              'Everything in Core',
+              'Durable Object storage',
+              'Tiered SQLite + R2',
+              'CLI & SDK',
+              'File watching',
+            ],
+            cta: 'npm i fsx.do',
+            ctaHref: 'https://www.npmjs.com/package/fsx.do',
+            highlighted: true,
+          },
+        ],
+      }}
+      faqs={{
+        title: 'FAQ',
+        description: 'Common questions about fsx.do',
+        groups: [
+          {
+            title: 'General',
+            items: [
+              {
+                question: 'What\'s the difference between @dotdo/fsx and fsx.do?',
+                answer: '@dotdo/fsx is the pure filesystem library—zero dependencies, self-hostable. fsx.do is the managed service that adds Durable Object storage, CLI, and SDK. fsx.do re-exports everything from @dotdo/fsx.',
+              },
+              {
+                question: 'How does tiered storage work?',
+                answer: 'Files under 1MB go to SQLite (hot tier) for fast access. Larger files go to R2 (warm tier) for cost efficiency. You don\'t think about it—the system handles placement automatically.',
+              },
+              {
+                question: 'Is this production ready?',
+                answer: 'Yes. 3,000+ tests covering all POSIX operations. Used in production by multiple dotdo services.',
+              },
+            ],
+          },
+        ],
+      }}
+      footer={{
+        description: 'A real filesystem for Cloudflare Workers.',
+        companyName: 'dotdo',
+        linkGroups: [
+          {
+            title: 'Resources',
+            links: [
+              { label: 'Documentation', href: '/docs' },
+              { label: 'GitHub', href: 'https://github.com/dot-do/fsx' },
+              { label: 'npm: fsx.do', href: 'https://www.npmjs.com/package/fsx.do' },
+              { label: 'npm: @dotdo/fsx', href: 'https://www.npmjs.com/package/@dotdo/fsx' },
+            ],
+          },
+          {
+            title: 'Platform',
+            links: [
+              { label: 'platform.do', href: 'https://platform.do' },
+              { label: 'agents.do', href: 'https://agents.do' },
+              { label: 'workers.do', href: 'https://workers.do' },
+            ],
+          },
+        ],
+        socialLinks: [
+          { platform: 'github', href: 'https://github.com/dot-do/fsx' },
+          { platform: 'x', href: 'https://x.com/dotdo_dev' },
+        ],
+      }}
+    />
+  )
+}

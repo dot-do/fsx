@@ -18,20 +18,12 @@
       "import": "./dist/core/index.js"
     },
     "./do": {
-      "types": "./dist/durable-object/index.d.ts",
-      "import": "./dist/durable-object/index.js"
-    },
-    "./mcp": {
-      "types": "./dist/mcp/index.d.ts",
-      "import": "./dist/mcp/index.js"
+      "types": "./dist/do/index.d.ts",
+      "import": "./dist/do/index.js"
     },
     "./storage": {
       "types": "./dist/storage/index.d.ts",
       "import": "./dist/storage/index.js"
-    },
-    "./utils": {
-      "types": "./dist/utils/index.d.ts",
-      "import": "./dist/utils/index.js"
     }
   },
   "files": [
@@ -55,11 +47,11 @@
     "cloudflare",
     "durable-objects",
     "edge",
-    "mcp",
     "ai",
     "virtual-filesystem",
     "r2",
-    "storage"
+    "storage",
+    "posix"
   ],
   "author": "dot-do",
   "license": "MIT",
@@ -85,6 +77,8 @@
     "wrangler": "^3.99.0"
   },
   "dependencies": {
+    "@mdxui/beacon": "^0.1.0",
+    "@mdxui/cockpit": "^0.1.0",
     "@opentui/core": "^0.1.0",
     "@opentui/react": "^0.1.0",
     "hono": "^4.11.3",

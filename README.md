@@ -140,24 +140,13 @@ const target = await fs.readlink('/app/current')
 const resolved = await fs.realpath('/app/current/config.json')
 ```
 
-### MCP Tools for AI Agents
+### CLI
 
-Built-in [Model Context Protocol](https://modelcontextprotocol.io/) tools:
-
-```typescript
-import { fsTools, invokeTool } from 'fsx.do/mcp'
-
-// Available tools
-// fs_read, fs_write, fs_list, fs_mkdir, fs_delete, fs_move, fs_copy, fs_search
-
-// AI agent can call these directly
-const result = await invokeTool('fs_read', { path: '/README.md' })
-const files = await invokeTool('fs_list', { path: '/src', recursive: true })
-const matches = await invokeTool('fs_search', {
-  path: '/src',
-  pattern: '*.ts',
-  content: 'export function'
-})
+```bash
+npx fsx.do ls /
+npx fsx.do cat /config.json
+npx fsx.do mkdir /data
+npx fsx.do rm /tmp/cache.json
 ```
 
 ## Durable Object Integration
@@ -165,7 +154,7 @@ const matches = await invokeTool('fs_search', {
 ### As a Standalone DO
 
 ```typescript
-import { FileSystemDO } from 'fsx.do/do'
+import { FileSystemDO } from 'fsx.do'
 
 export { FileSystemDO }
 
@@ -178,27 +167,11 @@ export default {
 }
 ```
 
-### As an RPC Service
-
-Keep your DO bundle small - offload heavy file operations:
-
-```toml
-# wrangler.toml
-[[services]]
-binding = "FSX"
-service = "fsx-worker"
-```
-
-```typescript
-// Heavy operations via RPC
-const data = await env.FSX.read('/data/huge-dataset.json')
-```
-
 ### With dotdo Framework
 
 ```typescript
 import { DO } from 'dotdo'
-import { withFs } from 'fsx.do/do'
+import { withFs } from 'fsx.do'
 
 class MySite extends withFs(DO) {
   async loadContent() {
@@ -336,6 +309,23 @@ const fs = new FSx(env.FSX, {
 - **Zero cold starts** (Durable Objects)
 - **Global distribution** (300+ Cloudflare locations)
 
+## Packages
+
+This repo contains two packages:
+
+| Package | Description | Install |
+|---------|-------------|---------|
+| **[@dotdo/fsx](./core/)** | Pure filesystem logic. Zero dependencies. Self-hostable. | `npm i @dotdo/fsx` |
+| **[fsx.do](https://fsx.do)** | Managed service with DO, tiered storage, CLI, SDK | `npm i fsx.do` |
+
+**fsx.do re-exports everything from @dotdo/fsx** - if you're using the managed service, you get the core library too:
+
+```typescript
+// Both work the same
+import { glob, grep, find, MemoryBackend } from '@dotdo/fsx'
+import { glob, grep, find, MemoryBackend } from 'fsx.do'
+```
+
 ## License
 
 MIT
@@ -344,5 +334,6 @@ MIT
 
 - [GitHub](https://github.com/dot-do/fsx)
 - [Documentation](https://fsx.do)
-- [.do](https://do.org.ai)
+- [npm: @dotdo/fsx](https://www.npmjs.com/package/@dotdo/fsx)
+- [npm: fsx.do](https://www.npmjs.com/package/fsx.do)
 - [Platform.do](https://platform.do)

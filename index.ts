@@ -6,16 +6,16 @@
  *
  * @example
  * ```typescript
- * // wrangler.toml
- * [[durable_objects.bindings]]
- * name = "FSX"
- * class_name = "FileSystemDO"
+ * import { fs } from 'fsx.do'
  *
- * // Use in your Worker
- * import { FSx } from 'fsx.do'
+ * await fs.writeFile('/hello.txt', 'Hello, World!')
+ * const content = await fs.readFile('/hello.txt', 'utf-8')
+ * ```
  *
- * const fs = new FSx(env.FSX)
- * await fs.write('/hello.txt', 'Hello, World!')
+ * @example CLI
+ * ```bash
+ * npx fsx.do ls /
+ * npx fsx.do cat /hello.txt
  * ```
  *
  * @packageDocumentation
@@ -55,7 +55,7 @@ export {
   type ContainerState,
   type HasContainerExecutor,
   type WithExecContext,
-} from './durable-object/index.js'
+} from './do/index.js'
 
 // =============================================================================
 // Storage backends
@@ -68,21 +68,11 @@ export {
 } from './storage/index.js'
 
 // =============================================================================
-// MCP Tools
-// =============================================================================
-
-export {
-  fsTools,
-  invokeTool,
-  registerTool,
-} from './mcp/index.js'
-
-// =============================================================================
 // Service Definition (for dotdo integration)
 // =============================================================================
 
 // import { createService } from 'dotdo'
-// import { FileSystemDO } from './durable-object/index.js'
+// import { FileSystemDO } from './do/index.js'
 // import App from './App.js'
 // import Site from './Site.js'
 //
@@ -95,4 +85,4 @@ export {
 // })
 
 // For now, export the DO as default for wrangler
-export { FileSystemDO as default } from './durable-object/index.js'
+export { FileSystemDO as default } from './do/index.js'

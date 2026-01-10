@@ -23,8 +23,7 @@
     "index.ts",
     "core/**/*",
     "storage/**/*",
-    "durable-object/**/*",
-    "mcp/**/*"
+    "do/**/*"
   ],
   "exclude": ["node_modules", "dist", "tests", "**/*.test.ts"]
 }

@@ -1,0 +1,56 @@
+---
+title: fsx.do
+description: File browser for fsx.do virtual filesystem
+---
+
+import { DeveloperDashboard } from '@mdxui/cockpit'
+
+export default function App() {
+  return (
+    <DeveloperDashboard
+      branding={{
+        name: 'fsx.do',
+        logo: <span className="font-bold">fsx.do</span>,
+      }}
+      identity={{
+        clientId: 'fsx',
+        useMockWidgets: process.env.NODE_ENV === 'development',
+      }}
+      routes={{
+        overview: true,
+        requests: false,
+        keys: true,
+        team: false,
+        billing: false,
+        settings: true,
+        webhooks: false,
+        database: false,
+        vault: true,
+      }}
+      customRoutes={[
+        {
+          path: '/files',
+          label: 'Files',
+          icon: 'FolderOpen',
+          group: 'main',
+          order: 0,
+          index: true,
+        },
+        {
+          path: '/terminal',
+          label: 'Terminal',
+          icon: 'Terminal',
+          group: 'main',
+          order: 1,
+        },
+        {
+          path: '/storage',
+          label: 'Storage',
+          icon: 'HardDrive',
+          group: 'main',
+          order: 2,
+        },
+      ]}
+    />
+  )
+}
