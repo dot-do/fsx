@@ -1,7 +1,49 @@
 /**
  * Storage backends for fsx
+ *
+ * This module provides storage implementations for the fsx filesystem:
+ *
+ * - {@link R2Storage} - R2-backed blob storage
+ * - {@link SQLiteMetadata} - SQLite-backed metadata store
+ * - {@link TieredFS} - Multi-tier filesystem with automatic placement
+ * - {@link TieredR2Storage} - R2-backed tiered storage with migration
+ *
+ * @module storage
  */
 
+// Core storage interfaces
+export {
+  // Error handling
+  StorageError,
+  type StorageErrorCode,
+  // Instrumentation hooks
+  type StorageHooks,
+  type StorageOperationContext,
+  type StorageOperationResult,
+  // Blob storage interface
+  type BlobStorage,
+  type BlobWriteResult,
+  type BlobReadResult,
+  type BlobListResult,
+  type BlobObjectInfo,
+  type BlobWriteOptions,
+  type BlobListOptions,
+  // Metadata storage interface
+  type MetadataStorage,
+  type CreateEntryOptions,
+  type UpdateEntryOptions,
+  type StorageStats,
+  // Tiered storage interface
+  type TieredStorage,
+  type TieredWriteResult,
+  type TieredReadResult,
+  // Helper functions
+  createOperationContext,
+  createOperationResult,
+  withInstrumentation,
+} from './interfaces.js'
+
+// Storage implementations
 export { TieredFS, type TieredFSConfig } from './tiered.js'
 export { R2Storage, type R2StorageConfig } from './r2.js'
 export { SQLiteMetadata } from './sqlite.js'
