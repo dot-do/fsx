@@ -101,8 +101,8 @@ describe('getObject', () => {
     it('should retrieve commit object by hash', async () => {
       const commitContent = encoder.encode(
         'tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n' +
-        'author Test User <test@example.com> 1234567890 +0000\n' +
-        'committer Test User <test@example.com> 1234567890 +0000\n\n' +
+        'author Test User <test@example.com.ai> 1234567890 +0000\n' +
+        'committer Test User <test@example.com.ai> 1234567890 +0000\n\n' +
         'Initial commit'
       )
       const hash = await storeObject(storage, 'commit', commitContent)
@@ -440,8 +440,8 @@ describe('getObject', () => {
         'object 0000000000000000000000000000000000000000\n' +
         'type commit\n' +
         'tag v2.0.0\n' +
-        'tagger Developer <dev@example.com> 1600000000 -0700\n\n' +
-        'Version 2.0.0 release\n\nSigned-off-by: Dev <dev@example.com>'
+        'tagger Developer <dev@example.com.ai> 1600000000 -0700\n\n' +
+        'Version 2.0.0 release\n\nSigned-off-by: Dev <dev@example.com.ai>'
       )
       const hash = await storeObject(storage, 'tag', tagContent)
 

@@ -172,7 +172,7 @@ describe('helpers', () => {
   "debug": true,
   "timeout": 5000,
   "maxRetries": 3,
-  "apiUrl": "https://api.example.com"
+  "apiUrl": "https://api.example.com.ai"
 }`],
 
   ['/docs/README.md', `# Documentation

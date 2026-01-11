@@ -497,7 +497,7 @@ describe('ContentAddressableFS', () => {
         'object 0000000000000000000000000000000000000000\n' +
           'type commit\n' +
           'tag v2.0.0\n' +
-          'tagger Developer <dev@example.com> 1600000000 -0700\n\n' +
+          'tagger Developer <dev@example.com.ai> 1600000000 -0700\n\n' +
           'Version 2.0.0 release'
       )
 
