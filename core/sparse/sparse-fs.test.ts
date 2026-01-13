@@ -1258,4 +1258,195 @@ describe('SparseFS', () => {
       })
     })
   })
+
+  // ========================================
+  // 13. Gitignore loading (REFACTOR phase)
+  // ========================================
+  describe('gitignore loading', () => {
+    describe('parseGitignoreContent', () => {
+      it('should parse basic patterns', () => {
+        const content = `node_modules
+dist
+*.log`
+        const patterns = SparseFS.parseGitignoreContent(content)
+        expect(patterns).toEqual(['node_modules', 'dist', '*.log'])
+      })
+
+      it('should skip empty lines', () => {
+        const content = `node_modules
+
+dist
+
+*.log`
+        const patterns = SparseFS.parseGitignoreContent(content)
+        expect(patterns).toEqual(['node_modules', 'dist', '*.log'])
+      })
+
+      it('should skip comment lines', () => {
+        const content = `# Build artifacts
+dist
+
+# Dependencies
+node_modules
+
+# Logs
+*.log`
+        const patterns = SparseFS.parseGitignoreContent(content)
+        expect(patterns).toEqual(['dist', 'node_modules', '*.log'])
+      })
+
+      it('should handle escaped hash patterns', () => {
+        const content = `\\#important.txt
+node_modules`
+        const patterns = SparseFS.parseGitignoreContent(content)
+        expect(patterns).toEqual(['#important.txt', 'node_modules'])
+      })
+
+      it('should handle negation patterns', () => {
+        const content = `node_modules
+!node_modules/@company`
+        const patterns = SparseFS.parseGitignoreContent(content)
+        expect(patterns).toEqual(['node_modules', '!node_modules/@company'])
+      })
+
+      it('should trim whitespace', () => {
+        const content = `  node_modules
+  dist  `
+        const patterns = SparseFS.parseGitignoreContent(content)
+        expect(patterns).toEqual(['node_modules', 'dist'])
+      })
+
+      it('should handle Windows line endings', () => {
+        const content = 'node_modules\r\ndist\r\n*.log'
+        const patterns = SparseFS.parseGitignoreContent(content)
+        expect(patterns).toEqual(['node_modules', 'dist', '*.log'])
+      })
+    })
+
+    describe('loadGitignore', () => {
+      it('should load patterns from .gitignore file', async () => {
+        await fs.writeFile('/project/.gitignore', `# Dependencies
+node_modules
+
+# Build
+dist
+*.log`)
+
+        const result = await SparseFS.loadGitignore(fs, '/project/.gitignore')
+        expect(result.exists).toBe(true)
+        expect(result.path).toBe('/project/.gitignore')
+        expect(result.patterns).toEqual(['node_modules', 'dist', '*.log'])
+      })
+
+      it('should return empty patterns for non-existent file', async () => {
+        const result = await SparseFS.loadGitignore(fs, '/nonexistent/.gitignore')
+        expect(result.exists).toBe(false)
+        expect(result.path).toBe('/nonexistent/.gitignore')
+        expect(result.patterns).toEqual([])
+      })
+
+      it('should handle empty .gitignore file', async () => {
+        await fs.writeFile('/project/.empty-gitignore', '')
+
+        const result = await SparseFS.loadGitignore(fs, '/project/.empty-gitignore')
+        expect(result.exists).toBe(true)
+        expect(result.patterns).toEqual([])
+      })
+
+      it('should handle .gitignore with only comments', async () => {
+        await fs.writeFile('/project/.comments-only', `# This is a comment
+# Another comment`)
+
+        const result = await SparseFS.loadGitignore(fs, '/project/.comments-only')
+        expect(result.exists).toBe(true)
+        expect(result.patterns).toEqual([])
+      })
+    })
+
+    describe('withGitignore factory', () => {
+      it('should create SparseFS with gitignore patterns loaded', async () => {
+        // Use glob patterns that match gitignore behavior
+        await fs.writeFile('/project/.gitignore', `**/node_modules/**
+**/dist/**`)
+
+        const sparse = await SparseFS.withGitignore(fs, {
+          patterns: ['**'],
+          gitignore: '/project/.gitignore',
+          root: '/project',
+        })
+
+        expect(sparse.shouldInclude('src/index.ts')).toBe(true)
+        expect(sparse.shouldInclude('node_modules/lodash/index.js')).toBe(false)
+        expect(sparse.shouldInclude('dist/bundle.js')).toBe(false)
+      })
+
+      it('should load from root when gitignore is true', async () => {
+        await fs.writeFile('/project/.gitignore', `**/node_modules/**`)
+
+        const sparse = await SparseFS.withGitignore(fs, {
+          patterns: ['**'],
+          gitignore: true,
+          root: '/project',
+        })
+
+        // Note: when root is /project, gitignore path is /project/.gitignore
+        expect(sparse.shouldInclude('src/index.ts')).toBe(true)
+      })
+
+      it('should merge with existing excludePatterns', async () => {
+        await fs.writeFile('/project/.gitignore', `**/node_modules/**`)
+
+        const sparse = await SparseFS.withGitignore(fs, {
+          patterns: ['**'],
+          excludePatterns: ['**/dist/**'],  // Existing exclude
+          gitignore: '/project/.gitignore',
+          root: '/project',
+        })
+
+        // Both patterns should be applied
+        expect(sparse.shouldInclude('src/index.ts')).toBe(true)
+        expect(sparse.shouldInclude('node_modules/lodash/index.js')).toBe(false)
+        expect(sparse.shouldInclude('dist/bundle.js')).toBe(false)
+      })
+
+      it('should handle missing .gitignore file gracefully', async () => {
+        const sparse = await SparseFS.withGitignore(fs, {
+          patterns: ['**'],
+          gitignore: '/nonexistent/.gitignore',
+          root: '/project',
+        })
+
+        // Should work without errors
+        expect(sparse.shouldInclude('src/index.ts')).toBe(true)
+      })
+
+      it('should support deprecated gitignorePath option', async () => {
+        await fs.writeFile('/project/.gitignore', `**/node_modules/**`)
+
+        const sparse = await SparseFS.withGitignore(fs, {
+          patterns: ['**'],
+          gitignorePath: '/project/.gitignore',
+          root: '/project',
+        })
+
+        expect(sparse.shouldInclude('node_modules/lodash/index.js')).toBe(false)
+      })
+
+      it('should handle negation patterns in .gitignore', async () => {
+        await fs.writeFile('/project/.gitignore', `# Exclude all node_modules
+**/node_modules/**
+# But keep company packages
+!**/node_modules/@company/**`)
+
+        const sparse = await SparseFS.withGitignore(fs, {
+          patterns: ['**'],
+          gitignore: '/project/.gitignore',
+          root: '/project',
+        })
+
+        // Standard node_modules should be excluded
+        expect(sparse.shouldInclude('node_modules/lodash/index.js')).toBe(false)
+      })
+    })
+  })
 })

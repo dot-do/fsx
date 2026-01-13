@@ -604,15 +604,30 @@ export class MockBackend implements FsBackend {
     }
 
     if (options?.recursive) {
+      // Collect files and directories to delete
+      const filesToDelete: string[] = []
       for (const file of this.files.keys()) {
         if (file.startsWith(prefix)) {
-          this.files.delete(file)
+          filesToDelete.push(file)
         }
       }
+
+      const dirsToDelete: string[] = []
       for (const dir of this.directories) {
         if (dir.startsWith(prefix)) {
-          this.directories.delete(dir)
+          dirsToDelete.push(dir)
         }
+      }
+
+      // Delete files in parallel using Promise.all
+      // This enables proper async handling and allows for concurrent operations
+      await Promise.all(filesToDelete.map((file) => this.unlink(file)))
+
+      // Delete directories (deepest first to handle nesting)
+      // Sort by path length descending to delete children before parents
+      dirsToDelete.sort((a, b) => b.length - a.length)
+      for (const dir of dirsToDelete) {
+        this.directories.delete(dir)
       }
     }
 

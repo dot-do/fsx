@@ -487,6 +487,75 @@ export interface TransactionExecuteOptions {
    * Auto-generated if not provided.
    */
   transactionId?: string
+
+  /**
+   * When true, use database-level transaction if storage supports it.
+   *
+   * Database-level transactions provide true ACID guarantees:
+   * - **Atomicity**: All operations commit or none do
+   * - **Consistency**: Database constraints are enforced
+   * - **Isolation**: Concurrent transactions don't interfere
+   * - **Durability**: Committed data survives crashes
+   *
+   * When false or when storage doesn't support beginTransaction(),
+   * falls back to application-level rollback (best effort).
+   *
+   * @default true
+   */
+  useDbTransaction?: boolean
+
+  /**
+   * Transaction timeout in milliseconds.
+   *
+   * If the transaction takes longer than this duration, it will be
+   * automatically rolled back with a timeout error.
+   *
+   * @default undefined (no timeout)
+   */
+  timeoutMs?: number
+
+  /**
+   * When true, capture previous file content before overwriting.
+   *
+   * This enables content-preserving rollback for overwrites but adds
+   * I/O overhead. When false, overwritten files cannot be restored
+   * during rollback (they will be deleted instead).
+   *
+   * @default true
+   */
+  captureContent?: boolean
+
+  /**
+   * Callback for transaction metrics/timing.
+   *
+   * Receives detailed timing information after transaction completes
+   * (whether successful or rolled back).
+   */
+  onMetrics?: (metrics: TransactionMetrics) => void
+}
+
+/**
+ * Transaction timing and performance metrics.
+ */
+export interface TransactionMetrics {
+  /** Transaction ID for correlation */
+  transactionId: string
+  /** Total transaction duration in milliseconds */
+  totalDurationMs: number
+  /** Time spent executing operations */
+  operationDurationMs: number
+  /** Time spent on rollback (if applicable) */
+  rollbackDurationMs?: number
+  /** Number of operations executed */
+  operationsExecuted: number
+  /** Number of operations rolled back */
+  operationsRolledBack?: number
+  /** Whether database-level transaction was used */
+  usedDbTransaction: boolean
+  /** Final transaction status */
+  status: TransactionStatus
+  /** Error message if failed */
+  errorMessage?: string
 }
 
 /**
@@ -519,6 +588,8 @@ interface RollbackResult {
   success: boolean
   /** Error message if rollback failed */
   error?: string
+  /** Full error object if rollback failed */
+  errorObject?: Error
 }
 
 /**
@@ -629,6 +700,24 @@ export interface TransactionStorage {
 
   /** Create a directory */
   mkdir?(path: string, options?: MkdirOptions): Promise<void>
+
+  /**
+   * Begin a database-level transaction.
+   *
+   * When implemented, the Transaction.execute() method will wrap all
+   * operations in a database transaction for true ACID guarantees.
+   * This provides better atomicity than application-level rollback
+   * as the database handles consistency and durability.
+   *
+   * @param name - Optional savepoint name for nested transactions
+   * @returns A commit/rollback interface
+   */
+  beginTransaction?(name?: string): Promise<{
+    /** Commit the transaction, making all changes permanent */
+    commit(): Promise<void>
+    /** Rollback the transaction, discarding all changes */
+    rollback(): Promise<void>
+  }>
 }
 
 // ============================================================================
@@ -1585,32 +1674,82 @@ export class Transaction {
     const logger = options?.logger ?? noopLogger
     const dryRun = options?.dryRun ?? false
     const transactionId = options?.transactionId ?? generateTransactionId()
+    const useDbTransaction = options?.useDbTransaction ?? true
+    const captureContent = options?.captureContent ?? true
+    const timeoutMs = options?.timeoutMs
+    const onMetrics = options?.onMetrics
 
-    // Track completed operations for rollback
+    // Timing metrics
+    const startTime = Date.now()
+    let operationStartTime = startTime
+    let operationsExecuted = 0
+    let rollbackDurationMs: number | undefined
+
+    // Track completed operations for rollback (only used when no DB transaction)
     const completedOps: CompletedOperation[] = []
 
     // Reorder operations for optimal execution: mkdir -> write -> rename -> delete
     const orderedOps = this.getOptimalOperationOrder()
 
-    logger.info(`Transaction ${transactionId} starting with ${this.operations.length} operations`, { dryRun })
+    // Check if storage supports database-level transactions
+    const hasDbTransaction = !!storage.beginTransaction && useDbTransaction
+    let dbTx: { commit(): Promise<void>; rollback(): Promise<void> } | null = null
+
+    // Timeout tracking
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
+
+    const checkTimeout = () => {
+      if (timedOut) {
+        throw new Error(`Transaction ${transactionId} timed out after ${timeoutMs}ms`)
+      }
+    }
+
+    logger.info(`Transaction ${transactionId} starting with ${this.operations.length} operations`, {
+      dryRun,
+      useDbTransaction: hasDbTransaction,
+      timeoutMs,
+    })
+
+    // Set up timeout if specified
+    if (timeoutMs && !dryRun) {
+      timeoutId = setTimeout(() => {
+        timedOut = true
+      }, timeoutMs)
+    }
 
     try {
+      // Begin database-level transaction if supported
+      if (hasDbTransaction && storage.beginTransaction && !dryRun) {
+        dbTx = await storage.beginTransaction(transactionId)
+        logger.debug(`[${transactionId}] Database transaction started`)
+      }
+
+      operationStartTime = Date.now()
+
       for (let i = 0; i < orderedOps.length; i++) {
+        checkTimeout() // Check for timeout before each operation
+
         const op = orderedOps[i]
+        if (!op) continue // Skip undefined entries (shouldn't happen but satisfies TypeScript)
+
+        // Get path for logging - handle rename's different property names
+        const opPath = op.type === 'rename' ? op.oldPath : op.path
         logger.debug(`[${transactionId}] Executing operation ${i + 1}/${orderedOps.length}: ${op.type}`, op)
 
         if (dryRun) {
-          logger.info(`[${transactionId}] [DRY RUN] Would execute: ${op.type} on ${(op as any).path ?? (op as any).oldPath}`)
+          logger.info(`[${transactionId}] [DRY RUN] Would execute: ${op.type} on ${opPath}`)
           continue
         }
 
         switch (op.type) {
           case 'write': {
             // Capture previous content if file exists (for content-preserving rollback)
+            // Skip capture if using DB transaction (database handles rollback) or if disabled
             let previousContent: Uint8Array | undefined
             let existed = false
 
-            if (storage.exists && storage.readFile) {
+            if (captureContent && !dbTx && storage.exists && storage.readFile) {
               try {
                 existed = await storage.exists(op.path)
                 if (existed) {
@@ -1624,6 +1763,7 @@ export class Transaction {
             }
 
             await storage.writeFile(op.path, op.data)
+            operationsExecuted++
             completedOps.push({
               type: 'write',
               path: op.path,
@@ -1637,9 +1777,10 @@ export class Transaction {
           case 'delete':
           case 'unlink': {
             // Capture content before delete for restore
+            // Skip capture if using DB transaction (database handles rollback) or if disabled
             let previousContent: Uint8Array | undefined
 
-            if (storage.readFile) {
+            if (captureContent && !dbTx && storage.readFile) {
               try {
                 previousContent = await storage.readFile(op.path)
                 logger.debug(`[${transactionId}] Captured ${previousContent.length} bytes before delete: ${op.path}`)
@@ -1656,6 +1797,7 @@ export class Transaction {
               await storage.deleteFile(op.path)
             }
 
+            operationsExecuted++
             completedOps.push({
               type: op.type as 'delete' | 'unlink',
               path: op.path,
@@ -1668,9 +1810,10 @@ export class Transaction {
 
           case 'rm': {
             // Capture content before rm for restore (if it's a file)
+            // Skip capture if using DB transaction (database handles rollback) or if disabled
             let previousContent: Uint8Array | undefined
 
-            if (storage.readFile && !op.options?.recursive) {
+            if (captureContent && !dbTx && storage.readFile && !op.options?.recursive) {
               try {
                 previousContent = await storage.readFile(op.path)
                 logger.debug(`[${transactionId}] Captured ${previousContent.length} bytes before rm: ${op.path}`)
@@ -1687,6 +1830,7 @@ export class Transaction {
               await storage.deleteFile(op.path)
             }
 
+            operationsExecuted++
             completedOps.push({
               type: 'rm',
               path: op.path,
@@ -1704,6 +1848,7 @@ export class Transaction {
               await storage.rm(op.path, { recursive: true })
             }
 
+            operationsExecuted++
             completedOps.push({
               type: 'rmdir',
               path: op.path,
@@ -1727,6 +1872,7 @@ export class Transaction {
               await storage.rename(op.oldPath, op.newPath)
             }
 
+            operationsExecuted++
             completedOps.push({
               type: 'rename',
               path: op.oldPath,
@@ -1741,6 +1887,7 @@ export class Transaction {
               await storage.mkdir(op.path, op.options)
             }
 
+            operationsExecuted++
             completedOps.push({
               type: 'mkdir',
               path: op.path,
@@ -1751,27 +1898,142 @@ export class Transaction {
         }
       }
 
+      // Clear timeout if set
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+      }
+
+      const operationDurationMs = Date.now() - operationStartTime
+
       if (dryRun) {
         logger.info(`[${transactionId}] Dry run completed - no changes made`)
         // Don't change status for dry run
         return
       }
 
+      // Commit database-level transaction if we have one
+      if (dbTx) {
+        await dbTx.commit()
+        logger.debug(`[${transactionId}] Database transaction committed`)
+      }
+
       this.status = 'committed'
-      logger.info(`Transaction ${transactionId} committed successfully`)
+      const totalDurationMs = Date.now() - startTime
+      logger.info(`Transaction ${transactionId} committed successfully`, {
+        operationsExecuted,
+        totalDurationMs,
+        operationDurationMs,
+      })
+
+      // Report metrics if callback provided
+      if (onMetrics) {
+        onMetrics({
+          transactionId,
+          totalDurationMs,
+          operationDurationMs,
+          operationsExecuted,
+          usedDbTransaction: !!dbTx,
+          status: 'committed',
+        })
+      }
     } catch (error) {
+      // Clear timeout if set
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+      }
+
+      const rollbackStartTime = Date.now()
       logger.error(`Transaction ${transactionId} failed, starting rollback`, { error, completedOps: completedOps.length })
 
-      // Perform rollback
-      const rollbackSummary = await this.performRollback(storage, completedOps, transactionId, logger)
-      this.lastRollbackSummary = rollbackSummary
+      // Perform rollback - prefer database transaction rollback if available
+      if (dbTx) {
+        // Database-level rollback - much simpler and more reliable
+        try {
+          await dbTx.rollback()
+          rollbackDurationMs = Date.now() - rollbackStartTime
+          logger.debug(`[${transactionId}] Database transaction rolled back`)
+
+          this.lastRollbackSummary = {
+            transactionId,
+            totalOperations: completedOps.length,
+            successCount: completedOps.length,
+            failureCount: 0,
+            results: completedOps.map(op => ({ path: op.path, success: true })),
+            durationMs: rollbackDurationMs,
+          }
+        } catch (rollbackError) {
+          rollbackDurationMs = Date.now() - rollbackStartTime
+          logger.error(`[${transactionId}] Database rollback failed`, { rollbackError })
+          this.lastRollbackSummary = {
+            transactionId,
+            totalOperations: completedOps.length,
+            successCount: 0,
+            failureCount: 1,
+            results: [{ path: '*', success: false, error: String(rollbackError) }],
+            durationMs: rollbackDurationMs,
+          }
+        }
+      } else {
+        // Application-level rollback (fallback when no DB transaction)
+        const rollbackSummary = await this.performRollback(storage, completedOps, transactionId, logger)
+        rollbackDurationMs = rollbackSummary.durationMs
+        this.lastRollbackSummary = rollbackSummary
+
+        if (rollbackSummary.failureCount > 0) {
+          logger.warn(`Transaction ${transactionId} rollback completed with ${rollbackSummary.failureCount} failures`, rollbackSummary)
+
+          // Collect all rollback errors with operation context
+          const rollbackErrors = rollbackSummary.results
+            .filter(r => !r.success && r.errorObject)
+            .map(r => {
+              const err = r.errorObject!
+              // Enhance error message with path context if not already present
+              if (!err.message.includes(r.path)) {
+                return new Error(`Rollback failed for ${r.path}: ${err.message}`)
+              }
+              return err
+            })
+
+          // Report metrics before throwing
+          if (onMetrics) {
+            onMetrics({
+              transactionId,
+              totalDurationMs: Date.now() - startTime,
+              operationDurationMs: Date.now() - operationStartTime - (rollbackDurationMs ?? 0),
+              rollbackDurationMs,
+              operationsExecuted,
+              operationsRolledBack: rollbackSummary.successCount,
+              usedDbTransaction: false,
+              status: 'rolled_back',
+              errorMessage: (error as Error).message,
+            })
+          }
+
+          // Throw AggregateError with original error first, then all rollback errors
+          throw new AggregateError(
+            [error as Error, ...rollbackErrors],
+            `Transaction failed and rollback also failed with ${rollbackSummary.failureCount} error(s)`
+          )
+        } else {
+          logger.info(`Transaction ${transactionId} rollback completed successfully`)
+        }
+      }
 
       this.status = 'rolled_back'
 
-      if (rollbackSummary.failureCount > 0) {
-        logger.warn(`Transaction ${transactionId} rollback completed with ${rollbackSummary.failureCount} failures`, rollbackSummary)
-      } else {
-        logger.info(`Transaction ${transactionId} rollback completed successfully`)
+      // Report metrics if callback provided
+      if (onMetrics) {
+        onMetrics({
+          transactionId,
+          totalDurationMs: Date.now() - startTime,
+          operationDurationMs: Date.now() - operationStartTime - (rollbackDurationMs ?? 0),
+          rollbackDurationMs,
+          operationsExecuted,
+          operationsRolledBack: completedOps.length,
+          usedDbTransaction: !!dbTx,
+          status: 'rolled_back',
+          errorMessage: (error as Error).message,
+        })
       }
 
       throw error
@@ -1796,6 +2058,8 @@ export class Transaction {
     // Rollback in reverse order
     for (let i = completedOps.length - 1; i >= 0; i--) {
       const op = completedOps[i]
+      if (!op) continue // Skip undefined entries (shouldn't happen but satisfies TypeScript)
+
       logger.debug(`[${transactionId}] Rolling back operation ${completedOps.length - i}/${completedOps.length}: ${op.type} on ${op.path}`)
 
       try {
@@ -1862,8 +2126,9 @@ export class Transaction {
         successCount++
       } catch (rollbackError) {
         const errorMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+        const errorObject = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError))
         logger.error(`[${transactionId}] Rollback failed for ${op.path}: ${errorMessage}`)
-        results.push({ path: op.path, success: false, error: errorMessage })
+        results.push({ path: op.path, success: false, error: errorMessage, errorObject })
         failureCount++
       }
     }

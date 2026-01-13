@@ -100,6 +100,9 @@ export type {
   TransactionExecuteOptions,
   TransactionLogger,
 
+  // Metrics
+  TransactionMetrics,
+
   // Rollback
   RollbackSummary,
 } from './transaction.js'

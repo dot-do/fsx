@@ -27,6 +27,33 @@ export interface SparseFSOptions {
   cone?: boolean
   /** Root path to strip from paths before pattern matching (default: '') */
   root?: string
+  /**
+   * Load .gitignore file(s) as additional exclude patterns.
+   *
+   * When true, loads .gitignore from the root directory.
+   * When a string, loads from the specified path.
+   * When false or undefined, no .gitignore is loaded.
+   *
+   * The patterns from .gitignore are appended to excludePatterns.
+   */
+  gitignore?: boolean | string
+  /**
+   * Custom path to .gitignore file (deprecated: use gitignore option instead)
+   * @deprecated Use gitignore option with string path instead
+   */
+  gitignorePath?: string
+}
+
+/**
+ * Result of loading a .gitignore file
+ */
+export interface GitignoreLoadResult {
+  /** Patterns parsed from the .gitignore file */
+  patterns: string[]
+  /** Path to the loaded .gitignore file */
+  path: string
+  /** Whether the file existed */
+  exists: boolean
 }
 
 /**
@@ -202,6 +229,134 @@ export class SparseFS {
     }
 
     SparseFS.presets[name] = patterns
+  }
+
+  /**
+   * Load patterns from a .gitignore file
+   *
+   * Parses a .gitignore file and returns the patterns found.
+   * Handles gitignore format:
+   * - Lines starting with # are comments
+   * - Blank lines are ignored
+   * - Patterns can include negation (!) prefix
+   * - Patterns can include glob wildcards
+   *
+   * @param fs - The FSx instance to read from
+   * @param path - Path to the .gitignore file
+   * @returns GitignoreLoadResult with patterns and metadata
+   *
+   * @example
+   * ```typescript
+   * const result = await SparseFS.loadGitignore(fs, '/project/.gitignore')
+   * if (result.exists) {
+   *   console.log('Loaded patterns:', result.patterns)
+   * }
+   * ```
+   */
+  static async loadGitignore(fs: FSx, path: string): Promise<GitignoreLoadResult> {
+    try {
+      const content = await fs.readFile(path, 'utf-8')
+      const patterns = SparseFS.parseGitignoreContent(content as string)
+      return {
+        patterns,
+        path,
+        exists: true,
+      }
+    } catch (error: unknown) {
+      // File doesn't exist or can't be read
+      if (error instanceof Error && error.message.includes('ENOENT')) {
+        return {
+          patterns: [],
+          path,
+          exists: false,
+        }
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Parse gitignore content string into an array of patterns
+   *
+   * @param content - Raw gitignore file content
+   * @returns Array of pattern strings (comments and blank lines removed)
+   */
+  static parseGitignoreContent(content: string): string[] {
+    const lines = content.split(/\r?\n/)
+    const patterns: string[] = []
+
+    for (const line of lines) {
+      // Skip empty lines and comments
+      const trimmed = line.trim()
+      if (trimmed === '' || trimmed.startsWith('#')) {
+        continue
+      }
+
+      // Handle escaped hash (starts with \#)
+      let pattern = trimmed
+      if (pattern.startsWith('\\#')) {
+        pattern = pattern.slice(1) // Remove the backslash
+      }
+
+      patterns.push(pattern)
+    }
+
+    return patterns
+  }
+
+  /**
+   * Create a SparseFS instance with gitignore patterns loaded
+   *
+   * This is an async factory method that loads .gitignore patterns
+   * before creating the SparseFS instance.
+   *
+   * @param fs - The FSx instance to wrap
+   * @param options - Sparse options including gitignore loading
+   * @returns Promise resolving to a new SparseFS instance
+   *
+   * @example
+   * ```typescript
+   * // Load .gitignore from root
+   * const sparse = await SparseFS.withGitignore(fs, {
+   *   patterns: ['src/**'],
+   *   gitignore: true
+   * })
+   *
+   * // Load from custom path
+   * const sparse = await SparseFS.withGitignore(fs, {
+   *   patterns: ['src/**'],
+   *   gitignore: '/project/.gitignore'
+   * })
+   * ```
+   */
+  static async withGitignore(fs: FSx, options: SparseFSOptions): Promise<SparseFS> {
+    let excludePatterns = options.excludePatterns ? [...options.excludePatterns] : []
+
+    // Determine gitignore path
+    let gitignorePath: string | null = null
+    if (options.gitignore === true) {
+      // Load from root directory
+      gitignorePath = options.root ? `${options.root}/.gitignore` : '/.gitignore'
+    } else if (typeof options.gitignore === 'string') {
+      gitignorePath = options.gitignore
+    } else if (options.gitignorePath) {
+      // Deprecated option
+      gitignorePath = options.gitignorePath
+    }
+
+    // Load gitignore patterns if path is set
+    if (gitignorePath) {
+      const result = await SparseFS.loadGitignore(fs, gitignorePath)
+      if (result.exists && result.patterns.length > 0) {
+        excludePatterns = [...excludePatterns, ...result.patterns]
+      }
+    }
+
+    // Create SparseFS with merged patterns
+    return new SparseFS(fs, {
+      ...options,
+      excludePatterns: excludePatterns.length > 0 ? excludePatterns : undefined,
+    })
   }
 
   // ===========================================

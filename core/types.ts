@@ -1509,6 +1509,20 @@ export interface ReaddirOptions {
   recursive?: boolean
   /** Encoding */
   encoding?: BufferEncoding
+  /** Maximum number of entries to return (enables pagination) */
+  limit?: number
+  /** Cursor for pagination continuation */
+  cursor?: string
+}
+
+/**
+ * Paginated result from readdir when limit option is used
+ */
+export interface ReaddirPaginatedResult<T> {
+  /** Array of directory entries */
+  entries: T[]
+  /** Cursor for next page, or null if no more entries */
+  cursor: string | null
 }
 
 /**

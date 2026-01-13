@@ -408,7 +408,9 @@ describe('Transaction Execution', () => {
         .writeFile('/b.txt', new Uint8Array([2]))
         .writeFile('/c.txt', new Uint8Array([3]))
 
-      await expect(tx.execute(storage)).rejects.toThrow('Third write failed')
+      // When rollback also fails, an AggregateError is thrown containing both
+      // the original error and rollback errors
+      await expect(tx.execute(storage)).rejects.toThrow('Transaction failed and rollback also failed')
 
       // Should have attempted to rollback both a.txt and b.txt
       expect(rollbackAttempts).toContain('/a.txt')

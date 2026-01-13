@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
-import { readdir } from './readdir'
+import { readdir, readdirIterator } from './readdir'
 import { Dirent } from '../types'
 import { ENOENT, ENOTDIR } from '../errors'
 
@@ -301,6 +301,294 @@ describe('readdir', () => {
 
       const firstItem: Dirent = result[0]
       expect(firstItem).toBeInstanceOf(Dirent)
+    })
+  })
+
+  // =============================================================================
+  // Cursor-based Pagination Tests (RED Phase - TDD)
+  // =============================================================================
+  describe('cursor-based pagination', () => {
+    describe('limit option', () => {
+      it('should return only the specified number of entries when limit is set', async () => {
+        // /test/dir has 3 entries: a.txt, b.txt, subdir
+        const result = await readdir('/test/dir', { limit: 2 })
+
+        expect(result.entries).toHaveLength(2)
+      })
+
+      it('should return all entries when limit exceeds directory size', async () => {
+        const result = await readdir('/test/dir-with-files', { limit: 100 })
+
+        expect(result.entries).toHaveLength(2) // file1.txt and file2.txt
+      })
+
+      it('should return empty array with empty cursor for empty directory', async () => {
+        const result = await readdir('/test/empty-dir', { limit: 10 })
+
+        expect(result.entries).toHaveLength(0)
+        expect(result.cursor).toBeNull()
+      })
+
+      it('should work with withFileTypes option', async () => {
+        const result = await readdir('/test/dir', { limit: 2, withFileTypes: true })
+
+        expect(result.entries).toHaveLength(2)
+        expect(result.entries[0]).toBeInstanceOf(Dirent)
+      })
+    })
+
+    describe('cursor option', () => {
+      it('should return a cursor when more entries exist', async () => {
+        const result = await readdir('/test/dir', { limit: 1 })
+
+        expect(result.cursor).toBeDefined()
+        expect(result.cursor).not.toBeNull()
+        expect(typeof result.cursor).toBe('string')
+      })
+
+      it('should return null cursor when all entries returned', async () => {
+        const result = await readdir('/test/dir-with-files', { limit: 10 })
+
+        expect(result.cursor).toBeNull()
+      })
+
+      it('should continue from cursor position', async () => {
+        // First page
+        const firstPage = await readdir('/test/dir', { limit: 1 })
+        expect(firstPage.entries).toHaveLength(1)
+        const firstEntry = firstPage.entries[0]
+
+        // Second page using cursor
+        const secondPage = await readdir('/test/dir', {
+          limit: 1,
+          cursor: firstPage.cursor!,
+        })
+        expect(secondPage.entries).toHaveLength(1)
+        const secondEntry = secondPage.entries[0]
+
+        // Entries should be different
+        expect(secondEntry).not.toBe(firstEntry)
+      })
+
+      it('should maintain consistent ordering across pages', async () => {
+        // Get all entries without pagination
+        const allEntries = await readdir('/test/dir')
+
+        // Get entries with pagination
+        const firstPage = await readdir('/test/dir', { limit: 1 })
+        const secondPage = await readdir('/test/dir', {
+          limit: 1,
+          cursor: firstPage.cursor!,
+        })
+        const thirdPage = await readdir('/test/dir', {
+          limit: 1,
+          cursor: secondPage.cursor!,
+        })
+
+        // Combine paginated results
+        const paginatedEntries = [
+          ...firstPage.entries,
+          ...secondPage.entries,
+          ...thirdPage.entries,
+        ]
+
+        expect(paginatedEntries).toEqual(allEntries)
+      })
+
+      it('should return empty entries array for exhausted cursor', async () => {
+        // Get to the last page
+        const firstPage = await readdir('/test/dir-with-files', { limit: 2 })
+        expect(firstPage.cursor).toBeNull() // All entries returned
+
+        // Trying to paginate further should return empty
+        const result = await readdir('/test/dir-with-files', {
+          limit: 10,
+          cursor: 'exhausted-cursor',
+        })
+        expect(result.entries).toHaveLength(0)
+        expect(result.cursor).toBeNull()
+      })
+    })
+
+    describe('cursor stability', () => {
+      it('should produce stable cursors across identical calls', async () => {
+        const result1 = await readdir('/test/dir', { limit: 1 })
+        const result2 = await readdir('/test/dir', { limit: 1 })
+
+        expect(result1.cursor).toBe(result2.cursor)
+      })
+
+      it('cursor should be valid after directory read', async () => {
+        const firstPage = await readdir('/test/dir', { limit: 1 })
+
+        // Simulate some time passing (cursor should still be valid)
+        const secondPage = await readdir('/test/dir', {
+          limit: 1,
+          cursor: firstPage.cursor!,
+        })
+
+        expect(secondPage.entries).toHaveLength(1)
+      })
+    })
+
+    describe('backward compatibility', () => {
+      it('should return array directly when no pagination options used', async () => {
+        const result = await readdir('/test/dir')
+
+        // Without limit/cursor, should return plain array (backward compatible)
+        expect(Array.isArray(result)).toBe(true)
+        expect((result as string[]).every(item => typeof item === 'string')).toBe(true)
+      })
+
+      it('should return paginated result object when limit is specified', async () => {
+        const result = await readdir('/test/dir', { limit: 2 })
+
+        // With limit, should return { entries, cursor } object
+        expect(result).toHaveProperty('entries')
+        expect(result).toHaveProperty('cursor')
+      })
+    })
+  })
+
+  // =============================================================================
+  // Async Iterator Tests (RED Phase - TDD)
+  // =============================================================================
+  describe('readdirIterator', () => {
+    it('should be exported as a function', () => {
+      // RED: readdirIterator should be exported
+      expect(typeof readdirIterator).toBe('function')
+    })
+
+    it('should yield entries one at a time', async () => {
+      // Skip if not implemented yet
+      if (typeof readdirIterator !== 'function') {
+        expect.fail('readdirIterator is not implemented')
+      }
+      const entries: string[] = []
+      for await (const entry of readdirIterator('/test/dir')) {
+        entries.push(entry)
+      }
+
+      expect(entries.length).toBeGreaterThan(0)
+      expect(entries).toContain('a.txt')
+    })
+
+    it('should yield Dirent objects when withFileTypes is true', async () => {
+      if (typeof readdirIterator !== 'function') {
+        expect.fail('readdirIterator is not implemented')
+      }
+      const entries: Dirent[] = []
+      for await (const entry of readdirIterator('/test/dir', { withFileTypes: true })) {
+        entries.push(entry)
+      }
+
+      expect(entries.length).toBeGreaterThan(0)
+      expect(entries[0]).toBeInstanceOf(Dirent)
+    })
+
+    it('should yield entries in sorted order', async () => {
+      if (typeof readdirIterator !== 'function') {
+        expect.fail('readdirIterator is not implemented')
+      }
+      const entries: string[] = []
+      for await (const entry of readdirIterator('/test/dir')) {
+        entries.push(entry)
+      }
+
+      const sortedEntries = [...entries].sort((a, b) => a.localeCompare(b))
+      expect(entries).toEqual(sortedEntries)
+    })
+
+    it('should handle empty directory', async () => {
+      if (typeof readdirIterator !== 'function') {
+        expect.fail('readdirIterator is not implemented')
+      }
+      const entries: string[] = []
+      for await (const entry of readdirIterator('/test/empty-dir')) {
+        entries.push(entry)
+      }
+
+      expect(entries).toHaveLength(0)
+    })
+
+    it('should throw ENOENT for non-existent directory', async () => {
+      if (typeof readdirIterator !== 'function') {
+        expect.fail('readdirIterator is not implemented')
+      }
+      const entries: string[] = []
+      await expect(async () => {
+        for await (const entry of readdirIterator('/nonexistent')) {
+          entries.push(entry)
+        }
+      }).rejects.toThrow(ENOENT)
+    })
+
+    it('should support early termination with break', async () => {
+      if (typeof readdirIterator !== 'function') {
+        expect.fail('readdirIterator is not implemented')
+      }
+      const entries: string[] = []
+      for await (const entry of readdirIterator('/test/dir')) {
+        entries.push(entry)
+        if (entries.length >= 1) break
+      }
+
+      expect(entries).toHaveLength(1)
+    })
+
+    it('should work with recursive option', async () => {
+      if (typeof readdirIterator !== 'function') {
+        expect.fail('readdirIterator is not implemented')
+      }
+      const entries: string[] = []
+      for await (const entry of readdirIterator('/test/nested-dir', { recursive: true })) {
+        entries.push(entry)
+      }
+
+      // Should include entries from nested directories
+      expect(entries.some(e => e.includes('/'))).toBe(true)
+    })
+  })
+
+  // =============================================================================
+  // Large Directory Performance Tests (RED Phase - TDD)
+  // =============================================================================
+  describe('large directory handling', () => {
+    it('should handle directory with many entries efficiently', async () => {
+      // This test ensures pagination doesn't load all entries into memory
+      // Using /test directory which has the most entries
+      const result = await readdir('/test', { limit: 5 }) as { entries: string[]; cursor: string | null }
+
+      expect(result.entries).toHaveLength(5)
+      expect(result.cursor).not.toBeNull()
+    })
+
+    it('should iterate through large directory without loading all entries', async () => {
+      if (typeof readdirIterator !== 'function') {
+        expect.fail('readdirIterator is not implemented')
+      }
+      // Memory-efficient iteration test
+      let count = 0
+      for await (const _entry of readdirIterator('/test')) {
+        count++
+        if (count >= 3) break // Early termination
+      }
+
+      expect(count).toBe(3)
+    })
+
+    it('should return consistent total when paginating through entire directory', async () => {
+      const allEntries = await readdir('/test') as string[]
+      let paginatedCount = 0
+      let cursor: string | null = null
+
+      do {
+        const result = await readdir('/test', { limit: 3, cursor: cursor ?? undefined }) as { entries: string[]; cursor: string | null }
+        paginatedCount += result.entries.length
+        cursor = result.cursor
+      } while (cursor !== null)
+
+      expect(paginatedCount).toBe(allEntries.length)
     })
   })
 })

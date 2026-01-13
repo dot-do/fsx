@@ -202,7 +202,7 @@ export class WatchManager {
 
   /**
    * Clean up pending events when a watcher is removed.
-   * If no watchers remain for a pending event's path, clear the timer.
+   * If no watchers remain for a pending event's path, clear both timers.
    */
   private cleanupPendingEventsForClosedWatcher(closedEntry: WatchEntry): void {
     for (const [pendingPath, pending] of this.pendingEvents) {
@@ -212,6 +212,10 @@ export class WatchManager {
         const hasRemainingWatchers = this.findMatchingWatchers(pending.eventType, pendingPath).length > 0
         if (!hasRemainingWatchers) {
           clearTimeout(pending.timer)
+          // Also clear maxWait timer to prevent timer leak
+          if (pending.maxWaitTimer) {
+            clearTimeout(pending.maxWaitTimer)
+          }
           this.pendingEvents.delete(pendingPath)
         }
       }

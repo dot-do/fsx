@@ -1502,9 +1502,15 @@ export class FSx {
       }
     }
 
+    // Track whether file needs creation on close (for 'w' flag with no writes)
+    let needsCreation = parsedFlags.create
+
     /**
      * Flush pending modifications to storage if any exist.
      * This is the shared implementation used by both sync() and close().
+     *
+     * Also handles file creation for 'w' flag: if opened with create flag
+     * but no writes occurred, creates an empty file on close.
      *
      * @returns true if data was flushed, false if nothing to flush
      * @throws Re-throws any error from the backend write operation
@@ -1513,6 +1519,14 @@ export class FSx {
       if (modified && fileData) {
         await backend.writeFile(path, fileData)
         modified = false
+        needsCreation = false
+        return true
+      }
+      // Handle 'w' flag file creation when no writes occurred
+      // POSIX: opening with O_CREAT|O_TRUNC should create/truncate the file
+      if (needsCreation && parsedFlags.truncate) {
+        await backend.writeFile(path, new Uint8Array(0))
+        needsCreation = false
         return true
       }
       return false

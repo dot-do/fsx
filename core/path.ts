@@ -79,6 +79,63 @@ export interface ParsedPath {
 }
 
 // =============================================================================
+// PATH VALIDATION
+// =============================================================================
+
+/**
+ * Get a human-readable type name for error messages.
+ *
+ * @param value - The value to get the type of
+ * @returns Human-readable type name (e.g., 'null', 'undefined', 'object', 'number')
+ * @internal
+ */
+function getTypeName(value: unknown): string {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  return typeof value
+}
+
+/**
+ * Validate that a path argument is a string.
+ *
+ * This function provides runtime type checking at API boundaries. While TypeScript
+ * provides compile-time type safety, this validation ensures proper error messages
+ * when functions are called from JavaScript or with any/unknown types.
+ *
+ * @param path - The path argument to validate
+ * @param argName - Name of the argument for error messages (default: 'path')
+ * @throws {TypeError} If path is not a string, with a clear message including the actual type
+ *
+ * @example
+ * ```typescript
+ * validatePath(null)      // throws TypeError: Path must be a string, got null
+ * validatePath(undefined) // throws TypeError: Path must be a string, got undefined
+ * validatePath(123)       // throws TypeError: Path must be a string, got number
+ * validatePath('/foo')    // OK
+ * ```
+ *
+ * @internal
+ */
+function validatePath(path: unknown, argName: string = 'path'): asserts path is string {
+  if (typeof path !== 'string') {
+    throw new TypeError(`${argName} must be a string, got ${getTypeName(path)}`)
+  }
+}
+
+/**
+ * Validate that an optional extension argument is a string if provided.
+ *
+ * @param ext - The extension argument to validate
+ * @throws {TypeError} If ext is not a string or undefined
+ * @internal
+ */
+function validateOptionalPath(value: unknown, argName: string = 'ext'): asserts value is string | undefined {
+  if (value !== undefined && typeof value !== 'string') {
+    throw new TypeError(`${argName} must be a string, got ${getTypeName(value)}`)
+  }
+}
+
+// =============================================================================
 // INTERNAL UTILITIES
 // =============================================================================
 
@@ -210,6 +267,8 @@ function normalizeStringPosix(path: string, allowAboveRoot: boolean): string {
  * ```
  */
 export function normalize(path: string): string {
+  validatePath(path)
+
   // Fast path for common cases
   if (path === '') return '.'
   if (path === '.') return '.'
@@ -274,6 +333,11 @@ export function normalize(path: string): string {
 export function join(...paths: string[]): string {
   if (paths.length === 0) return '.'
 
+  // Validate all path arguments
+  for (let i = 0; i < paths.length; i++) {
+    validatePath(paths[i], `paths[${i}]`)
+  }
+
   let joined: string | undefined
 
   for (const path of paths) {
@@ -329,6 +393,11 @@ export function join(...paths: string[]): string {
  */
 export function resolve(...paths: string[]): string {
   if (paths.length === 0) return '/'
+
+  // Validate all path arguments
+  for (let i = 0; i < paths.length; i++) {
+    validatePath(paths[i], `paths[${i}]`)
+  }
 
   let resolved = ''
 
@@ -390,6 +459,8 @@ export function resolve(...paths: string[]): string {
  * ```
  */
 export function dirname(path: string): string {
+  validatePath(path)
+
   if (path.length === 0) return '.'
 
   const isAbsolute = isSlash(path.charCodeAt(0))
@@ -461,6 +532,9 @@ export function dirname(path: string): string {
  * ```
  */
 export function basename(path: string, ext?: string): string {
+  validatePath(path)
+  validateOptionalPath(ext, 'ext')
+
   if (path.length === 0) return ''
 
   // Remove trailing slashes
@@ -529,6 +603,8 @@ export function basename(path: string, ext?: string): string {
  * ```
  */
 export function extname(path: string): string {
+  validatePath(path)
+
   const base = basename(path)
 
   if (base === '' || base === '.' || base === '..') {
@@ -603,6 +679,8 @@ export function extname(path: string): string {
  * ```
  */
 export function parse(path: string): ParsedPath {
+  validatePath(path)
+
   if (path === '') {
     return { root: '', dir: '', base: '', ext: '', name: '' }
   }
@@ -707,6 +785,7 @@ export function format(pathObject: Partial<ParsedPath>): string {
  * ```
  */
 export function isAbsolute(path: string): boolean {
+  validatePath(path)
   return path.length > 0 && isSlash(path.charCodeAt(0))
 }
 
@@ -742,6 +821,9 @@ export function isAbsolute(path: string): boolean {
  * ```
  */
 export function relative(from: string, to: string): string {
+  validatePath(from, 'from')
+  validatePath(to, 'to')
+
   // Normalize both paths and make them absolute for comparison
   const fromNorm = resolve(from)
   const toNorm = resolve(to)
@@ -810,6 +892,8 @@ export function relative(from: string, to: string): string {
  * ```
  */
 export function hasTraversal(path: string): boolean {
+  validatePath(path)
+
   const normalized = normalize(path)
   // Check if normalized path starts with .. or contains /..
   return normalized.startsWith('..') || normalized.includes('/..')
@@ -834,6 +918,9 @@ export function hasTraversal(path: string): boolean {
  * ```
  */
 export function isWithin(base: string, path: string): boolean {
+  validatePath(base, 'base')
+  validatePath(path, 'path')
+
   const normalizedBase = normalize(base)
   const resolved = resolve(normalizedBase, path)
 

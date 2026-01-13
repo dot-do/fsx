@@ -46,6 +46,7 @@ import { DurableObject } from 'cloudflare:workers'
 import { Hono } from 'hono'
 import { FsModule } from './module.js'
 import type { Dirent, BufferEncoding } from '../core/index.js'
+import { SubscriptionManager, BatchEmitter, createWatchEvent, type WatchEvent } from '../core/watch/index.js'
 
 // ===========================================================================
 // Stream Read Utilities
@@ -515,9 +516,33 @@ type WebSocketMessage =
  * }
  * ```
  */
+/**
+ * Configuration constants for WebSocket watch optimization
+ */
+const WatchConfig = {
+  /** Maximum number of watch connections per DO instance */
+  MAX_CONNECTIONS: 1000,
+  /** Maximum subscriptions per connection (0 = unlimited) */
+  MAX_SUBSCRIPTIONS_PER_CONNECTION: 100,
+  /** Batch window in milliseconds for event coalescing */
+  BATCH_WINDOW_MS: 10,
+  /** Maximum events in a single batch before forced flush */
+  MAX_BATCH_SIZE: 50,
+} as const
+
 export class FileSystemDO extends DurableObject<Env> {
   private app: Hono
   private fsModule: FsModule
+  /**
+   * Subscription manager for WebSocket file watching
+   * Uses glob pattern matching to efficiently manage subscribers.
+   */
+  private subscriptionManager: SubscriptionManager
+  /**
+   * Batch emitter for event coalescing
+   * Reduces WebSocket message overhead by batching rapid events.
+   */
+  private batchEmitter: BatchEmitter
   /**
    * Active WebSocket connections for file watching
    *
@@ -540,6 +565,27 @@ export class FileSystemDO extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
+
+    // Create SubscriptionManager for watch subscriptions with connection limits
+    this.subscriptionManager = new SubscriptionManager({
+      maxSubscriptionsPerConnection: WatchConfig.MAX_SUBSCRIPTIONS_PER_CONNECTION,
+    })
+
+    // Create BatchEmitter for event coalescing
+    this.batchEmitter = new BatchEmitter({
+      batchWindowMs: WatchConfig.BATCH_WINDOW_MS,
+      maxBatchSize: WatchConfig.MAX_BATCH_SIZE,
+      compressEvents: true,
+      prioritizeEvents: true,
+      enableMetrics: true,
+    })
+
+    // Wire batch emitter to broadcast events
+    this.batchEmitter.onBatch((events) => {
+      for (const event of events) {
+        this.broadcastWatchEventImmediate(event)
+      }
+    })
 
     // Create FsModule with storage configuration
     this.fsModule = new FsModule({
@@ -658,6 +704,39 @@ export class FileSystemDO extends DurableObject<Env> {
     this.watchConnections.delete(ws)
   }
 
+  /**
+   * Get watch system metrics
+   *
+   * Returns metrics about connections, subscriptions, and event batching.
+   * Useful for monitoring and debugging watch system performance.
+   *
+   * @returns Object containing watch metrics
+   */
+  getWatchMetrics(): {
+    connections: number
+    subscriptions: number
+    batchMetrics: {
+      eventsReceived: number
+      eventsEmitted: number
+      batchesEmitted: number
+      compressionRatio: number
+      eventsPerSecond: number
+    }
+  } {
+    const batchMetrics = this.batchEmitter.getMetrics()
+    return {
+      connections: this.watchConnections.size,
+      subscriptions: this.subscriptionManager.getConnectionCount(),
+      batchMetrics: {
+        eventsReceived: batchMetrics.eventsReceived,
+        eventsEmitted: batchMetrics.eventsEmitted,
+        batchesEmitted: batchMetrics.batchesEmitted,
+        compressionRatio: batchMetrics.compressionRatio,
+        eventsPerSecond: batchMetrics.eventsPerSecond,
+      },
+    }
+  }
+
   private createApp(): Hono {
     const app = new Hono()
 
@@ -693,8 +772,15 @@ export class FileSystemDO extends DurableObject<Env> {
 
       try {
         const options = optionsHeader ? JSON.parse(optionsHeader) : {}
+        // Check if file exists before write to determine event type
+        const existed = await this.fsModule.exists(path)
         const data = await c.req.arrayBuffer()
         await this.fsModule.write(path, new Uint8Array(data), options)
+        // Emit watch event
+        const eventType = existed ? 'modify' : 'create'
+        this.broadcastWatchEvent(createWatchEvent(eventType, path, {
+          size: data.byteLength,
+        }))
         return c.json({ success: true })
       } catch (error: unknown) {
         const fsError = error as { code?: string; message?: string; path?: string }
@@ -873,33 +959,66 @@ export class FileSystemDO extends DurableObject<Env> {
           }
           data = bytes
         }
-        await this.fsModule.write(params.path as string, data, params)
+        const path = params.path as string
+        // Check if file exists before write to determine event type
+        const existed = await this.fsModule.exists(path)
+        await this.fsModule.write(path, data, params)
+        // Emit watch event
+        const eventType = existed ? 'modify' : 'create'
+        this.broadcastWatchEvent(createWatchEvent(eventType, path, {
+          size: typeof data === 'string' ? data.length : data.byteLength,
+        }))
         return { success: true }
       }
 
-      case 'unlink':
-        await this.fsModule.unlink(params.path as string)
+      case 'unlink': {
+        const path = params.path as string
+        await this.fsModule.unlink(path)
+        // Emit delete event
+        this.broadcastWatchEvent(createWatchEvent('delete', path))
         return { success: true }
+      }
 
-      case 'rename':
-        await this.fsModule.rename(params.oldPath as string, params.newPath as string, params)
+      case 'rename': {
+        const oldPath = params.oldPath as string
+        const newPath = params.newPath as string
+        await this.fsModule.rename(oldPath, newPath, params)
+        // Emit rename event
+        this.broadcastWatchEvent(createWatchEvent('rename', oldPath, newPath))
         return { success: true }
+      }
 
-      case 'copyFile':
-        await this.fsModule.copyFile(params.src as string, params.dest as string, params)
+      case 'copyFile': {
+        const dest = params.dest as string
+        await this.fsModule.copyFile(params.src as string, dest, params)
+        // Emit create event for the destination
+        this.broadcastWatchEvent(createWatchEvent('create', dest))
         return { success: true }
+      }
 
-      case 'mkdir':
-        await this.fsModule.mkdir(params.path as string, params as { recursive?: boolean; mode?: number })
+      case 'mkdir': {
+        const path = params.path as string
+        await this.fsModule.mkdir(path, params as { recursive?: boolean; mode?: number })
+        // Emit create event for directory
+        this.broadcastWatchEvent(createWatchEvent('create', path, { isDirectory: true }))
         return { success: true }
+      }
 
-      case 'rmdir':
-        await this.fsModule.rmdir(params.path as string, params as { recursive?: boolean })
+      case 'rmdir': {
+        const path = params.path as string
+        await this.fsModule.rmdir(path, params as { recursive?: boolean })
+        // Emit delete event for directory
+        this.broadcastWatchEvent(createWatchEvent('delete', path, { isDirectory: true }))
         return { success: true }
+      }
 
-      case 'rm':
-        await this.fsModule.rm(params.path as string, params as { recursive?: boolean; force?: boolean })
+      case 'rm': {
+        const path = params.path as string
+        await this.fsModule.rm(path, params as { recursive?: boolean; force?: boolean })
+        // Emit delete event
+        this.broadcastWatchEvent(createWatchEvent('delete', path))
         return { success: true }
+      }
 
       case 'readdir':
         return this.handleReaddir(params.path as string, params as { withFileTypes?: boolean; recursive?: boolean })
@@ -1219,6 +1338,20 @@ export class FileSystemDO extends DurableObject<Env> {
         )
       }
 
+      // Check connection limit
+      if (this.watchConnections.size >= WatchConfig.MAX_CONNECTIONS) {
+        return new Response(
+          JSON.stringify({
+            code: 'ECONNREFUSED',
+            message: `Connection limit reached (max ${WatchConfig.MAX_CONNECTIONS} connections)`,
+          }),
+          {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
+      }
+
       // Accept the WebSocket connection using Durable Object API
       const pair = new WebSocketPair()
       const [client, server] = [pair[0], pair[1]]
@@ -1300,22 +1433,46 @@ export class FileSystemDO extends DurableObject<Env> {
 
       switch (parsed.type) {
         case 'subscribe': {
-          // Update watch subscription
-          if (metadata && parsed.path) {
-            metadata.path = parsed.path
-            metadata.recursive = parsed.recursive ?? metadata.recursive
+          // Add subscription via SubscriptionManager
+          if (parsed.path) {
+            // Convert recursive flag to glob pattern if needed
+            let pattern = parsed.path as string
+            if (parsed.recursive && !pattern.includes('*')) {
+              // Auto-append /** for recursive watching
+              pattern = pattern.endsWith('/') ? `${pattern}**` : `${pattern}/**`
+            }
+            this.subscriptionManager.subscribe(ws, pattern)
+            // Update metadata for backwards compatibility
+            if (metadata) {
+              metadata.path = pattern
+              metadata.recursive = parsed.recursive ?? metadata.recursive
+            }
           }
           ws.send(JSON.stringify({ type: 'subscribed', path: parsed.path }))
           break
         }
 
         case 'unsubscribe': {
-          // Update state and remove from active connections
-          if (metadata) {
-            metadata.state = WebSocketState.CLOSING
+          // Remove subscription via SubscriptionManager
+          if (parsed.path) {
+            let pattern = parsed.path as string
+            // Try both with and without glob suffix
+            this.subscriptionManager.unsubscribe(ws, pattern)
+            if (!pattern.includes('*')) {
+              this.subscriptionManager.unsubscribe(ws, `${pattern}/**`)
+            }
+          } else {
+            // Remove all subscriptions for this connection
+            this.subscriptionManager.removeConnection(ws)
           }
-          this.watchConnections.delete(ws)
-          ws.send(JSON.stringify({ type: 'unsubscribed' }))
+          // Only close connection if explicitly requested (no path = close)
+          if (!parsed.path) {
+            if (metadata) {
+              metadata.state = WebSocketState.CLOSING
+            }
+            this.watchConnections.delete(ws)
+          }
+          ws.send(JSON.stringify({ type: 'unsubscribed', path: parsed.path }))
           break
         }
 
@@ -1373,6 +1530,8 @@ export class FileSystemDO extends DurableObject<Env> {
     }
     // Remove from active connections
     this.watchConnections.delete(ws)
+    // Remove all subscriptions for this connection
+    this.subscriptionManager.removeConnection(ws)
   }
 
   /**
@@ -1391,6 +1550,8 @@ export class FileSystemDO extends DurableObject<Env> {
     }
     // Remove from active connections on error
     this.watchConnections.delete(ws)
+    // Remove all subscriptions for this connection
+    this.subscriptionManager.removeConnection(ws)
   }
 
   // ===========================================================================
@@ -1405,15 +1566,42 @@ export class FileSystemDO extends DurableObject<Env> {
    *
    * @param event - The watch event to broadcast
    */
+  /**
+   * Queue a watch event for batched broadcast
+   *
+   * Events are collected and coalesced by the BatchEmitter before being
+   * sent to subscribers. This reduces WebSocket message overhead for
+   * rapid file operations.
+   *
+   * @param event - The watch event to queue
+   */
   broadcastWatchEvent(event: WatchEvent): void {
-    for (const [ws, metadata] of this.watchConnections) {
-      // Check if this connection is watching the affected path
-      if (this.pathMatchesWatch(event.path, metadata.path, metadata.recursive)) {
-        try {
-          ws.send(JSON.stringify(event))
-        } catch {
-          // Connection may be closed - will be cleaned up on next close event
-        }
+    // Queue through BatchEmitter for event coalescing
+    this.batchEmitter.queue(event.type, event.path, event.oldPath, {
+      size: event.size,
+      mtime: event.mtime,
+      isDirectory: event.isDirectory,
+    })
+  }
+
+  /**
+   * Immediately broadcast a watch event to all matching subscribers
+   *
+   * This is called by the BatchEmitter after coalescing events.
+   * Uses SubscriptionManager for efficient glob pattern matching.
+   *
+   * @param event - The watch event to broadcast
+   * @internal
+   */
+  private broadcastWatchEventImmediate(event: WatchEvent): void {
+    // Use SubscriptionManager for efficient glob pattern matching
+    const subscribers = this.subscriptionManager.getSubscribersForPath(event.path)
+
+    for (const ws of subscribers) {
+      try {
+        ws.send(JSON.stringify(event))
+      } catch {
+        // Connection may be closed - will be cleaned up on next close event
       }
     }
   }

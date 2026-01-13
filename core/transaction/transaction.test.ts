@@ -694,6 +694,167 @@ describe('Transaction Builder', () => {
     })
   })
 
+  describe('Rollback error aggregation', () => {
+    it('should preserve original error when rollback succeeds', async () => {
+      const tx = new Transaction()
+      const data = new Uint8Array([1, 2, 3])
+
+      tx.writeFile('/a.txt', data)
+        .writeFile('/b.txt', data)
+
+      const storage = {
+        writeFile: vi.fn()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error('Write failed')),
+        rm: vi.fn().mockResolvedValue(undefined),
+      }
+
+      let caughtError: Error | undefined
+      try {
+        await tx.execute(storage)
+      } catch (error) {
+        caughtError = error as Error
+      }
+
+      // Original error should be preserved
+      expect(caughtError).toBeDefined()
+      expect(caughtError?.message).toBe('Write failed')
+      // Should NOT be an AggregateError when rollback succeeds
+      expect(caughtError).not.toBeInstanceOf(AggregateError)
+    })
+
+    it('should throw AggregateError when rollback fails', async () => {
+      const tx = new Transaction()
+      const data = new Uint8Array([1, 2, 3])
+
+      tx.writeFile('/a.txt', data)
+        .writeFile('/b.txt', data)
+
+      const storage = {
+        writeFile: vi.fn()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error('Write failed')),
+        rm: vi.fn().mockRejectedValue(new Error('Delete failed')),
+      }
+
+      let caughtError: Error | undefined
+      try {
+        await tx.execute(storage)
+      } catch (error) {
+        caughtError = error as Error
+      }
+
+      // Should be an AggregateError containing both errors
+      expect(caughtError).toBeInstanceOf(AggregateError)
+      const aggregateError = caughtError as AggregateError
+      expect(aggregateError.errors.length).toBe(2)
+
+      // First error should be the original
+      expect(aggregateError.errors[0]).toBeInstanceOf(Error)
+      expect((aggregateError.errors[0] as Error).message).toBe('Write failed')
+
+      // Second error should be from rollback
+      expect(aggregateError.errors[1]).toBeInstanceOf(Error)
+      expect((aggregateError.errors[1] as Error).message).toContain('Delete failed')
+    })
+
+    it('should collect all rollback errors into AggregateError', async () => {
+      const tx = new Transaction()
+      const data = new Uint8Array([1, 2, 3])
+
+      tx.writeFile('/a.txt', data)
+        .writeFile('/b.txt', data)
+        .writeFile('/c.txt', data)
+
+      let writeCount = 0
+      const storage = {
+        writeFile: vi.fn().mockImplementation(async () => {
+          writeCount++
+          if (writeCount === 3) {
+            throw new Error('Third write failed')
+          }
+        }),
+        rm: vi.fn()
+          .mockRejectedValueOnce(new Error('First delete failed'))
+          .mockRejectedValueOnce(new Error('Second delete failed')),
+      }
+
+      let caughtError: Error | undefined
+      try {
+        await tx.execute(storage)
+      } catch (error) {
+        caughtError = error as Error
+      }
+
+      // Should be an AggregateError containing original + all rollback errors
+      expect(caughtError).toBeInstanceOf(AggregateError)
+      const aggregateError = caughtError as AggregateError
+
+      // Original error + 2 rollback errors = 3 total
+      expect(aggregateError.errors.length).toBe(3)
+      expect((aggregateError.errors[0] as Error).message).toBe('Third write failed')
+      expect((aggregateError.errors[1] as Error).message).toContain('First delete failed')
+      expect((aggregateError.errors[2] as Error).message).toContain('Second delete failed')
+    })
+
+    it('should include descriptive message in AggregateError', async () => {
+      const tx = new Transaction()
+      const data = new Uint8Array([1, 2, 3])
+
+      tx.writeFile('/a.txt', data)
+        .writeFile('/b.txt', data)
+
+      const storage = {
+        writeFile: vi.fn()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error('Write failed')),
+        rm: vi.fn().mockRejectedValue(new Error('Delete failed')),
+      }
+
+      let caughtError: Error | undefined
+      try {
+        await tx.execute(storage)
+      } catch (error) {
+        caughtError = error as Error
+      }
+
+      expect(caughtError).toBeInstanceOf(AggregateError)
+      const aggregateError = caughtError as AggregateError
+
+      // Message should indicate both transaction failure and rollback failure
+      expect(aggregateError.message).toMatch(/transaction.*failed.*rollback/i)
+    })
+
+    it('should include rollback errors with operation context', async () => {
+      const tx = new Transaction()
+      const data = new Uint8Array([1, 2, 3])
+
+      tx.writeFile('/path/to/file.txt', data)
+        .writeFile('/another/file.txt', data)
+
+      const storage = {
+        writeFile: vi.fn()
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error('Original error')),
+        rm: vi.fn().mockRejectedValue(new Error('Rollback error')),
+      }
+
+      let caughtError: Error | undefined
+      try {
+        await tx.execute(storage)
+      } catch (error) {
+        caughtError = error as Error
+      }
+
+      expect(caughtError).toBeInstanceOf(AggregateError)
+      const aggregateError = caughtError as AggregateError
+
+      // Rollback errors should include path context
+      const rollbackError = aggregateError.errors[1] as Error
+      expect(rollbackError.message).toContain('/path/to/file.txt')
+    })
+  })
+
   describe('Rollback functionality', () => {
     it('should rollback writes on failure', async () => {
       const tx = new Transaction()
@@ -799,7 +960,22 @@ describe('Transaction Builder', () => {
         rm: vi.fn().mockRejectedValue(new Error('Rm failed')),
       }
 
-      await expect(tx.execute(storage)).rejects.toThrow('Rm failed')
+      // When rollback also fails (because reverse rename fails), we get AggregateError
+      // When rollback succeeds, we get the original error
+      let caughtError: Error | undefined
+      try {
+        await tx.execute(storage)
+      } catch (error) {
+        caughtError = error as Error
+      }
+
+      expect(caughtError).toBeDefined()
+      // Original error should be accessible (either directly or in AggregateError)
+      if (caughtError instanceof AggregateError) {
+        expect((caughtError.errors[0] as Error).message).toBe('Rm failed')
+      } else {
+        expect(caughtError!.message).toBe('Rm failed')
+      }
 
       // Should have renamed and then reversed
       expect(renames).toHaveLength(2)
@@ -867,7 +1043,19 @@ describe('Transaction Builder', () => {
         rm: vi.fn().mockRejectedValue(new Error('Delete failed')),
       }
 
-      await expect(tx.execute(storage)).rejects.toThrow('Write failed')
+      // When rollback fails, we get AggregateError with original + rollback errors
+      let caughtError: Error | undefined
+      try {
+        await tx.execute(storage)
+      } catch (error) {
+        caughtError = error as Error
+      }
+
+      expect(caughtError).toBeDefined()
+      expect(caughtError).toBeInstanceOf(AggregateError)
+      const aggregateError = caughtError as AggregateError
+      // First error in aggregate is the original
+      expect((aggregateError.errors[0] as Error).message).toBe('Write failed')
 
       expect(tx.lastRollbackSummary).toBeDefined()
       expect(tx.lastRollbackSummary!.failureCount).toBe(1)

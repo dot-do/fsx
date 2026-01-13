@@ -261,12 +261,69 @@ function isExcludedByPrefixIndex(dir: string, index: DirectoryPrefixIndex): bool
 // =============================================================================
 
 /**
+ * Parsed pattern with negation information
+ */
+interface ParsedPatternInfo {
+  /** Original pattern string */
+  original: string
+  /** Pattern with negation prefix removed */
+  pattern: string
+  /** Whether this is a negation pattern (starts with !) */
+  isNegated: boolean
+  /** Compiled matcher function */
+  matcher: (path: string) => boolean
+}
+
+/**
+ * Parse a pattern string, extracting negation info
+ */
+function parsePatternWithNegation(pattern: string): ParsedPatternInfo {
+  // Handle escaped negation (\!) - matches literal !
+  if (pattern.startsWith('\\!')) {
+    const actualPattern = pattern.slice(1) // Remove the backslash, keep the !
+    return {
+      original: pattern,
+      pattern: actualPattern,
+      isNegated: false,
+      matcher: createMatcher(actualPattern),
+    }
+  }
+
+  // Count leading negation characters
+  let negationCount = 0
+  let workingPattern = pattern
+  while (workingPattern.startsWith('!')) {
+    negationCount++
+    workingPattern = workingPattern.slice(1)
+  }
+
+  // Odd number of negations means negated
+  const isNegated = negationCount % 2 === 1
+
+  return {
+    original: pattern,
+    pattern: workingPattern,
+    isNegated,
+    matcher: createMatcher(workingPattern),
+  }
+}
+
+/**
  * Create an include checker with the given patterns
  *
  * This factory creates an optimized checker with:
  * - LRU cache for path decisions
  * - Pre-compiled regex patterns
  * - Directory prefix index for early termination
+ * - **Negation pattern support** - patterns starting with ! negate previous matches
+ *
+ * ## Negation Pattern Semantics (gitignore-style)
+ *
+ * Patterns are processed in order, with later patterns overriding earlier ones:
+ * - `!pattern` negates a previous match
+ * - In `excludePatterns`: `!` re-includes previously excluded files
+ * - In `patterns`: `!` excludes previously included files
+ * - `\!pattern` escapes the ! to match literal ! in filenames
  *
  * @param options - Include and exclude patterns with optional cache configuration
  * @returns An IncludeChecker instance with cached decision making
@@ -284,13 +341,30 @@ function isExcludedByPrefixIndex(dir: string, index: DirectoryPrefixIndex): bool
  * ```
  *
  * @example
- * ```typescript
- * // With custom cache size
- * const checker = createIncludeChecker({
+ * // With negation patterns
+ * const checker2 = createIncludeChecker({
  *   patterns: ["**"],
- *   excludePatterns: ["node_modules/**"],
- *   cacheSize: 50000  // Larger cache for big projects
+ *   excludePatterns: [
+ *     "** /test/**",           // Exclude all test directories (space added for JSDoc)
+ *     "!** /test/fixtures/**"  // But re-include fixtures
+ *   ]
  * })
+ *
+ * checker2.shouldInclude("src/test/helper.ts")          // false (excluded)
+ * checker2.shouldInclude("src/test/fixtures/data.json") // true (re-included)
+ *
+ * @example
+ * ```typescript
+ * // Negation in include patterns
+ * const checker = createIncludeChecker({
+ *   patterns: [
+ *     "src/**",          // Include all of src
+ *     "!src/internal/**" // But exclude internal
+ *   ]
+ * })
+ *
+ * checker.shouldInclude("src/index.ts")          // true
+ * checker.shouldInclude("src/internal/secret.ts") // false
  * ```
  */
 export function createIncludeChecker(options: IncludeCheckerOptions): IncludeChecker {
@@ -301,16 +375,57 @@ export function createIncludeChecker(options: IncludeCheckerOptions): IncludeChe
     return createConeIncludeChecker(patterns, excludePatterns, cacheSize)
   }
 
-  // Pre-compile patterns for efficiency
-  const includeMatchers = patterns.map((p) => createMatcher(p))
-  const excludeMatchers = excludePatterns.map((p) => createMatcher(p))
+  // Parse patterns with negation support
+  const parsedIncludePatterns = patterns.map(parsePatternWithNegation)
+  const parsedExcludePatterns = excludePatterns.map(parsePatternWithNegation)
 
-  // Build directory prefix index for fast lookups
-  const prefixIndex = buildDirectoryPrefixIndex(patterns, excludePatterns)
+  // Extract non-negated patterns for the prefix index (optimization)
+  const nonNegatedIncludePatterns = parsedIncludePatterns
+    .filter((p) => !p.isNegated)
+    .map((p) => p.pattern)
+  const nonNegatedExcludePatterns = parsedExcludePatterns
+    .filter((p) => !p.isNegated)
+    .map((p) => p.pattern)
+
+  // Build directory prefix index for fast lookups (using non-negated patterns only)
+  const prefixIndex = buildDirectoryPrefixIndex(nonNegatedIncludePatterns, nonNegatedExcludePatterns)
 
   // LRU caches for decisions
   const includeCache = new LRUCache<boolean>(cacheSize)
   const traverseCache = new LRUCache<boolean>(cacheSize)
+
+  /**
+   * Evaluate a path against a list of patterns with negation support.
+   * Returns true if the path should be considered "matched" by this pattern set.
+   * For include patterns: true means included
+   * For exclude patterns: true means excluded
+   *
+   * Patterns are processed in order - later patterns override earlier ones.
+   *
+   * @internal
+   */
+  function evaluatePatterns(path: string, parsedPatterns: ParsedPatternInfo[]): boolean | null {
+    let result: boolean | null = null
+
+    for (const parsed of parsedPatterns) {
+      const matches = parsed.matcher(path)
+
+      if (parsed.isNegated) {
+        // Negation pattern: if path matches, negate the current result
+        // !pattern means: if this matches, UN-match it (re-include for excludes, exclude for includes)
+        if (matches) {
+          result = false // Negation "turns off" the match
+        }
+      } else {
+        // Regular pattern: if path matches, set result to true
+        if (matches) {
+          result = true
+        }
+      }
+    }
+
+    return result
+  }
 
   /**
    * Internal implementation of shouldInclude without caching
@@ -327,23 +442,24 @@ export function createIncludeChecker(options: IncludeCheckerOptions): IncludeChe
       return false
     }
 
-    // Fast path: check if any directory component is in excluded dirs
-    const pathParts = path.split('/')
-    for (const part of pathParts) {
-      if (prefixIndex.excludedDirs.has(part)) {
-        return false
-      }
-    }
+    // Check include patterns (with negation support)
+    const includeResult = evaluatePatterns(path, parsedIncludePatterns)
 
-    // Check if path matches any include pattern
-    const matchesInclude = includeMatchers.some((matcher) => matcher(path))
-    if (!matchesInclude) {
+    // If not matched by any include pattern, exclude
+    if (includeResult !== true) {
       return false
     }
 
-    // Check if path matches any exclude pattern (exclude takes priority)
-    const matchesExclude = excludeMatchers.some((matcher) => matcher(path))
-    if (matchesExclude) {
+    // If no exclude patterns, include
+    if (excludePatterns.length === 0) {
+      return true
+    }
+
+    // Check exclude patterns (with negation support)
+    const excludeResult = evaluatePatterns(path, parsedExcludePatterns)
+
+    // If matched by exclude patterns (and not negated), exclude
+    if (excludeResult === true) {
       return false
     }
 
@@ -360,27 +476,43 @@ export function createIncludeChecker(options: IncludeCheckerOptions): IncludeChe
       return false
     }
 
-    // Fast path: check prefix index for excluded directories
-    if (isExcludedByPrefixIndex(dir, prefixIndex)) {
-      return false
-    }
+    // For directories with negation patterns, we need to be more careful.
+    // We should traverse if there's any chance that files inside could be included.
 
-    // Check if directory matches any exclude pattern fully
-    // For patterns like **/node_modules/**, we should not traverse node_modules
-    for (const matcher of excludeMatchers) {
-      // Check if directory itself is excluded
-      if (matcher(dir) || matcher(dir + '/')) {
-        return false
-      }
-      // Check if any file inside would be excluded by directory-style exclusion
-      if (matcher(dir + '/anything')) {
-        // Only skip if the pattern is a full directory exclusion
-        const patternIndex = excludeMatchers.indexOf(matcher)
-        const originalPattern = excludePatterns[patternIndex]
-        if (isDirectoryExclusionPattern(originalPattern, dir)) {
-          return false
+    // Check exclude patterns - but if there are negation patterns that might
+    // re-include content under this directory, we should still traverse.
+    let definitelyExcluded = false
+    let mightBeReincluded = false
+
+    for (const parsed of parsedExcludePatterns) {
+      if (parsed.isNegated) {
+        // If the negation pattern could match anything in this directory,
+        // we might need to traverse to find those files
+        if (parsed.matcher(dir) || parsed.matcher(dir + '/') ||
+            parsed.matcher(dir + '/anything') ||
+            couldContainMatches(dir, parsed.pattern)) {
+          mightBeReincluded = true
+        }
+      } else {
+        // Non-negated exclude pattern
+        if (parsed.matcher(dir) || parsed.matcher(dir + '/')) {
+          definitelyExcluded = true
+        }
+        if (parsed.matcher(dir + '/anything')) {
+          if (isDirectoryExclusionPattern(parsed.original, dir)) {
+            definitelyExcluded = true
+          }
         }
       }
+    }
+
+    // If excluded but might be re-included, we need to traverse
+    if (definitelyExcluded && !mightBeReincluded) {
+      // Check prefix index for fast path only if no negation patterns
+      if (isExcludedByPrefixIndex(dir, prefixIndex) && !hasAnyNegationPatterns(parsedExcludePatterns)) {
+        return false
+      }
+      return false
     }
 
     // Fast path: if we have globstar patterns, traverse most directories
@@ -393,9 +525,13 @@ export function createIncludeChecker(options: IncludeCheckerOptions): IncludeChe
     // 1. The directory path is a prefix of an include pattern
     // 2. The include pattern could match files inside this directory
 
-    for (let i = 0; i < patterns.length; i++) {
-      const pattern = patterns[i]
-      const matcher = includeMatchers[i]
+    for (const parsed of parsedIncludePatterns) {
+      // Skip negation patterns for this check - they can't add new directories to traverse
+      if (parsed.isNegated) {
+        continue
+      }
+
+      const pattern = parsed.pattern
 
       // If pattern contains ** at the start or matches the directory, traverse
       if (pattern.startsWith('**') || pattern === '**') {
@@ -408,12 +544,19 @@ export function createIncludeChecker(options: IncludeCheckerOptions): IncludeChe
       }
 
       // Check if the directory itself matches (for patterns like 'src/**')
-      if (matcher(dir) || matcher(dir + '/')) {
+      if (parsed.matcher(dir) || parsed.matcher(dir + '/')) {
         return true
       }
     }
 
     return false
+  }
+
+  /**
+   * Check if any patterns in the list are negation patterns
+   */
+  function hasAnyNegationPatterns(patterns: ParsedPatternInfo[]): boolean {
+    return patterns.some(p => p.isNegated)
   }
 
   return {
