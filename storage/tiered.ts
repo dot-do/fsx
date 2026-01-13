@@ -11,6 +11,14 @@
  * - Tier promotion for frequently accessed files (configurable)
  * - Manual demotion for cost optimization
  * - Fallback behavior when tiers are unavailable
+ * - Access pattern tracking for smart tier placement
+ * - Telemetry/metrics hooks for monitoring
+ *
+ * Performance optimizations:
+ * - Cached threshold values to avoid repeated property access
+ * - Access pattern tracking with configurable window
+ * - LRU-style tier metadata cache with size limits
+ * - Optimized base64 encoding/decoding
  *
  * @example
  * ```typescript
@@ -40,7 +48,7 @@
  */
 
 import type { StorageTier } from '../core/index.js'
-import { StorageError } from './interfaces.js'
+import { StorageError, type StorageHooks, createOperationContext, createOperationResult } from './interfaces.js'
 
 /**
  * Configuration for TieredFS.
@@ -84,19 +92,37 @@ export interface TieredFSConfig {
    * - 'aggressive': Promote immediately on any access
    */
   promotionPolicy?: 'none' | 'on-access' | 'aggressive'
+
+  /**
+   * Optional instrumentation hooks for metrics/monitoring.
+   * @see StorageHooks
+   */
+  hooks?: StorageHooks
+
+  /**
+   * Maximum size of the tier metadata cache.
+   * Default: 10000 entries
+   */
+  maxCacheSize?: number
+
+  /**
+   * Enable access pattern tracking for smart tier placement.
+   * Default: true when promotionPolicy is 'on-access' or 'aggressive'
+   */
+  trackAccessPatterns?: boolean
 }
 
 /** Default configuration values */
-const DEFAULT_CONFIG: Required<Omit<TieredFSConfig, 'hot' | 'warm' | 'cold'>> = {
-  thresholds: {
-    hotMaxSize: 1024 * 1024, // 1MB
-    warmMaxSize: 100 * 1024 * 1024, // 100MB
-  },
-  promotionPolicy: 'on-access',
-}
+const DEFAULT_HOT_MAX_SIZE = 1024 * 1024 // 1MB
+const DEFAULT_WARM_MAX_SIZE = 100 * 1024 * 1024 // 100MB
+const DEFAULT_MAX_CACHE_SIZE = 10000
+
+/** Promotion thresholds for on-access policy */
+const PROMOTION_ACCESS_THRESHOLD = 3 // Require 3+ reads to consider promotion
+const PROMOTION_WINDOW_MS = 60 * 1000 // Track accesses within 1 minute window
 
 /**
- * Internal tier metadata for tracking file placement.
+ * Internal tier metadata for tracking file placement with access patterns.
  * @internal
  */
 interface TierMetadata {
@@ -104,6 +130,32 @@ interface TierMetadata {
   tier: StorageTier
   /** File size in bytes */
   size: number
+  /** Access count for promotion decisions */
+  accessCount: number
+  /** Timestamp of last access (Unix ms) */
+  lastAccess: number
+  /** Timestamps of recent accesses for pattern tracking */
+  recentAccesses: number[]
+}
+
+/**
+ * Metrics collected by TieredFS for monitoring.
+ */
+export interface TieredFSMetrics {
+  /** Total cache hits (tier metadata found in cache) */
+  cacheHits: number
+  /** Total cache misses (had to search tiers) */
+  cacheMisses: number
+  /** Count of reads per tier */
+  readsByTier: Record<StorageTier, number>
+  /** Count of writes per tier */
+  writesByTier: Record<StorageTier, number>
+  /** Count of promotions performed */
+  promotions: number
+  /** Count of demotions performed */
+  demotions: number
+  /** Average read latency in ms per tier */
+  avgReadLatencyMs: Record<StorageTier, number>
 }
 
 /**
@@ -142,14 +194,49 @@ export class TieredFS {
   /** R2 bucket for cold tier (optional) */
   private readonly cold?: R2Bucket
 
-  /** Merged configuration with defaults */
-  private readonly config: Required<Omit<TieredFSConfig, 'hot' | 'warm' | 'cold'>>
+  /** Cached hot tier threshold (avoid repeated property access) */
+  private readonly hotMaxSize: number
+
+  /** Cached warm tier threshold (avoid repeated property access) */
+  private readonly warmMaxSize: number
+
+  /** Promotion policy */
+  private readonly promotionPolicy: 'none' | 'on-access' | 'aggressive'
+
+  /** Optional instrumentation hooks */
+  private readonly hooks?: StorageHooks
+
+  /** Maximum cache size */
+  private readonly maxCacheSize: number
+
+  /** Whether to track access patterns */
+  private readonly trackAccessPatterns: boolean
 
   /**
-   * In-memory tier tracking cache.
+   * In-memory tier tracking cache with LRU eviction.
    * Supplements the DO storage for fast tier lookups without network calls.
    */
   private readonly tierMap: Map<string, TierMetadata> = new Map()
+
+  /**
+   * Metrics tracking for monitoring.
+   */
+  private readonly metrics: TieredFSMetrics = {
+    cacheHits: 0,
+    cacheMisses: 0,
+    readsByTier: { hot: 0, warm: 0, cold: 0 },
+    writesByTier: { hot: 0, warm: 0, cold: 0 },
+    promotions: 0,
+    demotions: 0,
+    avgReadLatencyMs: { hot: 0, warm: 0, cold: 0 },
+  }
+
+  /** Read latency samples for averaging */
+  private readonly readLatencySamples: Record<StorageTier, number[]> = {
+    hot: [],
+    warm: [],
+    cold: [],
+  }
 
   /**
    * Create a new TieredFS instance.
@@ -171,13 +258,50 @@ export class TieredFS {
     this.hotStub = config.hot.get(id)
     this.warm = config.warm
     this.cold = config.cold
-    this.config = {
-      thresholds: {
-        hotMaxSize: config.thresholds?.hotMaxSize ?? DEFAULT_CONFIG.thresholds.hotMaxSize,
-        warmMaxSize: config.thresholds?.warmMaxSize ?? DEFAULT_CONFIG.thresholds.warmMaxSize,
-      },
-      promotionPolicy: config.promotionPolicy ?? DEFAULT_CONFIG.promotionPolicy,
+
+    // Cache threshold values for fast access (optimization: avoid property chain traversal)
+    this.hotMaxSize = config.thresholds?.hotMaxSize ?? DEFAULT_HOT_MAX_SIZE
+    this.warmMaxSize = config.thresholds?.warmMaxSize ?? DEFAULT_WARM_MAX_SIZE
+    this.promotionPolicy = config.promotionPolicy ?? 'on-access'
+    this.hooks = config.hooks
+    this.maxCacheSize = config.maxCacheSize ?? DEFAULT_MAX_CACHE_SIZE
+    this.trackAccessPatterns = config.trackAccessPatterns ?? (this.promotionPolicy !== 'none')
+  }
+
+  /**
+   * Get current metrics snapshot.
+   *
+   * @returns Copy of current metrics
+   *
+   * @example
+   * ```typescript
+   * const metrics = fs.getMetrics()
+   * console.log(`Cache hit rate: ${metrics.cacheHits / (metrics.cacheHits + metrics.cacheMisses)}`)
+   * ```
+   */
+  getMetrics(): TieredFSMetrics {
+    return {
+      ...this.metrics,
+      readsByTier: { ...this.metrics.readsByTier },
+      writesByTier: { ...this.metrics.writesByTier },
+      avgReadLatencyMs: { ...this.metrics.avgReadLatencyMs },
     }
+  }
+
+  /**
+   * Reset metrics counters.
+   */
+  resetMetrics(): void {
+    this.metrics.cacheHits = 0
+    this.metrics.cacheMisses = 0
+    this.metrics.readsByTier = { hot: 0, warm: 0, cold: 0 }
+    this.metrics.writesByTier = { hot: 0, warm: 0, cold: 0 }
+    this.metrics.promotions = 0
+    this.metrics.demotions = 0
+    this.metrics.avgReadLatencyMs = { hot: 0, warm: 0, cold: 0 }
+    this.readLatencySamples.hot = []
+    this.readLatencySamples.warm = []
+    this.readLatencySamples.cold = []
   }
 
   /**
@@ -188,41 +312,148 @@ export class TieredFS {
    * 2. size <= warmMaxSize -> warm tier (or hot if warm unavailable)
    * 3. size > warmMaxSize -> cold tier (or warm/hot if unavailable)
    *
+   * Optimized to use cached threshold values for fast path.
+   *
    * @param size - File size in bytes
    * @returns Selected storage tier
    * @internal
    */
   private selectTier(size: number): StorageTier {
-    // Use nullish coalescing with literal defaults to satisfy TypeScript
-    // (defaults are always set in constructor, but Required<> doesn't apply to nested props)
-    const hotMax = this.config.thresholds.hotMaxSize ?? 1024 * 1024 // 1MB
-    const warmMax = this.config.thresholds.warmMaxSize ?? 100 * 1024 * 1024 // 100MB
-
-    // Check if fits in hot tier
-    if (size <= hotMax) {
+    // Fast path: use cached threshold values (no property chain traversal)
+    if (size <= this.hotMaxSize) {
       return 'hot'
     }
 
     // Check if fits in warm tier
-    if (size <= warmMax) {
+    if (size <= this.warmMaxSize) {
       // Warm tier available?
-      if (this.warm) {
-        return 'warm'
-      }
-      // Fall back to hot if no warm tier
-      return 'hot'
+      return this.warm ? 'warm' : 'hot'
     }
 
-    // Large file - goes to cold if available
+    // Large file - goes to cold if available, fall back to warm, then hot
     if (this.cold) {
       return 'cold'
     }
+    return this.warm ? 'warm' : 'hot'
+  }
 
-    // Fall back to warm if available, otherwise hot
-    if (this.warm) {
-      return 'warm'
+  /**
+   * Update tier metadata cache with LRU eviction.
+   *
+   * @param path - File path
+   * @param metadata - Tier metadata to cache
+   * @internal
+   */
+  private updateTierCache(path: string, metadata: Omit<TierMetadata, 'accessCount' | 'lastAccess' | 'recentAccesses'>): void {
+    const now = Date.now()
+    const existing = this.tierMap.get(path)
+
+    // Evict oldest entries if cache is full (simple LRU by deleting oldest)
+    if (!existing && this.tierMap.size >= this.maxCacheSize) {
+      // Find and delete the entry with oldest lastAccess
+      let oldestPath: string | null = null
+      let oldestTime = Infinity
+      for (const [p, m] of this.tierMap) {
+        if (m.lastAccess < oldestTime) {
+          oldestTime = m.lastAccess
+          oldestPath = p
+        }
+      }
+      if (oldestPath) {
+        this.tierMap.delete(oldestPath)
+      }
     }
-    return 'hot'
+
+    // Update or create entry
+    this.tierMap.set(path, {
+      tier: metadata.tier,
+      size: metadata.size,
+      accessCount: existing ? existing.accessCount : 0,
+      lastAccess: now,
+      recentAccesses: existing?.recentAccesses ?? [],
+    })
+  }
+
+  /**
+   * Record a read access for access pattern tracking.
+   *
+   * @param path - File path
+   * @internal
+   */
+  private recordAccess(path: string): void {
+    const metadata = this.tierMap.get(path)
+    if (!metadata) return
+
+    const now = Date.now()
+    metadata.accessCount++
+    metadata.lastAccess = now
+
+    // Track recent accesses for pattern analysis (keep last 10 in window)
+    if (this.trackAccessPatterns) {
+      const windowStart = now - PROMOTION_WINDOW_MS
+      metadata.recentAccesses = metadata.recentAccesses
+        .filter(t => t > windowStart)
+        .slice(-9)
+      metadata.recentAccesses.push(now)
+    }
+  }
+
+  /**
+   * Check if a file should be promoted based on access patterns.
+   *
+   * @param path - File path
+   * @param currentTier - Current storage tier
+   * @returns Whether promotion should occur
+   * @internal
+   */
+  private shouldAutoPromote(path: string, currentTier: StorageTier): boolean {
+    if (this.promotionPolicy === 'none') return false
+    if (currentTier === 'hot') return false // Already at highest tier
+
+    const metadata = this.tierMap.get(path)
+    if (!metadata) return false
+
+    // Check if file would fit in higher tier
+    const targetTier = currentTier === 'cold' ? 'warm' : 'hot'
+    if (targetTier === 'hot' && metadata.size > this.hotMaxSize) return false
+    if (targetTier === 'warm' && !this.warm) return false
+
+    // Aggressive policy: promote on any access
+    if (this.promotionPolicy === 'aggressive') {
+      return true
+    }
+
+    // On-access policy: check access patterns
+    if (this.promotionPolicy === 'on-access') {
+      const now = Date.now()
+      const windowStart = now - PROMOTION_WINDOW_MS
+      const recentCount = metadata.recentAccesses.filter(t => t > windowStart).length
+
+      // Promote if accessed enough times in the window
+      return recentCount >= PROMOTION_ACCESS_THRESHOLD
+    }
+
+    return false
+  }
+
+  /**
+   * Record read latency for metrics.
+   *
+   * @param tier - Storage tier
+   * @param latencyMs - Latency in milliseconds
+   * @internal
+   */
+  private recordReadLatency(tier: StorageTier, latencyMs: number): void {
+    const samples = this.readLatencySamples[tier]
+    samples.push(latencyMs)
+
+    // Keep only last 100 samples for averaging
+    if (samples.length > 100) {
+      samples.shift()
+    }
+
+    // Update average
+    this.metrics.avgReadLatencyMs[tier] = samples.reduce((a, b) => a + b, 0) / samples.length
   }
 
   /**
@@ -256,48 +487,65 @@ export class TieredFS {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
     const tier = this.selectTier(bytes.length)
 
-    if (tier === 'hot') {
-      // Ensure parent directories exist
-      await this.ensureParentDir(path)
-      // Write to Durable Object
-      await this.hotStub.fetch('http://fsx.do/rpc', {
-        method: 'POST',
-        body: JSON.stringify({
-          method: 'writeFile',
-          params: {
-            path,
-            data: this.encodeBase64(bytes),
-            encoding: 'base64',
-          },
-        }),
-      })
-    } else if (tier === 'warm' && this.warm) {
-      // Write to R2
-      await this.warm.put(path, bytes)
-      // Update metadata in hot tier
-      await this.hotStub.fetch('http://fsx.do/rpc', {
-        method: 'POST',
-        body: JSON.stringify({
-          method: 'setMetadata',
-          params: { path, tier: 'warm', size: bytes.length },
-        }),
-      })
-    } else if (tier === 'cold' && this.cold) {
-      // Write to archive
-      await this.cold.put(path, bytes)
-      await this.hotStub.fetch('http://fsx.do/rpc', {
-        method: 'POST',
-        body: JSON.stringify({
-          method: 'setMetadata',
-          params: { path, tier: 'cold', size: bytes.length },
-        }),
-      })
+    // Instrumentation: start operation
+    const ctx = createOperationContext('writeFile', path, { tier, size: bytes.length })
+    this.hooks?.onOperationStart?.(ctx)
+
+    try {
+      if (tier === 'hot') {
+        // Ensure parent directories exist
+        await this.ensureParentDir(path)
+        // Write to Durable Object
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'writeFile',
+            params: {
+              path,
+              data: this.encodeBase64(bytes),
+              encoding: 'base64',
+            },
+          }),
+        })
+      } else if (tier === 'warm' && this.warm) {
+        // Write to R2
+        await this.warm.put(path, bytes)
+        // Update metadata in hot tier
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'setMetadata',
+            params: { path, tier: 'warm', size: bytes.length },
+          }),
+        })
+      } else if (tier === 'cold' && this.cold) {
+        // Write to archive
+        await this.cold.put(path, bytes)
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'setMetadata',
+            params: { path, tier: 'cold', size: bytes.length },
+          }),
+        })
+      }
+
+      // Track tier in memory with optimized cache update
+      this.updateTierCache(path, { tier, size: bytes.length })
+
+      // Update metrics
+      this.metrics.writesByTier[tier]++
+
+      // Instrumentation: end operation
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: true, tier, size: bytes.length }))
+
+      return { tier }
+    } catch (error) {
+      // Instrumentation: end operation with error
+      const storageError = error instanceof StorageError ? error : StorageError.io(error as Error, path, 'writeFile')
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: false, error: storageError }))
+      throw error
     }
-
-    // Track tier in memory
-    this.tierMap.set(path, { tier, size: bytes.length })
-
-    return { tier }
   }
 
   /**
@@ -306,6 +554,11 @@ export class TieredFS {
    * First checks the in-memory tier cache for quick lookup, then
    * searches through available tiers (warm, cold, hot) to find the file.
    * Updates the tier cache when a file is found.
+   *
+   * Optimizations:
+   * - Cache hit tracking for monitoring cache effectiveness
+   * - Access pattern recording for smart promotion decisions
+   * - Latency tracking per tier for performance monitoring
    *
    * @param path - Absolute file path
    * @returns Object containing data and the tier it was read from
@@ -319,29 +572,73 @@ export class TieredFS {
    * ```
    */
   async readFile(path: string): Promise<{ data: Uint8Array; tier: StorageTier }> {
-    // Check our in-memory tier tracking first
-    const metadata = this.tierMap.get(path)
+    // Instrumentation: start operation
+    const ctx = createOperationContext('readFile', path)
+    this.hooks?.onOperationStart?.(ctx)
+    const startTime = Date.now()
 
-    // If we have metadata, read from the known tier
-    if (metadata) {
-      if (metadata.tier === 'hot') {
-        return this.readFromHot(path)
+    try {
+      // Check our in-memory tier tracking first (cache hit)
+      const metadata = this.tierMap.get(path)
+
+      let result: { data: Uint8Array; tier: StorageTier }
+
+      // If we have metadata, read from the known tier (cache hit path)
+      if (metadata) {
+        this.metrics.cacheHits++
+        if (metadata.tier === 'hot') {
+          result = await this.readFromHot(path)
+        } else if (metadata.tier === 'warm' && this.warm) {
+          result = await this.readFromWarm(path)
+        } else if (metadata.tier === 'cold' && this.cold) {
+          result = await this.readFromCold(path)
+        } else {
+          // Metadata exists but tier unavailable - search
+          result = await this.searchTiers(path)
+        }
+      } else {
+        // No metadata - search through tiers (cache miss path)
+        this.metrics.cacheMisses++
+        result = await this.searchTiers(path)
       }
-      if (metadata.tier === 'warm' && this.warm) {
-        return this.readFromWarm(path)
-      }
-      if (metadata.tier === 'cold' && this.cold) {
-        return this.readFromCold(path)
-      }
+
+      // Record latency and access pattern
+      const latencyMs = Date.now() - startTime
+      this.recordReadLatency(result.tier, latencyMs)
+      this.recordAccess(path)
+      this.metrics.readsByTier[result.tier]++
+
+      // Instrumentation: end operation
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, {
+        success: true,
+        tier: result.tier,
+        size: result.data.length,
+      }))
+
+      return result
+    } catch (error) {
+      // Instrumentation: end operation with error
+      const storageError = error instanceof StorageError ? error : StorageError.io(error as Error, path, 'readFile')
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: false, error: storageError }))
+      throw error
     }
+  }
 
-    // No metadata - search through tiers in order
+  /**
+   * Search through all tiers to find a file.
+   *
+   * @param path - File path
+   * @returns Data and tier
+   * @throws {StorageError} If file not found in any tier
+   * @internal
+   */
+  private async searchTiers(path: string): Promise<{ data: Uint8Array; tier: StorageTier }> {
     // Try warm first (for files put directly into warm bucket in tests)
     if (this.warm) {
       const warmObj = await this.warm.get(path)
       if (warmObj) {
         const data = new Uint8Array(await warmObj.arrayBuffer())
-        this.tierMap.set(path, { tier: 'warm', size: data.length })
+        this.updateTierCache(path, { tier: 'warm', size: data.length })
         return { data, tier: 'warm' }
       }
     }
@@ -351,14 +648,16 @@ export class TieredFS {
       const coldObj = await this.cold.get(path)
       if (coldObj) {
         const data = new Uint8Array(await coldObj.arrayBuffer())
-        this.tierMap.set(path, { tier: 'cold', size: data.length })
+        this.updateTierCache(path, { tier: 'cold', size: data.length })
         return { data, tier: 'cold' }
       }
     }
 
     // Try hot tier last (default)
     try {
-      return await this.readFromHot(path)
+      const result = await this.readFromHot(path)
+      this.updateTierCache(path, { tier: 'hot', size: result.data.length })
+      return result
     } catch {
       throw StorageError.notFound(path, 'readFile')
     }
@@ -465,7 +764,8 @@ export class TieredFS {
    * @param toTier - Target tier
    * @internal
    */
-  // @ts-expect-error Reserved for future tier promotion implementation
+  // Reserved for future tier promotion implementation
+  // @ts-expect-error Reserved for future tier promotion
   private async _promote(path: string, data: Uint8Array, _fromTier: string, toTier: 'hot' | 'warm'): Promise<void> {
     if (toTier === 'hot') {
       await this.hotStub.fetch('http://fsx.do/rpc', {
@@ -494,6 +794,94 @@ export class TieredFS {
         params: { path, tier: toTier, size: data.length },
       }),
     })
+  }
+
+  /**
+   * Promote a file to a higher (faster) tier.
+   *
+   * Moves a file from its current tier to a higher-performance tier.
+   * The file is copied to the target tier and removed from the source tier.
+   *
+   * The process:
+   * 1. Read file from current tier
+   * 2. Write to target tier
+   * 3. Delete from source tier
+   * 4. Update metadata
+   *
+   * @param path - File path to promote
+   * @param toTier - Target tier ('hot' or 'warm')
+   * @throws {StorageError} If target tier is not available or file not found
+   *
+   * @example
+   * ```typescript
+   * // Promote frequently accessed file to hot tier
+   * await fs.promote('/data/active.json', 'hot')
+   *
+   * // Promote from cold to warm
+   * await fs.promote('/archive/recent.bin', 'warm')
+   * ```
+   */
+  async promote(path: string, toTier: 'hot' | 'warm'): Promise<void> {
+    // Instrumentation: start operation
+    const ctx = createOperationContext('promote', path, { tier: toTier })
+    this.hooks?.onOperationStart?.(ctx)
+
+    try {
+      // Read file from current tier
+      const { data, tier: currentTier } = await this.readFile(path)
+
+      // Write to target tier
+      if (toTier === 'hot') {
+        await this.ensureParentDir(path)
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'writeFile',
+            params: {
+              path,
+              data: this.encodeBase64(data),
+              encoding: 'base64',
+            },
+          }),
+        })
+      } else if (toTier === 'warm' && this.warm) {
+        await this.warm.put(path, data)
+      }
+
+      // Delete from source tier
+      if (currentTier === 'cold' && this.cold) {
+        await this.cold.delete(path)
+      } else if (currentTier === 'warm' && this.warm) {
+        await this.warm.delete(path)
+      }
+
+      // Update in-memory tier tracking
+      this.updateTierCache(path, { tier: toTier, size: data.length })
+
+      // Update metadata in DO
+      await this.hotStub.fetch('http://fsx.do/rpc', {
+        method: 'POST',
+        body: JSON.stringify({
+          method: 'setMetadata',
+          params: { path, tier: toTier, size: data.length },
+        }),
+      })
+
+      // Update metrics
+      this.metrics.promotions++
+
+      // Instrumentation: notify tier migration
+      this.hooks?.onTierMigration?.(path, currentTier, toTier)
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, {
+        success: true,
+        tier: toTier,
+        migrated: true,
+      }))
+    } catch (error) {
+      const storageError = error instanceof StorageError ? error : StorageError.io(error as Error, path, 'promote')
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: false, error: storageError }))
+      throw error
+    }
   }
 
   /**
@@ -530,40 +918,268 @@ export class TieredFS {
       throw StorageError.invalidArg('Cold tier not available', path, 'demote')
     }
 
-    // Read the file from its current tier
-    const { data, tier: currentTier } = await this.readFile(path)
+    // Instrumentation: start operation
+    const ctx = createOperationContext('demote', path, { tier: toTier })
+    this.hooks?.onOperationStart?.(ctx)
 
-    // Demote to warm tier
-    if (toTier === 'warm' && this.warm) {
-      if (currentTier === 'hot') {
-        // Write to warm
-        await this.warm.put(path, data)
-        // Delete from hot tier
+    try {
+      // Read the file from its current tier
+      const { data, tier: currentTier } = await this.readFile(path)
+
+      // Demote to warm tier
+      if (toTier === 'warm' && this.warm) {
+        if (currentTier === 'hot') {
+          // Write to warm
+          await this.warm.put(path, data)
+          // Delete from hot tier
+          await this.hotStub.fetch('http://fsx.do/rpc', {
+            method: 'POST',
+            body: JSON.stringify({
+              method: 'unlink',
+              params: { path },
+            }),
+          })
+        }
+        // Update metadata
+        this.updateTierCache(path, { tier: 'warm', size: data.length })
         await this.hotStub.fetch('http://fsx.do/rpc', {
           method: 'POST',
           body: JSON.stringify({
-            method: 'unlink',
-            params: { path },
+            method: 'setMetadata',
+            params: { path, tier: 'warm', size: data.length },
           }),
         })
       }
-      // Update metadata
-      this.tierMap.set(path, { tier: 'warm', size: data.length })
+
+      // Demote to cold tier
+      if (toTier === 'cold' && this.cold) {
+        // Write to cold
+        await this.cold.put(path, data)
+
+        // Delete from current tier
+        if (currentTier === 'hot') {
+          await this.hotStub.fetch('http://fsx.do/rpc', {
+            method: 'POST',
+            body: JSON.stringify({
+              method: 'unlink',
+              params: { path },
+            }),
+          })
+        } else if (currentTier === 'warm' && this.warm) {
+          await this.warm.delete(path)
+        }
+
+        // Update metadata
+        this.updateTierCache(path, { tier: 'cold', size: data.length })
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'setMetadata',
+            params: { path, tier: 'cold', size: data.length },
+          }),
+        })
+      }
+
+      // Update metrics
+      this.metrics.demotions++
+
+      // Instrumentation: notify tier migration
+      this.hooks?.onTierMigration?.(path, currentTier, toTier)
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, {
+        success: true,
+        tier: toTier,
+        migrated: true,
+      }))
+    } catch (error) {
+      const storageError = error instanceof StorageError ? error : StorageError.io(error as Error, path, 'demote')
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: false, error: storageError }))
+      throw error
+    }
+  }
+
+  /**
+   * Move a file to a new path.
+   *
+   * Reads the file, writes it to the new location, and deletes the original.
+   * The file remains in the same tier unless tier selection changes due to size.
+   *
+   * @param sourcePath - Original file path
+   * @param destPath - New file path
+   * @throws {StorageError} If source file is not found
+   *
+   * @example
+   * ```typescript
+   * await fs.move('/old/path/file.txt', '/new/path/file.txt')
+   * ```
+   */
+  async move(sourcePath: string, destPath: string): Promise<void> {
+    // Instrumentation: start operation
+    const ctx = createOperationContext('move', sourcePath)
+    this.hooks?.onOperationStart?.(ctx)
+
+    try {
+      // Read file from current tier
+      const { data, tier } = await this.readFile(sourcePath)
+
+      // Write to destination in the same tier
+      if (tier === 'hot') {
+        await this.ensureParentDir(destPath)
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'writeFile',
+            params: {
+              path: destPath,
+              data: this.encodeBase64(data),
+              encoding: 'base64',
+            },
+          }),
+        })
+      } else if (tier === 'warm' && this.warm) {
+        await this.warm.put(destPath, data)
+      } else if (tier === 'cold' && this.cold) {
+        await this.cold.put(destPath, data)
+      }
+
+      // Update metadata for destination
+      this.updateTierCache(destPath, { tier, size: data.length })
       await this.hotStub.fetch('http://fsx.do/rpc', {
         method: 'POST',
         body: JSON.stringify({
           method: 'setMetadata',
-          params: { path, tier: 'warm', size: data.length },
+          params: { path: destPath, tier, size: data.length },
         }),
       })
+
+      // Delete source file
+      await this.deleteFile(sourcePath)
+
+      // Instrumentation: end operation
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: true, tier }))
+    } catch (error) {
+      const storageError = error instanceof StorageError ? error : StorageError.io(error as Error, sourcePath, 'move')
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: false, error: storageError }))
+      throw error
     }
+  }
 
-    // Demote to cold tier
-    if (toTier === 'cold' && this.cold) {
-      // Write to cold
-      await this.cold.put(path, data)
+  /**
+   * Copy a file to a new path.
+   *
+   * Creates a copy of the file at the destination path.
+   * Optionally can copy to a different tier.
+   *
+   * @param sourcePath - Original file path
+   * @param destPath - Destination file path
+   * @param options - Copy options (optional tier override)
+   * @throws {StorageError} If source file is not found
+   *
+   * @example
+   * ```typescript
+   * // Copy within same tier
+   * await fs.copy('/data/file.txt', '/backup/file.txt')
+   *
+   * // Copy to different tier
+   * await fs.copy('/hot/file.txt', '/archive/file.txt', { tier: 'cold' })
+   * ```
+   */
+  async copy(sourcePath: string, destPath: string, options?: { tier?: StorageTier }): Promise<void> {
+    // Instrumentation: start operation
+    const ctx = createOperationContext('copy', sourcePath)
+    this.hooks?.onOperationStart?.(ctx)
 
-      // Delete from current tier
+    try {
+      // Read file from current tier
+      const { data, tier: sourceTier } = await this.readFile(sourcePath)
+
+      // Determine target tier
+      const targetTier = options?.tier ?? sourceTier
+
+      // Write to destination in the target tier
+      if (targetTier === 'hot') {
+        await this.ensureParentDir(destPath)
+        await this.hotStub.fetch('http://fsx.do/rpc', {
+          method: 'POST',
+          body: JSON.stringify({
+            method: 'writeFile',
+            params: {
+              path: destPath,
+              data: this.encodeBase64(data),
+              encoding: 'base64',
+            },
+          }),
+        })
+      } else if (targetTier === 'warm' && this.warm) {
+        await this.warm.put(destPath, data)
+      } else if (targetTier === 'cold' && this.cold) {
+        await this.cold.put(destPath, data)
+      }
+
+      // Update metadata for destination
+      this.updateTierCache(destPath, { tier: targetTier, size: data.length })
+      await this.hotStub.fetch('http://fsx.do/rpc', {
+        method: 'POST',
+        body: JSON.stringify({
+          method: 'setMetadata',
+          params: { path: destPath, tier: targetTier, size: data.length },
+        }),
+      })
+
+      // Instrumentation: end operation
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: true, tier: targetTier }))
+    } catch (error) {
+      const storageError = error instanceof StorageError ? error : StorageError.io(error as Error, sourcePath, 'copy')
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: false, error: storageError }))
+      throw error
+    }
+  }
+
+  /**
+   * Delete a file from any tier.
+   *
+   * Removes the file from its current storage tier and cleans up metadata.
+   *
+   * @param path - File path to delete
+   * @throws {StorageError} If file is not found
+   *
+   * @example
+   * ```typescript
+   * await fs.deleteFile('/old/data.bin')
+   * ```
+   */
+  async deleteFile(path: string): Promise<void> {
+    // Instrumentation: start operation
+    const ctx = createOperationContext('deleteFile', path)
+    this.hooks?.onOperationStart?.(ctx)
+
+    try {
+      // Get current tier from cache or search
+      const metadata = this.tierMap.get(path)
+      let currentTier: StorageTier | undefined = metadata?.tier
+
+      // If no metadata, try to determine tier by searching
+      if (!currentTier) {
+        // Check warm
+        if (this.warm) {
+          const warmObj = await this.warm.head(path)
+          if (warmObj) {
+            currentTier = 'warm'
+          }
+        }
+        // Check cold
+        if (!currentTier && this.cold) {
+          const coldObj = await this.cold.head(path)
+          if (coldObj) {
+            currentTier = 'cold'
+          }
+        }
+        // Assume hot if not found elsewhere
+        if (!currentTier) {
+          currentTier = 'hot'
+        }
+      }
+
+      // Delete from the current tier
       if (currentTier === 'hot') {
         await this.hotStub.fetch('http://fsx.do/rpc', {
           method: 'POST',
@@ -574,17 +1190,26 @@ export class TieredFS {
         })
       } else if (currentTier === 'warm' && this.warm) {
         await this.warm.delete(path)
+      } else if (currentTier === 'cold' && this.cold) {
+        await this.cold.delete(path)
       }
 
-      // Update metadata
-      this.tierMap.set(path, { tier: 'cold', size: data.length })
+      // Clean up metadata cache
+      this.tierMap.delete(path)
       await this.hotStub.fetch('http://fsx.do/rpc', {
         method: 'POST',
         body: JSON.stringify({
-          method: 'setMetadata',
-          params: { path, tier: 'cold', size: data.length },
+          method: 'deleteMetadata',
+          params: { path },
         }),
       })
+
+      // Instrumentation: end operation
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: true, tier: currentTier }))
+    } catch (error) {
+      const storageError = error instanceof StorageError ? error : StorageError.io(error as Error, path, 'deleteFile')
+      this.hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: false, error: storageError }))
+      throw error
     }
   }
 

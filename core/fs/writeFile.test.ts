@@ -514,6 +514,28 @@ describe('writeFile', () => {
       expect(result).toBeDefined()
       expect(result?.content).toEqual(new TextEncoder().encode('content'))
     })
+
+    it('should fail with flag "ax" if file exists', async () => {
+      const mockStorage = createMockStorage()
+      const path = '/test/exclusiveappend.txt'
+
+      await writeFile(mockStorage, path, 'first')
+
+      // ax flag means exclusive append - should fail if file exists
+      await expect(writeFile(mockStorage, path, 'second', { flag: 'ax' }))
+        .rejects.toThrow()
+    })
+
+    it('should create file with flag "ax" if file does not exist', async () => {
+      const mockStorage = createMockStorage()
+      const path = '/test/newexclusiveappend.txt'
+
+      await writeFile(mockStorage, path, 'content', { flag: 'ax' })
+
+      const result = mockStorage.getFile(path)
+      expect(result).toBeDefined()
+      expect(result?.content).toEqual(new TextEncoder().encode('content'))
+    })
   })
 
   describe('path handling', () => {

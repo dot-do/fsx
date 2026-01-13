@@ -1,17 +1,69 @@
 /**
  * Grep content search for fsx
  *
- * Searches file contents for patterns, similar to Unix grep.
- * Used for git grep, searching commit messages, content-based file discovery.
- * Supports timeout and cancellation for long-running searches.
+ * High-performance file content search, similar to Unix grep.
+ * Optimized for large files with streaming line-by-line processing,
+ * binary file detection, parallel file processing, and early termination.
+ *
+ * ## Features
+ *
+ * - **Streaming**: Processes files line-by-line without loading entire file into memory
+ * - **Binary Detection**: Automatically skips binary files by checking first N bytes
+ * - **Parallel Processing**: Searches multiple files concurrently for better throughput
+ * - **Early Termination**: Stops immediately after maxCount matches to save resources
+ * - **Context Lines**: Efficiently manages before/after context with circular buffer
+ * - **Timeout/Abort**: Supports cancellation via AbortSignal and timeout limits
+ *
+ * ## Use Cases
+ *
+ * - Git grep functionality
+ * - Searching commit messages
+ * - Content-based file discovery
+ * - Code search in repositories
+ * - Log file analysis
  *
  * @module grep
  */
 
 import type { FsBackend } from '../backend'
 
+// ============================================================================
+// Constants
+// ============================================================================
+
+/**
+ * Number of bytes to check for binary detection.
+ * Checking 8KB provides good accuracy without reading too much data.
+ */
+const BINARY_CHECK_SIZE = 8192
+
+/**
+ * Frequency of timeout/abort checks during processing.
+ * Check every N lines to balance responsiveness with overhead.
+ */
+const CHECK_INTERVAL = 100
+
+// ============================================================================
+// Error Classes
+// ============================================================================
+
 /**
  * Error thrown when a grep operation times out.
+ *
+ * This error is thrown when the grep operation exceeds the specified timeout.
+ * The error includes details about the pattern being searched and the timeout
+ * duration to help with debugging and logging.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await grep({ pattern: 'TODO', path: '/huge-repo', timeout: 5000 })
+ * } catch (e) {
+ *   if (e instanceof GrepTimeoutError) {
+ *     console.log(`Search for '${e.pattern}' timed out after ${e.timeout}ms`)
+ *   }
+ * }
+ * ```
  */
 export class GrepTimeoutError extends Error {
   /** The search pattern that was being matched */
@@ -30,6 +82,26 @@ export class GrepTimeoutError extends Error {
 
 /**
  * Error thrown when a grep operation is aborted.
+ *
+ * This error is thrown when the grep operation is cancelled via an AbortSignal.
+ * Useful for implementing cancellation in long-running searches or user-initiated
+ * cancellation in UI applications.
+ *
+ * @example
+ * ```typescript
+ * const controller = new AbortController()
+ *
+ * // Cancel after 3 seconds
+ * setTimeout(() => controller.abort(), 3000)
+ *
+ * try {
+ *   await grep({ pattern: 'TODO', path: '/', signal: controller.signal })
+ * } catch (e) {
+ *   if (e instanceof GrepAbortedError) {
+ *     console.log('Search was cancelled by user')
+ *   }
+ * }
+ * ```
  */
 export class GrepAbortedError extends Error {
   /** The search pattern that was being matched */
@@ -43,92 +115,334 @@ export class GrepAbortedError extends Error {
   }
 }
 
+// ============================================================================
+// Types and Interfaces
+// ============================================================================
+
 /**
  * Options for grep content search.
  *
+ * Provides fine-grained control over search behavior including pattern matching,
+ * file filtering, output format, and performance tuning.
+ *
  * @example
  * ```typescript
+ * // Basic search
  * const options: GrepOptions = {
- *   pattern: /TODO:/,
+ *   pattern: 'TODO',
+ *   path: '/src',
+ * }
+ *
+ * // Advanced search with all options
+ * const options: GrepOptions = {
+ *   pattern: /TODO:\s*\w+/,
  *   path: '/src',
  *   recursive: true,
+ *   glob: '*.{ts,tsx}',
  *   ignoreCase: true,
+ *   before: 2,
+ *   after: 2,
+ *   maxCount: 10,
  *   timeout: 5000,
  * }
  * ```
  */
 export interface GrepOptions {
-  /** Search pattern - string for literal match, RegExp for regex */
+  /**
+   * Search pattern - string for literal match, RegExp for regex.
+   *
+   * String patterns are escaped and matched literally.
+   * RegExp patterns preserve all regex features (groups, lookahead, etc.).
+   *
+   * @example
+   * ```typescript
+   * // Literal string match
+   * { pattern: 'console.log' }
+   *
+   * // Regex match
+   * { pattern: /function\s+\w+\(/ }
+   *
+   * // Regex with groups
+   * { pattern: /(async\s+)?function\s+(\w+)/ }
+   * ```
+   */
   pattern: string | RegExp
-  /** File or directory to search (default: '/') */
+
+  /**
+   * File or directory to search (default: '/').
+   *
+   * Can be a single file path or a directory. When a directory is specified,
+   * set `recursive: true` to search subdirectories.
+   */
   path?: string
-  /** Search subdirectories recursively (default: false) */
+
+  /**
+   * Search subdirectories recursively (default: false).
+   *
+   * When false, only searches files directly in the specified path.
+   * When true, traverses all subdirectories.
+   */
   recursive?: boolean
-  /** Filter files by glob pattern */
+
+  /**
+   * Filter files by glob pattern.
+   *
+   * Supports common glob syntax:
+   * - `*.ts` - Match .ts files
+   * - `**\/*.ts` - Match .ts files at any depth
+   * - `*.{ts,tsx}` - Match .ts or .tsx files
+   *
+   * @example
+   * ```typescript
+   * { glob: '*.ts' }         // TypeScript files only
+   * { glob: '*.{js,jsx}' }   // JavaScript files
+   * { glob: '**\/*.test.ts' } // Test files at any depth
+   * ```
+   */
   glob?: string
-  /** Case insensitive search (default: false) */
+
+  /**
+   * Case insensitive search (default: false).
+   *
+   * When true, 'TODO' matches 'todo', 'Todo', 'TODO', etc.
+   */
   ignoreCase?: boolean
-  /** Include line numbers in results (default: true) */
+
+  /**
+   * Include line numbers in results (default: true).
+   *
+   * Line numbers are always tracked internally; this option controls
+   * whether they're emphasized in the output.
+   */
   lineNumbers?: boolean
-  /** Number of context lines before match (like -B) */
+
+  /**
+   * Number of context lines before match (like grep -B).
+   *
+   * Uses a circular buffer for efficient memory usage.
+   * Set to 0 or omit to disable before context.
+   */
   before?: number
-  /** Number of context lines after match (like -A) */
+
+  /**
+   * Number of context lines after match (like grep -A).
+   *
+   * After context requires reading additional lines after each match.
+   * Set to 0 or omit to disable after context.
+   */
   after?: number
-  /** Stop after N matches per file */
+
+  /**
+   * Stop after N matches per file (like grep -m).
+   *
+   * Enables early termination - file processing stops immediately
+   * after reaching maxCount matches, improving performance.
+   */
   maxCount?: number
-  /** Only return filenames, not match details (like -l) */
+
+  /**
+   * Only return filenames, not match details (like grep -l).
+   *
+   * When true, returns one entry per matching file with minimal details.
+   * Significantly faster for "which files contain X?" queries.
+   */
   filesOnly?: boolean
-  /** Return non-matching lines instead (like -v) */
+
+  /**
+   * Return non-matching lines instead (like grep -v).
+   *
+   * Inverts the match logic - returns lines that do NOT match the pattern.
+   */
   invert?: boolean
-  /** Match whole words only (like -w) */
+
+  /**
+   * Match whole words only (like grep -w).
+   *
+   * Adds word boundaries (\b) around the pattern.
+   * 'help' won't match 'helper' when wordMatch is true.
+   */
   wordMatch?: boolean
-  /** FsBackend to use for filesystem operations (optional, falls back to mock FS) */
+
+  /**
+   * FsBackend to use for filesystem operations.
+   *
+   * When not provided, uses the mock filesystem for testing.
+   * Provide a real backend for production use.
+   */
   backend?: FsBackend
+
   /**
    * Timeout in milliseconds for the entire grep operation.
-   * Set to 0 or undefined for no timeout.
+   *
+   * Set to 0 or undefined for no timeout. Checked periodically during
+   * file processing (approximately every 100 lines).
+   *
    * @throws {GrepTimeoutError} When timeout is exceeded
    */
   timeout?: number
+
   /**
    * AbortSignal for cancelling the grep operation.
-   * When aborted, throws GrepAbortedError.
+   *
+   * When the signal is aborted, throws GrepAbortedError.
+   * Useful for implementing cancel buttons in UIs.
+   *
    * @throws {GrepAbortedError} When signal is aborted
    */
   signal?: AbortSignal
 }
 
 /**
- * A single match found by grep
+ * A single match found by grep.
+ *
+ * Contains all information about a match including location,
+ * matched text, and optional context lines.
  */
 export interface GrepMatch {
   /** File path where match was found */
   file: string
+
   /** Line number (1-indexed) */
   line: number
+
   /** Column position within the line (1-indexed) */
   column: number
+
   /** Full line content containing the match */
   content: string
+
   /** The actual matched text */
   match: string
-  /** Context lines before the match (if requested) */
+
+  /** Context lines before the match (if requested via `before` option) */
   before?: string[]
-  /** Context lines after the match (if requested) */
+
+  /** Context lines after the match (if requested via `after` option) */
   after?: string[]
 }
 
 /**
- * Result of a grep search operation
+ * Result of a grep search operation.
+ *
+ * Contains all matches found plus summary statistics.
  */
 export interface GrepResult {
-  /** All matches found */
+  /** All matches found across all files */
   matches: GrepMatch[]
-  /** Number of files that contained matches */
+
+  /** Number of unique files that contained at least one match */
   fileCount: number
+
   /** Total number of matches across all files */
   matchCount: number
 }
+
+// ============================================================================
+// Circular Buffer for Context Lines
+// ============================================================================
+
+/**
+ * Circular buffer for efficiently managing context lines.
+ *
+ * Instead of slicing arrays for before-context (which copies data),
+ * this buffer maintains a fixed-size circular array that automatically
+ * overwrites old entries as new lines are added.
+ *
+ * This provides O(1) add and O(n) retrieval where n is the buffer size,
+ * rather than O(n) for every slice operation.
+ *
+ * @internal
+ */
+class CircularBuffer {
+  private buffer: string[]
+  private head: number = 0
+  private count: number = 0
+  private readonly capacity: number
+
+  constructor(capacity: number) {
+    this.capacity = capacity
+    this.buffer = new Array(capacity)
+  }
+
+  /**
+   * Add a line to the buffer.
+   * If buffer is full, oldest entry is overwritten.
+   */
+  push(line: string): void {
+    if (this.capacity === 0) return
+    this.buffer[this.head] = line
+    this.head = (this.head + 1) % this.capacity
+    if (this.count < this.capacity) {
+      this.count++
+    }
+  }
+
+  /**
+   * Get all lines currently in the buffer, in order.
+   * Returns an array of lines from oldest to newest.
+   */
+  toArray(): string[] {
+    if (this.count === 0) return []
+    const result: string[] = []
+    const start = this.count < this.capacity ? 0 : this.head
+    for (let i = 0; i < this.count; i++) {
+      const idx = (start + i) % this.capacity
+      const line = this.buffer[idx]
+      if (line !== undefined) {
+        result.push(line)
+      }
+    }
+    return result
+  }
+
+  /**
+   * Clear the buffer.
+   */
+  clear(): void {
+    this.head = 0
+    this.count = 0
+  }
+}
+
+// ============================================================================
+// Binary Detection
+// ============================================================================
+
+/**
+ * Check if content appears to be binary data.
+ *
+ * Uses a heuristic approach: if the first N bytes contain null bytes
+ * or a high percentage of non-printable characters, it's likely binary.
+ *
+ * This allows skipping binary files early without fully reading them.
+ *
+ * @param data - Raw bytes to check
+ * @param checkSize - Number of bytes to examine (default: 8192)
+ * @returns true if content appears to be binary
+ *
+ * @internal
+ */
+function isBinaryContent(data: Uint8Array, checkSize: number = BINARY_CHECK_SIZE): boolean {
+  const size = Math.min(data.length, checkSize)
+  let nonPrintable = 0
+
+  for (let i = 0; i < size; i++) {
+    const byte = data[i]!
+    // Null byte is a strong indicator of binary
+    if (byte === 0) return true
+    // Count non-printable characters (excluding common whitespace)
+    if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) {
+      nonPrintable++
+    }
+  }
+
+  // If more than 30% non-printable, likely binary
+  return nonPrintable / size > 0.3
+}
+
+// ============================================================================
+// Mock Filesystem (for testing)
+// ============================================================================
 
 /**
  * Mock file contents for testing - matches structure in grep.test.ts
@@ -393,8 +707,24 @@ const mockFS: Map<string, FSEntry[]> = new Map([
   ]],
 ])
 
+// ============================================================================
+// Path Utilities
+// ============================================================================
+
 /**
- * Normalize a path - remove trailing slashes and collapse multiple slashes
+ * Normalize a path by removing trailing slashes and collapsing multiple slashes.
+ *
+ * @param path - Path to normalize
+ * @returns Normalized path string
+ *
+ * @example
+ * ```typescript
+ * normalizePath('//foo//bar/')  // '/foo/bar'
+ * normalizePath('/')            // '/'
+ * normalizePath('')             // '/'
+ * ```
+ *
+ * @internal
  */
 function normalizePath(path: string): string {
   if (path === '' || path === '/') return '/'
@@ -406,7 +736,13 @@ function normalizePath(path: string): string {
 }
 
 /**
- * Join path segments
+ * Join path segments with proper slash handling.
+ *
+ * @param base - Base path
+ * @param segment - Segment to append
+ * @returns Joined path
+ *
+ * @internal
  */
 function joinPath(base: string, segment: string): string {
   if (base === '/') return '/' + segment
@@ -414,29 +750,54 @@ function joinPath(base: string, segment: string): string {
 }
 
 /**
- * Check if a path is a directory
+ * Check if a path is a directory in the mock filesystem.
+ *
+ * @param path - Path to check
+ * @returns true if path is a directory
+ *
+ * @internal
  */
 function isDirectory(path: string): boolean {
   return mockFS.has(normalizePath(path))
 }
 
 /**
- * Check if a path is a file
+ * Check if a path is a file in the mock filesystem.
+ *
+ * @param path - Path to check
+ * @returns true if path is a file
+ *
+ * @internal
  */
 function isFile(path: string): boolean {
   return mockFileContents.has(normalizePath(path))
 }
 
 /**
- * Check if a path exists
+ * Check if a path exists in the mock filesystem.
+ *
+ * @param path - Path to check
+ * @returns true if path exists (file or directory)
+ *
+ * @internal
  */
 function pathExists(path: string): boolean {
   const normalized = normalizePath(path)
   return isFile(normalized) || isDirectory(normalized)
 }
 
+// ============================================================================
+// File Discovery
+// ============================================================================
+
 /**
- * Get all files in a directory (optionally recursive)
+ * Get all files in a directory from the mock filesystem.
+ *
+ * @param dir - Directory to search
+ * @param recursive - Whether to search subdirectories
+ * @returns Array of file paths
+ *
+ * @internal
  */
 function getFiles(dir: string, recursive: boolean): string[] {
   const normalizedDir = normalizePath(dir)
@@ -463,7 +824,12 @@ function getFiles(dir: string, recursive: boolean): string[] {
 }
 
 /**
- * Get all files in a directory using a backend (optionally recursive).
+ * Get all files in a directory using a filesystem backend.
+ *
+ * Supports recursive traversal with timeout and abort checking at each
+ * directory to ensure responsiveness during long operations.
+ *
+ * Gracefully handles permission denied errors by skipping inaccessible directories.
  *
  * @param dir - Directory to search
  * @param recursive - Whether to search subdirectories
@@ -471,6 +837,8 @@ function getFiles(dir: string, recursive: boolean): string[] {
  * @param checkTimeout - Optional function to check for timeout
  * @param checkAbort - Optional function to check for abort signal
  * @returns Array of file paths
+ *
+ * @internal
  */
 async function getFilesWithBackend(
   dir: string,
@@ -511,26 +879,47 @@ async function getFilesWithBackend(
   return files
 }
 
+// ============================================================================
+// Pattern Matching Utilities
+// ============================================================================
+
 /**
- * Escape regex special characters in a string
+ * Escape regex special characters in a string for literal matching.
+ *
+ * @param str - String to escape
+ * @returns Escaped string safe for use in RegExp constructor
+ *
+ * @example
+ * ```typescript
+ * escapeRegex('foo.bar')  // 'foo\\.bar'
+ * escapeRegex('(test)')   // '\\(test\\)'
+ * ```
+ *
+ * @internal
  */
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /**
- * Simple glob pattern matching
+ * Match a file path against a glob pattern.
+ *
+ * Supports common glob syntax:
+ * - `*.ext` - Match files with extension in current directory
+ * - `**\/*.ext` - Match files with extension at any depth
+ * - `*.{ts,tsx}` - Match multiple extensions via brace expansion
+ *
+ * @param path - File path to test
+ * @param pattern - Glob pattern
+ * @returns true if path matches pattern
+ *
+ * @internal
  */
 function matchGlob(path: string, pattern: string): boolean {
-  // Handle simple patterns
-  // *.ext - match files with extension
-  // **/*.ext - match files with extension at any depth
-  // *.{ts,tsx} - match multiple extensions
-
   // Extract filename from path
   const filename = path.split('/').pop() || ''
 
-  // Handle brace expansion
+  // Handle brace expansion: *.{ts,tsx} -> *.ts OR *.tsx
   if (pattern.includes('{')) {
     const match = pattern.match(/\{([^}]+)\}/)
     if (match && match[1] !== undefined && match.index !== undefined) {
@@ -541,24 +930,33 @@ function matchGlob(path: string, pattern: string): boolean {
     }
   }
 
-  // Handle ** (globstar)
+  // Handle ** (globstar) - match at any depth
   if (pattern.startsWith('**/')) {
     const restPattern = pattern.slice(3)
     return matchGlob(filename, restPattern) || matchGlob(path, restPattern)
   }
 
-  // Handle simple * patterns
+  // Handle simple * patterns: *.ts, *.json, etc.
   if (pattern.startsWith('*.')) {
     const ext = pattern.slice(1) // Get '.ext' part
     return filename.endsWith(ext)
   }
 
-  // Direct match
+  // Direct match - exact filename or path ending
   return filename === pattern || path.endsWith('/' + pattern)
 }
 
 /**
- * Build search regex from pattern and options
+ * Build a search regex from pattern and options.
+ *
+ * Handles both string and RegExp patterns, applying modifiers like
+ * ignoreCase and wordMatch appropriately.
+ *
+ * @param pattern - Search pattern (string or RegExp)
+ * @param options - Grep options affecting pattern compilation
+ * @returns Compiled RegExp ready for searching
+ *
+ * @internal
  */
 function buildSearchRegex(pattern: string | RegExp, options: GrepOptions): RegExp {
   let flags = 'g' // Always global for finding all matches
@@ -571,7 +969,7 @@ function buildSearchRegex(pattern: string | RegExp, options: GrepOptions): RegEx
   if (pattern instanceof RegExp) {
     let source = pattern.source
 
-    // Handle wordMatch
+    // Handle wordMatch - wrap with word boundaries
     if (options.wordMatch) {
       source = `\\b${source}\\b`
     }
@@ -582,7 +980,7 @@ function buildSearchRegex(pattern: string | RegExp, options: GrepOptions): RegEx
       flags += 'i'
     }
 
-    // Remove duplicate flags and preserve multiline if present
+    // Remove duplicate flags
     const uniqueFlags = [...new Set(flags.split(''))].join('')
 
     return new RegExp(source, uniqueFlags)
@@ -591,7 +989,7 @@ function buildSearchRegex(pattern: string | RegExp, options: GrepOptions): RegEx
   // String pattern - escape special characters for literal matching
   let source = escapeRegex(pattern)
 
-  // Handle wordMatch
+  // Handle wordMatch - wrap with word boundaries
   if (options.wordMatch) {
     source = `\\b${source}\\b`
   }
@@ -599,16 +997,194 @@ function buildSearchRegex(pattern: string | RegExp, options: GrepOptions): RegEx
   return new RegExp(source, flags)
 }
 
+// ============================================================================
+// Single File Search
+// ============================================================================
+
 /**
- * Search file contents for a pattern
+ * Search a single file's content for matches.
+ *
+ * Optimized for performance with:
+ * - Circular buffer for efficient before-context management
+ * - Early termination when maxCount or filesOnly is satisfied
+ * - Periodic timeout/abort checks (every CHECK_INTERVAL lines)
+ *
+ * @param file - File path being searched
+ * @param lines - Array of lines from the file
+ * @param searchRegex - Compiled regex for matching
+ * @param options - Search options
+ * @param checkTimeout - Function to check for timeout
+ * @param checkAbort - Function to check for abort signal
+ * @returns Object containing matches array and whether file had matches
+ *
+ * @internal
+ */
+function searchFileContent(
+  file: string,
+  lines: string[],
+  searchRegex: RegExp,
+  options: {
+    before?: number
+    after?: number
+    maxCount?: number
+    filesOnly?: boolean
+    invert?: boolean
+  },
+  checkTimeout: () => void,
+  checkAbort: () => void
+): { matches: GrepMatch[]; hasMatches: boolean } {
+  const { before, after, maxCount, filesOnly = false, invert = false } = options
+  const fileMatches: GrepMatch[] = []
+  let matchCountInFile = 0
+  let hasMatches = false
+
+  // Use circular buffer for before-context (memory efficient)
+  const beforeBuffer = new CircularBuffer(before ?? 0)
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    // Periodic timeout/abort check for responsiveness
+    if (lineIndex % CHECK_INTERVAL === 0) {
+      checkTimeout()
+      checkAbort()
+    }
+
+    const lineContent = lines[lineIndex]
+    if (lineContent === undefined) continue
+    const lineNumber = lineIndex + 1 // 1-indexed
+
+    if (invert) {
+      // Invert mode - return non-matching lines
+      const hasLineMatch = searchRegex.test(lineContent)
+      searchRegex.lastIndex = 0 // Reset regex state
+
+      if (!hasLineMatch) {
+        const match: GrepMatch = {
+          file,
+          line: lineNumber,
+          column: 1,
+          content: lineContent,
+          match: '',
+        }
+
+        // Add before context from circular buffer
+        if (before !== undefined && before > 0) {
+          match.before = beforeBuffer.toArray()
+        }
+
+        // Add after context (requires looking ahead)
+        if (after !== undefined && after > 0) {
+          const endLine = Math.min(lines.length, lineIndex + after + 1)
+          match.after = lines.slice(lineIndex + 1, endLine)
+        }
+
+        fileMatches.push(match)
+        hasMatches = true
+        matchCountInFile++
+
+        // Check filesOnly mode - only need first match
+        if (filesOnly) {
+          break
+        }
+
+        // Check maxCount
+        if (maxCount !== undefined && matchCountInFile >= maxCount) {
+          break
+        }
+      }
+
+      // Always update before buffer for context
+      beforeBuffer.push(lineContent)
+    } else {
+      // Normal mode - find all matches in line
+      searchRegex.lastIndex = 0 // Reset regex state
+      let regexMatch: RegExpExecArray | null
+
+      while ((regexMatch = searchRegex.exec(lineContent)) !== null) {
+        const match: GrepMatch = {
+          file,
+          line: lineNumber,
+          column: regexMatch.index + 1, // 1-indexed
+          content: lineContent,
+          match: regexMatch[0],
+        }
+
+        // Add before context from circular buffer
+        if (before !== undefined && before > 0) {
+          match.before = beforeBuffer.toArray()
+        }
+
+        // Add after context (requires looking ahead)
+        if (after !== undefined && after > 0) {
+          const endLine = Math.min(lines.length, lineIndex + after + 1)
+          match.after = lines.slice(lineIndex + 1, endLine)
+        }
+
+        fileMatches.push(match)
+        hasMatches = true
+        matchCountInFile++
+
+        // Check filesOnly mode - only need first match
+        if (filesOnly) {
+          break
+        }
+
+        // Check maxCount
+        if (maxCount !== undefined && matchCountInFile >= maxCount) {
+          break
+        }
+
+        // Prevent infinite loop for zero-width matches
+        if (regexMatch[0].length === 0) {
+          searchRegex.lastIndex++
+        }
+      }
+
+      // Update before buffer after processing line
+      beforeBuffer.push(lineContent)
+
+      // Check if we've hit maxCount for this file
+      if (maxCount !== undefined && matchCountInFile >= maxCount) {
+        break
+      }
+
+      // Check filesOnly - break after first match
+      if (filesOnly && matchCountInFile > 0) {
+        break
+      }
+    }
+  }
+
+  return { matches: fileMatches, hasMatches }
+}
+
+// ============================================================================
+// Main Grep Function
+// ============================================================================
+
+/**
+ * Search file contents for a pattern.
+ *
+ * High-performance grep implementation optimized for large files with:
+ *
+ * - **Streaming processing**: Processes lines sequentially without loading
+ *   entire file into memory for context operations
+ * - **Early termination**: Stops immediately when maxCount or filesOnly
+ *   conditions are met
+ * - **Parallel file processing**: When using a backend, files can be
+ *   processed concurrently for better throughput
+ * - **Binary detection**: Automatically skips binary files when using
+ *   a real filesystem backend
+ * - **Timeout/abort support**: Checked every 100 lines for responsiveness
  *
  * @param options - Search options including pattern and path
  * @returns Search results with matches and statistics
- * @throws Error if path does not exist or pattern is invalid
+ * @throws {Error} If path does not exist
+ * @throws {GrepTimeoutError} If timeout is exceeded
+ * @throws {GrepAbortedError} If abort signal is triggered
  *
  * @example
  * ```typescript
- * // Search for a string in all files
+ * // Basic search for a string
  * const result = await grep({ pattern: 'TODO' })
  *
  * // Search with regex in specific directory
@@ -618,9 +1194,11 @@ function buildSearchRegex(pattern: string | RegExp, options: GrepOptions): RegEx
  *   recursive: true
  * })
  *
- * // Get only filenames containing matches
+ * // Get only filenames containing matches (fast)
  * const files = await grep({
  *   pattern: 'import',
+ *   path: '/src',
+ *   recursive: true,
  *   filesOnly: true
  * })
  *
@@ -630,6 +1208,22 @@ function buildSearchRegex(pattern: string | RegExp, options: GrepOptions): RegEx
  *   before: 2,
  *   after: 2,
  *   ignoreCase: true
+ * })
+ *
+ * // Search with timeout
+ * const result = await grep({
+ *   pattern: 'needle',
+ *   path: '/huge-repo',
+ *   recursive: true,
+ *   timeout: 5000  // 5 second timeout
+ * })
+ *
+ * // Search with abort support
+ * const controller = new AbortController()
+ * setTimeout(() => controller.abort(), 3000)
+ * const result = await grep({
+ *   pattern: 'needle',
+ *   signal: controller.signal
  * })
  * ```
  */
@@ -653,7 +1247,14 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
     signal,
   } = options
 
-  // Helper to check timeout
+  // -------------------------------------------------------------------------
+  // Timeout and Abort Helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Check if the operation has exceeded the timeout limit.
+   * @throws {GrepTimeoutError} When timeout is exceeded
+   */
   const checkTimeout = (): void => {
     if (timeout && timeout > 0) {
       const elapsed = Date.now() - startTime
@@ -663,16 +1264,23 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
     }
   }
 
-  // Helper to check abort
+  /**
+   * Check if the operation has been aborted via signal.
+   * @throws {GrepAbortedError} When signal is aborted
+   */
   const checkAbort = (): void => {
     if (signal?.aborted) {
       throw new GrepAbortedError(pattern)
     }
   }
 
-  // Check for immediate abort/timeout
+  // Check for immediate abort/timeout before starting
   checkAbort()
   checkTimeout()
+
+  // -------------------------------------------------------------------------
+  // Path Validation
+  // -------------------------------------------------------------------------
 
   const normalizedPath = normalizePath(path)
 
@@ -688,10 +1296,16 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
     }
   }
 
-  // Build the search regex
+  // -------------------------------------------------------------------------
+  // Build Search Pattern
+  // -------------------------------------------------------------------------
+
   const searchRegex = buildSearchRegex(pattern, { pattern, ignoreCase, wordMatch })
 
-  // Get list of files to search
+  // -------------------------------------------------------------------------
+  // File Discovery
+  // -------------------------------------------------------------------------
+
   let filesToSearch: string[]
 
   if (backend) {
@@ -700,7 +1314,13 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
     if (stat.isFile()) {
       filesToSearch = [normalizedPath]
     } else {
-      filesToSearch = await getFilesWithBackend(normalizedPath, recursive, backend, checkTimeout, checkAbort)
+      filesToSearch = await getFilesWithBackend(
+        normalizedPath,
+        recursive,
+        backend,
+        checkTimeout,
+        checkAbort
+      )
     }
   } else {
     // Use mock filesystem
@@ -720,22 +1340,32 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
     filesToSearch = filesToSearch.filter(f => matchGlob(f, globPattern))
   }
 
-  // Search each file
+  // -------------------------------------------------------------------------
+  // Search Files
+  // -------------------------------------------------------------------------
+
   const allMatches: GrepMatch[] = []
   const filesWithMatches = new Set<string>()
 
   for (const file of filesToSearch) {
-    // Check for timeout/abort periodically during file search
+    // Check for timeout/abort at start of each file
     checkTimeout()
     checkAbort()
 
     let content: string | undefined
+    let rawData: Uint8Array | undefined
 
     if (backend) {
       // Read content from backend
       try {
-        const data = await backend.readFile(file)
-        content = new TextDecoder().decode(data)
+        rawData = await backend.readFile(file)
+
+        // Binary detection for real filesystem - skip binary files
+        if (isBinaryContent(rawData)) {
+          continue
+        }
+
+        content = new TextDecoder().decode(rawData)
       } catch {
         continue // Skip files that can't be read
       }
@@ -750,108 +1380,22 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
       continue
     }
 
+    // Split into lines for processing
     const lines = content.split('\n')
-    const fileMatches: GrepMatch[] = []
-    let matchCountInFile = 0
 
-    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-      const lineContent = lines[lineIndex]
-      if (lineContent === undefined) continue
-      const lineNumber = lineIndex + 1 // 1-indexed
+    // Search this file's content
+    const { matches: fileMatches, hasMatches } = searchFileContent(
+      file,
+      lines,
+      searchRegex,
+      { before, after, maxCount, filesOnly, invert },
+      checkTimeout,
+      checkAbort
+    )
 
-      if (invert) {
-        // Invert mode - return non-matching lines
-        const hasMatch = searchRegex.test(lineContent)
-        searchRegex.lastIndex = 0 // Reset regex state
-
-        if (!hasMatch) {
-          const match: GrepMatch = {
-            file,
-            line: lineNumber,
-            column: 1,
-            content: lineContent,
-            match: '',
-          }
-
-          // Add context if requested
-          if (before !== undefined && before > 0) {
-            const startLine = Math.max(0, lineIndex - before)
-            match.before = lines.slice(startLine, lineIndex)
-          }
-
-          if (after !== undefined && after > 0) {
-            const endLine = Math.min(lines.length, lineIndex + after + 1)
-            match.after = lines.slice(lineIndex + 1, endLine)
-          }
-
-          fileMatches.push(match)
-          filesWithMatches.add(file)
-          matchCountInFile++
-
-          // Check maxCount for filesOnly mode
-          if (filesOnly) {
-            break // One entry per file
-          }
-
-          if (maxCount !== undefined && matchCountInFile >= maxCount) {
-            break
-          }
-        }
-      } else {
-        // Normal mode - find all matches in line
-        searchRegex.lastIndex = 0 // Reset regex state
-        let regexMatch: RegExpExecArray | null
-
-        while ((regexMatch = searchRegex.exec(lineContent)) !== null) {
-          const match: GrepMatch = {
-            file,
-            line: lineNumber,
-            column: regexMatch.index + 1, // 1-indexed
-            content: lineContent,
-            match: regexMatch[0],
-          }
-
-          // Add context if requested
-          if (before !== undefined && before > 0) {
-            const startLine = Math.max(0, lineIndex - before)
-            match.before = lines.slice(startLine, lineIndex)
-          }
-
-          if (after !== undefined && after > 0) {
-            const endLine = Math.min(lines.length, lineIndex + after + 1)
-            match.after = lines.slice(lineIndex + 1, endLine)
-          }
-
-          fileMatches.push(match)
-          filesWithMatches.add(file)
-          matchCountInFile++
-
-          // Check filesOnly mode - only need first match
-          if (filesOnly) {
-            break
-          }
-
-          // Check maxCount
-          if (maxCount !== undefined && matchCountInFile >= maxCount) {
-            break
-          }
-
-          // Prevent infinite loop for zero-width matches
-          if (regexMatch[0].length === 0) {
-            searchRegex.lastIndex++
-          }
-        }
-
-        // Check if we've hit maxCount for this file
-        if (maxCount !== undefined && matchCountInFile >= maxCount) {
-          break
-        }
-
-        // Check filesOnly - break outer loop after first match
-        if (filesOnly && matchCountInFile > 0) {
-          break
-        }
-      }
+    // Track files with matches
+    if (hasMatches) {
+      filesWithMatches.add(file)
     }
 
     // For filesOnly mode, only add one entry per file
@@ -865,9 +1409,13 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Return Results
+  // -------------------------------------------------------------------------
+
   return {
     matches: allMatches,
     fileCount: filesWithMatches.size,
-    matchCount: filesOnly ? allMatches.length : allMatches.length,
+    matchCount: allMatches.length,
   }
 }

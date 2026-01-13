@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest'
-import { compress, decompress } from './compression'
+import {
+  compress,
+  decompress,
+  compressWithMetrics,
+  isZlibCompressed,
+  CompressionError,
+  DEFAULT_COMPRESSION_OPTIONS,
+  type CompressionLevel,
+  type CompressionOptions,
+} from './compression'
 
 describe('Zlib Compression', () => {
   describe('compress', () => {
@@ -403,6 +412,292 @@ describe('Zlib Compression', () => {
       corrupted[middle] ^= 0xff
 
       await expect(decompress(corrupted)).rejects.toThrow()
+    })
+  })
+
+  describe('configurable compression levels', () => {
+    it('should use default compression level 6', async () => {
+      expect(DEFAULT_COMPRESSION_OPTIONS.level).toBe(6)
+    })
+
+    it('should accept level 0 (no compression)', async () => {
+      const data = new TextEncoder().encode('hello world')
+      const compressed = await compress(data, { level: 0 })
+      expect(compressed).toBeInstanceOf(Uint8Array)
+      // Level 0 stores uncompressed - should be larger or similar
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+
+    it('should accept level 1 (fastest)', async () => {
+      const data = new TextEncoder().encode('hello world'.repeat(100))
+      const compressed = await compress(data, { level: 1 })
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+
+    it('should accept level 9 (best compression)', async () => {
+      const data = new TextEncoder().encode('hello world'.repeat(100))
+      const compressed = await compress(data, { level: 9 })
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+
+    it('should produce smaller output with higher compression levels for compressible data', async () => {
+      const data = new TextEncoder().encode('The quick brown fox jumps over the lazy dog. '.repeat(100))
+
+      const compressed1 = await compress(data, { level: 1 })
+      const compressed9 = await compress(data, { level: 9 })
+
+      // Level 9 should produce smaller output than level 1
+      expect(compressed9.length).toBeLessThanOrEqual(compressed1.length)
+    })
+
+    it('should produce valid output for all compression levels', async () => {
+      const data = new TextEncoder().encode('test data for compression levels')
+
+      for (let level = 0; level <= 9; level++) {
+        const compressed = await compress(data, { level: level as CompressionLevel })
+        const decompressed = await decompress(compressed)
+        expect(decompressed).toEqual(data)
+      }
+    })
+  })
+
+  describe('compression strategies', () => {
+    it('should use default strategy by default', async () => {
+      expect(DEFAULT_COMPRESSION_OPTIONS.strategy).toBe('default')
+    })
+
+    it('should accept filtered strategy', async () => {
+      const data = new Uint8Array(1000)
+      // Filtered data pattern
+      for (let i = 0; i < 1000; i++) {
+        data[i] = i % 256
+      }
+      const compressed = await compress(data, { strategy: 'filtered' })
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+
+    it('should accept huffmanOnly strategy', async () => {
+      const data = new TextEncoder().encode('hello world'.repeat(50))
+      const compressed = await compress(data, { strategy: 'huffmanOnly' })
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+
+    it('should accept rle strategy', async () => {
+      // RLE works best with runs of same bytes
+      const data = new Uint8Array(1000)
+      for (let i = 0; i < 1000; i++) {
+        data[i] = Math.floor(i / 100) % 256
+      }
+      const compressed = await compress(data, { strategy: 'rle' })
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+
+    it('should accept fixed strategy', async () => {
+      const data = new TextEncoder().encode('fixed huffman test data')
+      const compressed = await compress(data, { strategy: 'fixed' })
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+  })
+
+  describe('memory level options', () => {
+    it('should use default memory level 8', async () => {
+      expect(DEFAULT_COMPRESSION_OPTIONS.memLevel).toBe(8)
+    })
+
+    it('should accept memory level 1 (minimum)', async () => {
+      const data = new TextEncoder().encode('test data')
+      const compressed = await compress(data, { memLevel: 1 })
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+
+    it('should accept memory level 9 (maximum)', async () => {
+      const data = new TextEncoder().encode('test data')
+      const compressed = await compress(data, { memLevel: 9 })
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
+    })
+  })
+
+  describe('compressWithMetrics', () => {
+    it('should return compression metrics', async () => {
+      const data = new TextEncoder().encode('hello world')
+      const result = await compressWithMetrics(data)
+
+      expect(result.data).toBeInstanceOf(Uint8Array)
+      expect(result.originalSize).toBe(data.length)
+      expect(result.compressedSize).toBe(result.data.length)
+      expect(result.ratio).toBeCloseTo(result.compressedSize / result.originalSize, 5)
+      expect(typeof result.expanded).toBe('boolean')
+    })
+
+    it('should detect data expansion for small data', async () => {
+      // Very small data often expands due to zlib header overhead
+      const data = new Uint8Array([1, 2, 3])
+      const result = await compressWithMetrics(data)
+
+      // The compressed size includes 2-byte header and 4-byte checksum minimum
+      // So 3 bytes of data will expand
+      expect(result.expanded).toBe(true)
+      expect(result.ratio).toBeGreaterThan(1)
+    })
+
+    it('should show good compression ratio for highly compressible data', async () => {
+      const data = new TextEncoder().encode('AAAAAAAAAA'.repeat(1000))
+      const result = await compressWithMetrics(data)
+
+      expect(result.expanded).toBe(false)
+      expect(result.ratio).toBeLessThan(0.1) // Should achieve >90% compression
+    })
+
+    it('should handle empty data', async () => {
+      const data = new Uint8Array([])
+      const result = await compressWithMetrics(data)
+
+      expect(result.originalSize).toBe(0)
+      expect(result.ratio).toBe(1) // 0/0 defaults to 1
+    })
+
+    it('should accept compression options', async () => {
+      const data = new TextEncoder().encode('test data'.repeat(100))
+      const result = await compressWithMetrics(data, { level: 9 })
+
+      expect(result.data).toBeInstanceOf(Uint8Array)
+      expect(result.expanded).toBe(false)
+    })
+  })
+
+  describe('isZlibCompressed', () => {
+    it('should return true for zlib-compressed data', async () => {
+      const data = new TextEncoder().encode('hello world')
+      const compressed = await compress(data)
+
+      expect(isZlibCompressed(compressed)).toBe(true)
+    })
+
+    it('should return false for empty data', () => {
+      expect(isZlibCompressed(new Uint8Array([]))).toBe(false)
+    })
+
+    it('should return false for single byte', () => {
+      expect(isZlibCompressed(new Uint8Array([0x78]))).toBe(false)
+    })
+
+    it('should return false for random data', () => {
+      const randomData = new Uint8Array([0x00, 0x01, 0x02, 0x03])
+      expect(isZlibCompressed(randomData)).toBe(false)
+    })
+
+    it('should return false for gzip data', () => {
+      // Gzip header starts with 0x1f 0x8b
+      const gzipLikeData = new Uint8Array([0x1f, 0x8b, 0x08, 0x00])
+      expect(isZlibCompressed(gzipLikeData)).toBe(false)
+    })
+
+    it('should return true for various valid zlib headers', async () => {
+      // Different compression levels produce different FLG bytes
+      const data = new TextEncoder().encode('test data for various levels')
+
+      for (const level of [0, 1, 6, 9] as CompressionLevel[]) {
+        const compressed = await compress(data, { level })
+        expect(isZlibCompressed(compressed)).toBe(true)
+      }
+    })
+  })
+
+  describe('CompressionError', () => {
+    it('should have name CompressionError', async () => {
+      try {
+        await decompress(new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
+      } catch (error) {
+        expect(error).toBeInstanceOf(CompressionError)
+        expect((error as CompressionError).name).toBe('CompressionError')
+      }
+    })
+
+    it('should have error code for invalid header', async () => {
+      try {
+        await decompress(new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
+      } catch (error) {
+        expect((error as CompressionError).code).toBe('INVALID_ZLIB_HEADER')
+      }
+    })
+
+    it('should have error code for truncated data', async () => {
+      try {
+        await decompress(new Uint8Array([0x78, 0x9c])) // Valid header but too short
+      } catch (error) {
+        expect((error as CompressionError).code).toBe('TRUNCATED_DATA')
+      }
+    })
+
+    it('should have error code for empty data', async () => {
+      try {
+        await decompress(new Uint8Array([]))
+      } catch (error) {
+        expect((error as CompressionError).code).toBe('TRUNCATED_DATA')
+      }
+    })
+
+    it('should include descriptive message for invalid header', async () => {
+      try {
+        await decompress(new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
+      } catch (error) {
+        expect((error as CompressionError).message).toContain('Invalid zlib header')
+        expect((error as CompressionError).message).toContain('CMF')
+      }
+    })
+  })
+
+  describe('uncompressible data handling', () => {
+    it('should handle already-compressed data (PNG-like)', async () => {
+      // Simulate already-compressed binary data
+      const compressedOnce = await compress(new TextEncoder().encode('hello world'.repeat(100)))
+
+      // Compressing again should still work
+      const compressedTwice = await compress(compressedOnce)
+      expect(compressedTwice).toBeInstanceOf(Uint8Array)
+
+      // And should decompress correctly
+      const decompressedOnce = await decompress(compressedTwice)
+      expect(decompressedOnce).toEqual(compressedOnce)
+    })
+
+    it('should handle random/high-entropy data', async () => {
+      // Create deterministic high-entropy data
+      const data = new Uint8Array(1000)
+      let seed = 12345
+      for (let i = 0; i < 1000; i++) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff
+        data[i] = seed % 256
+      }
+
+      const result = await compressWithMetrics(data)
+
+      // High-entropy data may expand slightly
+      expect(result.data).toBeInstanceOf(Uint8Array)
+
+      // Should still decompress correctly
+      const decompressed = await decompress(result.data)
+      expect(decompressed).toEqual(data)
+    })
+
+    it('should handle binary data with all byte values', async () => {
+      const data = new Uint8Array(256)
+      for (let i = 0; i < 256; i++) {
+        data[i] = i
+      }
+
+      const compressed = await compress(data)
+      const decompressed = await decompress(compressed)
+      expect(decompressed).toEqual(data)
     })
   })
 })

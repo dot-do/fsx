@@ -23,6 +23,168 @@ import type {
 import type { FsBackend, BackendWriteResult, FileHandle } from './backend.js'
 import { constants } from './constants.js'
 
+const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND } = constants
+
+// =============================================================================
+// Flag Parsing Types and Utilities
+// =============================================================================
+
+/**
+ * Access mode for file operations.
+ * Determines what operations are permitted on a file handle.
+ */
+type AccessMode = 'read' | 'write' | 'readwrite'
+
+/**
+ * Parsed file open flags.
+ * Contains all the information needed to open a file correctly.
+ */
+interface ParsedFlags {
+  /** Access mode: read, write, or readwrite */
+  accessMode: AccessMode
+  /** Create file if it doesn't exist */
+  create: boolean
+  /** Fail if file already exists (with create) */
+  exclusive: boolean
+  /** Truncate file to zero length on open */
+  truncate: boolean
+  /** Append all writes to end of file */
+  append: boolean
+  /** Synchronous I/O mode (not implemented, for compatibility) */
+  sync: boolean
+}
+
+/**
+ * Parses POSIX file open flags into a structured format.
+ *
+ * Supports both string flags ('r', 'w+', 'ax', etc.) and numeric flags
+ * (O_RDONLY, O_WRONLY | O_CREAT, etc.).
+ *
+ * @example String flags:
+ * - 'r'  : Read-only, file must exist
+ * - 'r+' : Read/write, file must exist
+ * - 'w'  : Write-only, create/truncate
+ * - 'w+' : Read/write, create/truncate
+ * - 'a'  : Append-only, create if needed
+ * - 'a+' : Append/read, create if needed
+ * - 'x'  : Exclusive flag (combine with w/a)
+ * - 's'  : Synchronous flag (combine with any)
+ *
+ * @param flags - String or numeric flags
+ * @returns Parsed flag object
+ * @throws Error with EINVAL if flags are invalid
+ */
+function parseFlags(flags: string | number | undefined): ParsedFlags {
+  // Default to read-only
+  if (flags === undefined || flags === 'r') {
+    return {
+      accessMode: 'read',
+      create: false,
+      exclusive: false,
+      truncate: false,
+      append: false,
+      sync: false,
+    }
+  }
+
+  // Handle numeric flags
+  if (typeof flags === 'number' || /^\d+$/.test(flags as string)) {
+    const numFlags = typeof flags === 'number' ? flags : parseInt(flags as string, 10)
+    return parseNumericFlags(numFlags)
+  }
+
+  // Handle string flags
+  return parseStringFlags(flags as string)
+}
+
+/**
+ * Parses numeric POSIX flags (O_RDONLY, O_WRONLY, etc.).
+ *
+ * @param flags - Numeric flags (can be combined with |)
+ * @returns Parsed flag object
+ */
+function parseNumericFlags(flags: number): ParsedFlags {
+  // Extract access mode from lowest 2 bits
+  const accessBits = flags & 3 // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+
+  let accessMode: AccessMode
+  switch (accessBits) {
+    case O_RDONLY:
+      accessMode = 'read'
+      break
+    case O_WRONLY:
+      accessMode = 'write'
+      break
+    case O_RDWR:
+      accessMode = 'readwrite'
+      break
+    default:
+      accessMode = 'read'
+  }
+
+  return {
+    accessMode,
+    create: (flags & O_CREAT) !== 0,
+    exclusive: (flags & O_EXCL) !== 0,
+    truncate: (flags & O_TRUNC) !== 0,
+    append: (flags & O_APPEND) !== 0,
+    sync: (flags & constants.O_SYNC) !== 0,
+  }
+}
+
+/**
+ * Parses string flags ('r', 'w+', 'ax', etc.).
+ *
+ * Valid base flags:
+ * - 'r'  : Open for reading (file must exist)
+ * - 'r+' : Open for reading and writing (file must exist)
+ * - 'w'  : Open for writing (create/truncate)
+ * - 'w+' : Open for reading and writing (create/truncate)
+ * - 'a'  : Open for appending (create if needed)
+ * - 'a+' : Open for reading and appending (create if needed)
+ *
+ * Modifiers (can appear in any order):
+ * - 'x'  : Exclusive - fail if file exists
+ * - 's'  : Synchronous mode
+ *
+ * @param flags - String flags
+ * @returns Parsed flag object
+ * @throws Error with EINVAL if flags are invalid
+ */
+function parseStringFlags(flags: string): ParsedFlags {
+  // Normalize: remove 's' (sync) and sort remaining
+  const hasSync = flags.includes('s')
+  const hasExclusive = flags.includes('x')
+  const baseFlags = flags.replace(/[sx]/g, '')
+
+  // Valid base flag patterns
+  const validPatterns: Record<string, Omit<ParsedFlags, 'sync' | 'exclusive'>> = {
+    r: { accessMode: 'read', create: false, truncate: false, append: false },
+    'r+': { accessMode: 'readwrite', create: false, truncate: false, append: false },
+    '+r': { accessMode: 'readwrite', create: false, truncate: false, append: false },
+    rs: { accessMode: 'read', create: false, truncate: false, append: false },
+    'rs+': { accessMode: 'readwrite', create: false, truncate: false, append: false },
+    'sr+': { accessMode: 'readwrite', create: false, truncate: false, append: false },
+    w: { accessMode: 'write', create: true, truncate: true, append: false },
+    'w+': { accessMode: 'readwrite', create: true, truncate: true, append: false },
+    '+w': { accessMode: 'readwrite', create: true, truncate: true, append: false },
+    a: { accessMode: 'write', create: true, truncate: false, append: true },
+    'a+': { accessMode: 'readwrite', create: true, truncate: false, append: true },
+    '+a': { accessMode: 'readwrite', create: true, truncate: false, append: true },
+  }
+
+  const pattern = validPatterns[baseFlags]
+  if (!pattern) {
+    throw new Error(`EINVAL: invalid flags: ${flags}`)
+  }
+
+  return {
+    ...pattern,
+    exclusive: hasExclusive,
+    sync: hasSync,
+  }
+}
+
 // =============================================================================
 // MockBackend Implementation
 // =============================================================================
@@ -760,43 +922,120 @@ export class MockBackend implements FsBackend {
   // File Handle
   // ===========================================================================
 
+  /**
+   * Open a file and return a file handle for low-level operations.
+   *
+   * This method implements POSIX-compatible file opening semantics:
+   *
+   * **String Flags:**
+   * - `'r'`  : Open for reading. File must exist. (default)
+   * - `'r+'` : Open for reading and writing. File must exist.
+   * - `'w'`  : Open for writing. Creates file or truncates to zero.
+   * - `'w+'` : Open for reading and writing. Creates or truncates.
+   * - `'a'`  : Open for appending. Creates file if needed.
+   * - `'a+'` : Open for reading and appending. Creates if needed.
+   * - `'x'`  : Exclusive flag. Combine with w/a to fail if file exists.
+   * - `'s'`  : Synchronous mode. Combine with any flag.
+   *
+   * **Numeric Flags:**
+   * - `O_RDONLY` (0): Read-only access
+   * - `O_WRONLY` (1): Write-only access
+   * - `O_RDWR` (2): Read/write access
+   * - `O_CREAT` (64): Create file if it doesn't exist
+   * - `O_EXCL` (128): With O_CREAT, fail if file exists
+   * - `O_TRUNC` (512): Truncate file to zero length
+   * - `O_APPEND` (1024): Append mode - writes go to end
+   *
+   * @param path - Absolute path to the file
+   * @param flags - Open flags (string or numeric), defaults to 'r'
+   * @param mode - File mode for newly created files (default 0o644)
+   * @returns FileHandle for the opened file
+   *
+   * @throws ENOENT - File does not exist (for read modes without create)
+   * @throws ENOENT - Parent directory does not exist
+   * @throws EEXIST - File exists (with exclusive flag)
+   * @throws EISDIR - Path is a directory
+   * @throws EINVAL - Invalid flag combination
+   *
+   * @example
+   * ```typescript
+   * // Read-only
+   * const handle = await backend.open('/file.txt', 'r')
+   *
+   * // Create or truncate for writing
+   * const handle = await backend.open('/file.txt', 'w', 0o644)
+   *
+   * // Exclusive create (fails if exists)
+   * const handle = await backend.open('/file.txt', 'wx')
+   *
+   * // Append mode
+   * const handle = await backend.open('/log.txt', 'a')
+   * ```
+   */
   async open(
     path: string,
     flags?: string,
     mode?: number
   ): Promise<FileHandle> {
     const normalized = this.normalizePath(path)
-    const flagStr = flags ?? 'r'
 
-    // Check if file exists for read modes
-    if (
-      flagStr.includes('r') &&
-      !flagStr.includes('+') &&
-      !flagStr.includes('w')
-    ) {
-      if (!this.files.has(normalized)) {
-        throw new Error(`ENOENT: no such file or directory: ${path}`)
+    // Parse flags into structured format
+    const parsedFlags = parseFlags(flags)
+
+    // Resolve symlinks - follow the chain to get the actual target
+    let targetPath = normalized
+    const seen = new Set<string>()
+    while (this.symlinks.has(targetPath)) {
+      if (seen.has(targetPath)) {
+        throw new Error(`ELOOP: too many levels of symbolic links: ${path}`)
       }
+      seen.add(targetPath)
+      const target = this.symlinks.get(targetPath)!
+      targetPath = target.startsWith('/')
+        ? this.normalizePath(target)
+        : this.normalizePath(this.getParentDir(targetPath) + '/' + target)
     }
 
-    // Exclusive create mode
-    if (flagStr.includes('x')) {
-      if (this.files.has(normalized)) {
-        throw new Error(`EEXIST: file already exists: ${path}`)
-      }
+    // Check if path is a directory
+    if (this.directories.has(targetPath)) {
+      throw new Error(`EISDIR: illegal operation on a directory: ${path}`)
+    }
+
+    const fileExists = this.files.has(targetPath)
+
+    // Handle exclusive creation - must fail if file exists
+    if (parsedFlags.exclusive && fileExists) {
+      throw new Error(`EEXIST: file already exists: ${path}`)
+    }
+
+    // Handle read modes that require file to exist
+    if (!parsedFlags.create && !fileExists) {
+      throw new Error(`ENOENT: no such file or directory: ${path}`)
     }
 
     // Create file if needed
-    if (flagStr.includes('w') || flagStr.includes('a')) {
-      if (!this.files.has(normalized)) {
-        await this.writeFile(path, new Uint8Array(0), { mode: mode ?? 0o644 })
+    if (parsedFlags.create && !fileExists) {
+      // Verify parent directory exists
+      const parent = this.getParentDir(targetPath)
+      if (parent !== '/' && !this.directories.has(parent)) {
+        throw new Error(`ENOENT: no such file or directory: ${path}`)
       }
+      await this.writeFile(targetPath, new Uint8Array(0), { mode: mode ?? 0o644 })
+    }
+
+    // Handle truncation
+    if (parsedFlags.truncate && fileExists) {
+      const file = this.files.get(targetPath)!
+      file.data = new Uint8Array(0)
+      file.stats.size = 0
+      file.stats.mtimeMs = Date.now()
+      file.stats.ctimeMs = Date.now()
     }
 
     const fd = this.nextFd++
-    const file = this.files.get(normalized)!
+    const file = this.files.get(targetPath)!
 
-    return new MockFileHandle(fd, file, this, normalized)
+    return new MockFileHandle(fd, file, this, targetPath, parsedFlags)
   }
 
   // ===========================================================================
@@ -822,6 +1061,16 @@ export class MockBackend implements FsBackend {
 
 /**
  * File handle implementation for MockBackend.
+ *
+ * Provides POSIX-compatible file handle operations with proper access mode
+ * enforcement. The handle respects the flags used when opening the file:
+ *
+ * - Read-only ('r', O_RDONLY): read() allowed, write() throws EBADF
+ * - Write-only ('w', 'a', O_WRONLY): write() allowed, read() throws EBADF
+ * - Read/write ('r+', 'w+', 'a+', O_RDWR): both read() and write() allowed
+ *
+ * Append mode ('a', 'a+', O_APPEND) always writes to end of file,
+ * ignoring any position parameter.
  */
 class MockFileHandle implements FileHandle {
   readonly fd: number
@@ -830,23 +1079,42 @@ class MockFileHandle implements FileHandle {
   private path: string
   private closed = false
   private position = 0
+  private readonly flags: ParsedFlags
 
   constructor(
     fd: number,
     file: { data: Uint8Array; stats: StatsInit },
     backend: MockBackend,
-    path: string
+    path: string,
+    flags: ParsedFlags
   ) {
     this.fd = fd
     this.file = file
     this.backend = backend
     this.path = path
+    this.flags = flags
   }
 
   private ensureOpen(): void {
     if (this.closed) {
       throw new Error('File handle is closed')
     }
+  }
+
+  /**
+   * Check if the handle permits read operations.
+   * Returns true for 'read' and 'readwrite' access modes.
+   */
+  private canRead(): boolean {
+    return this.flags.accessMode === 'read' || this.flags.accessMode === 'readwrite'
+  }
+
+  /**
+   * Check if the handle permits write operations.
+   * Returns true for 'write' and 'readwrite' access modes.
+   */
+  private canWrite(): boolean {
+    return this.flags.accessMode === 'write' || this.flags.accessMode === 'readwrite'
   }
 
   async read(
@@ -856,6 +1124,11 @@ class MockFileHandle implements FileHandle {
     position?: number
   ): Promise<{ bytesRead: number; buffer: Uint8Array }> {
     this.ensureOpen()
+
+    // Enforce access mode - read not allowed on write-only handles
+    if (!this.canRead()) {
+      throw new Error(`EBADF: bad file descriptor, read not permitted on write-only handle`)
+    }
 
     const pos = position ?? this.position
     const len =
@@ -883,9 +1156,17 @@ class MockFileHandle implements FileHandle {
   ): Promise<{ bytesWritten: number }> {
     this.ensureOpen()
 
+    // Enforce access mode - write not allowed on read-only handles
+    if (!this.canWrite()) {
+      throw new Error(`EBADF: bad file descriptor, write not permitted on read-only handle`)
+    }
+
     const bytes =
       typeof data === 'string' ? new TextEncoder().encode(data) : data
-    const pos = position ?? this.position
+
+    // In append mode, always write to end of file regardless of position
+    // This is POSIX-mandated behavior for O_APPEND
+    const pos = this.flags.append ? this.file.data.length : (position ?? this.position)
 
     if (pos + bytes.length > this.file.data.length) {
       const newData = new Uint8Array(pos + bytes.length)
@@ -900,7 +1181,8 @@ class MockFileHandle implements FileHandle {
     this.file.stats.size = this.file.data.length
     this.file.stats.mtimeMs = Date.now()
 
-    if (position === undefined) {
+    // Update position for non-append mode when position wasn't explicitly provided
+    if (!this.flags.append && position === undefined) {
       this.position += bytes.length
     }
 
@@ -948,5 +1230,54 @@ class MockFileHandle implements FileHandle {
   async datasync(): Promise<void> {
     this.ensureOpen()
     // No-op in memory backend
+  }
+
+  /**
+   * Truncate the file to a specified length.
+   *
+   * If length < current size, the file is shrunk (data beyond length is lost).
+   * If length > current size, the file is extended with null bytes (zero-filled).
+   * If length = current size, only timestamps are updated (no data modification).
+   *
+   * @param length - New file length in bytes (default: 0)
+   * @throws EBADF if file handle is closed
+   * @throws EBADF if file handle is read-only
+   * @throws EINVAL if length is negative
+   */
+  async truncate(length: number = 0): Promise<void> {
+    this.ensureOpen()
+
+    // Enforce access mode - truncate requires write permission
+    if (!this.canWrite()) {
+      throw new Error('EBADF: bad file descriptor, truncate not permitted on read-only handle')
+    }
+
+    // POSIX behavior: floor non-integer values
+    const targetLength = Math.floor(length)
+
+    if (targetLength < 0) {
+      throw new Error('EINVAL: invalid argument, length cannot be negative')
+    }
+
+    const currentSize = this.file.data.length
+
+    // Resize file data if needed
+    if (targetLength !== currentSize) {
+      // Create new buffer at target size
+      // - For shrink: slice preserves content up to targetLength
+      // - For extend: Uint8Array constructor zero-fills beyond currentSize
+      const newData = new Uint8Array(targetLength)
+      newData.set(this.file.data.subarray(0, Math.min(targetLength, currentSize)))
+      this.file.data = newData
+    }
+
+    // Update stats (POSIX: truncate always updates mtime/ctime)
+    const now = Date.now()
+    this.file.stats.size = targetLength
+    this.file.stats.mtimeMs = now
+    this.file.stats.ctimeMs = now
+
+    // Clamp position to EOF if it exceeds new length
+    this.position = Math.min(this.position, targetLength)
   }
 }

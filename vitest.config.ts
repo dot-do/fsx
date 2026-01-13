@@ -9,7 +9,7 @@ export default defineWorkersConfig({
     exclude: ['**/node_modules/**', 'test/core/**/*.test.ts'],
     poolOptions: {
       workers: {
-        wrangler: { configPath: './wrangler.jsonc' },
+        wrangler: { configPath: './wrangler.test.jsonc' },
       },
     },
   },

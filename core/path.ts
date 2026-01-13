@@ -1,76 +1,331 @@
 /**
  * Path utilities for fsx.do - POSIX-style path manipulation
+ *
+ * This module provides POSIX-compliant path manipulation functions similar to
+ * Node.js `path.posix`. All functions use forward slash (/) as the separator
+ * and follow POSIX semantics for path resolution.
+ *
+ * @module path
+ * @example
+ * ```typescript
+ * import { normalize, join, resolve, dirname, basename, extname } from './path'
+ *
+ * normalize('/foo//bar/../baz')  // '/foo/baz'
+ * join('foo', 'bar', 'baz')      // 'foo/bar/baz'
+ * resolve('/foo', 'bar')         // '/foo/bar'
+ * dirname('/foo/bar/baz.txt')    // '/foo/bar'
+ * basename('/foo/bar/baz.txt')   // 'baz.txt'
+ * extname('file.txt')            // '.txt'
+ * ```
  */
 
-/** POSIX path separator */
-export const sep = '/'
+// =============================================================================
+// CONSTANTS
+// =============================================================================
 
-/** POSIX path delimiter (for PATH environment variable) */
-export const delimiter = ':'
+/**
+ * POSIX path separator character.
+ *
+ * @example
+ * ```typescript
+ * import { sep } from './path'
+ * console.log(sep) // '/'
+ * ```
+ */
+export const sep = '/' as const
 
-/** Parsed path object */
+/**
+ * POSIX path delimiter for environment variables like PATH.
+ *
+ * @example
+ * ```typescript
+ * import { delimiter } from './path'
+ * const paths = '/usr/bin:/bin:/usr/local/bin'
+ * paths.split(delimiter) // ['/usr/bin', '/bin', '/usr/local/bin']
+ * ```
+ */
+export const delimiter = ':' as const
+
+// =============================================================================
+// TYPES
+// =============================================================================
+
+/**
+ * Parsed path object containing all components of a path.
+ *
+ * @example
+ * ```typescript
+ * // For path '/home/user/file.txt':
+ * {
+ *   root: '/',
+ *   dir: '/home/user',
+ *   base: 'file.txt',
+ *   ext: '.txt',
+ *   name: 'file'
+ * }
+ * ```
+ */
 export interface ParsedPath {
+  /** The root of the path ('/' for absolute, '' for relative) */
   root: string
+  /** The full directory path */
   dir: string
+  /** The filename including extension */
   base: string
+  /** The file extension including the leading dot */
   ext: string
+  /** The filename without extension */
   name: string
 }
 
+// =============================================================================
+// INTERNAL UTILITIES
+// =============================================================================
+
+/** ASCII code for '/' character */
+const CHAR_FORWARD_SLASH = 47
+
 /**
- * Normalize a path by:
- * - Collapsing multiple consecutive slashes to one
- * - Removing trailing slashes (except for root)
- * - Resolving . (current directory) segments
- * - Resolving .. (parent directory) segments
+ * Check if a character code is a forward slash.
+ * @internal
+ */
+function isSlash(code: number): boolean {
+  return code === CHAR_FORWARD_SLASH
+}
+
+/**
+ * Optimized single-pass path normalization.
+ * Processes the path character by character to minimize allocations.
+ *
+ * @internal
+ */
+function normalizeStringPosix(path: string, allowAboveRoot: boolean): string {
+  let res = ''
+  let lastSegmentLength = 0
+  let lastSlash = -1
+  let dots = 0
+  let code = 0
+
+  for (let i = 0; i <= path.length; ++i) {
+    if (i < path.length) {
+      code = path.charCodeAt(i)
+    } else if (isSlash(code)) {
+      break
+    } else {
+      code = CHAR_FORWARD_SLASH
+    }
+
+    if (isSlash(code)) {
+      if (lastSlash === i - 1 || dots === 1) {
+        // NOOP - Empty segment or '.'
+      } else if (dots === 2) {
+        if (
+          res.length < 2 ||
+          lastSegmentLength !== 2 ||
+          res.charCodeAt(res.length - 1) !== 46 || // '.'
+          res.charCodeAt(res.length - 2) !== 46 // '.'
+        ) {
+          if (res.length > 2) {
+            const lastSlashIndex = res.lastIndexOf(sep)
+            if (lastSlashIndex === -1) {
+              res = ''
+              lastSegmentLength = 0
+            } else {
+              res = res.slice(0, lastSlashIndex)
+              lastSegmentLength = res.length - 1 - res.lastIndexOf(sep)
+            }
+            lastSlash = i
+            dots = 0
+            continue
+          } else if (res.length !== 0) {
+            res = ''
+            lastSegmentLength = 0
+            lastSlash = i
+            dots = 0
+            continue
+          }
+        }
+        if (allowAboveRoot) {
+          res += res.length > 0 ? '/..' : '..'
+          lastSegmentLength = 2
+        }
+      } else {
+        if (res.length > 0) {
+          res += '/' + path.slice(lastSlash + 1, i)
+        } else {
+          res = path.slice(lastSlash + 1, i)
+        }
+        lastSegmentLength = i - lastSlash - 1
+      }
+      lastSlash = i
+      dots = 0
+    } else if (code === 46 && dots !== -1) {
+      // '.'
+      ++dots
+    } else {
+      dots = -1
+    }
+  }
+  return res
+}
+
+// =============================================================================
+// CORE PATH OPERATIONS
+// =============================================================================
+
+/**
+ * Normalize a path by resolving `.` and `..` segments and collapsing slashes.
+ *
+ * This function:
+ * - Collapses multiple consecutive slashes to one
+ * - Removes trailing slashes (except for root `/`)
+ * - Resolves `.` (current directory) segments
+ * - Resolves `..` (parent directory) segments
+ * - Preserves the absolute/relative nature of the path
+ *
+ * @param path - The path to normalize
+ * @returns The normalized path, or '.' if path is empty
+ *
+ * @example Basic normalization
+ * ```typescript
+ * normalize('/foo/bar//baz')     // '/foo/bar/baz'
+ * normalize('/foo/./bar')        // '/foo/bar'
+ * normalize('/foo/bar/../baz')   // '/foo/baz'
+ * ```
+ *
+ * @example Edge cases
+ * ```typescript
+ * normalize('')                  // '.'
+ * normalize('.')                 // '.'
+ * normalize('..')                // '..'
+ * normalize('/')                 // '/'
+ * normalize('///')               // '/'
+ * ```
+ *
+ * @example Relative paths with ..
+ * ```typescript
+ * normalize('../foo/bar')        // '../foo/bar'
+ * normalize('foo/../../bar')     // '../bar'
+ * normalize('/foo/../..')        // '/'  (cannot go above root)
+ * ```
  */
 export function normalize(path: string): string {
+  // Fast path for common cases
   if (path === '') return '.'
   if (path === '.') return '.'
   if (path === '..') return '..'
+  if (path === '/') return '/'
 
-  const isAbs = path.startsWith('/')
+  const isAbsolute = isSlash(path.charCodeAt(0))
+  const trailingSlash = isSlash(path.charCodeAt(path.length - 1))
 
-  // Split and filter empty segments (handles multiple slashes)
-  const segments = path.split('/').filter((s) => s !== '')
+  // Normalize the path
+  let normalized = normalizeStringPosix(path, !isAbsolute)
 
-  const result: string[] = []
-
-  for (const segment of segments) {
-    if (segment === '.') {
-      // Current directory - skip
-      continue
-    } else if (segment === '..') {
-      // Parent directory
-      if (result.length > 0 && result[result.length - 1] !== '..') {
-        result.pop()
-      } else if (!isAbs) {
-        // For relative paths, keep the .. if we can't go up
-        result.push('..')
-      }
-      // For absolute paths at root, just ignore the ..
-    } else {
-      result.push(segment)
-    }
-  }
-
-  // Handle edge cases
-  if (isAbs) {
-    return '/' + result.join('/')
-  }
-
-  // For relative paths
-  if (result.length === 0) {
-    // If we started with ./ and ended with nothing, return .
+  if (normalized.length === 0) {
+    if (isAbsolute) return '/'
     return '.'
   }
 
-  return result.join('/')
+  // Add leading slash for absolute paths
+  if (isAbsolute) {
+    normalized = '/' + normalized
+  }
+
+  return normalized
+}
+
+/**
+ * Join path segments and normalize the result.
+ *
+ * Joins all path segments using the POSIX separator (`/`) and then
+ * normalizes the resulting path. Empty segments are ignored.
+ *
+ * @param paths - Path segments to join
+ * @returns The joined and normalized path, or '.' if no segments
+ *
+ * @example Basic joining
+ * ```typescript
+ * join('foo', 'bar', 'baz')      // 'foo/bar/baz'
+ * join('/foo', 'bar', 'baz')     // '/foo/bar/baz'
+ * join('foo', '', 'bar')         // 'foo/bar'
+ * ```
+ *
+ * @example Joining with dots
+ * ```typescript
+ * join('foo', '.', 'bar')        // 'foo/bar'
+ * join('foo', '..', 'bar')       // 'bar'
+ * join('foo', 'bar', '..', 'baz') // 'foo/baz'
+ * ```
+ *
+ * @example Leading slashes in non-first segments
+ * ```typescript
+ * join('/foo', '/bar')           // '/foo/bar'  (strips leading / from bar)
+ * join('foo', '/bar')            // 'foo/bar'
+ * ```
+ *
+ * @example Edge cases
+ * ```typescript
+ * join()                         // '.'
+ * join('')                       // '.'
+ * join('', '')                   // '.'
+ * ```
+ */
+export function join(...paths: string[]): string {
+  if (paths.length === 0) return '.'
+
+  let joined: string | undefined
+
+  for (const path of paths) {
+    if (path.length > 0) {
+      if (joined === undefined) {
+        joined = path
+      } else {
+        joined += '/' + path
+      }
+    }
+  }
+
+  if (joined === undefined) return '.'
+
+  return normalize(joined)
 }
 
 /**
  * Resolve path segments to an absolute path.
- * Later absolute paths override earlier ones.
+ *
+ * Processes segments from left to right. Each absolute path encountered
+ * resets the resolved path. The result is always an absolute path.
+ *
+ * @param paths - Path segments to resolve
+ * @returns The resolved absolute path, or '/' if no segments
+ *
+ * @example Basic resolution
+ * ```typescript
+ * resolve('/foo', 'bar')         // '/foo/bar'
+ * resolve('/foo', 'bar', 'baz')  // '/foo/bar/baz'
+ * resolve('foo', 'bar')          // '/foo/bar'  (relative treated as from /)
+ * ```
+ *
+ * @example Absolute path override
+ * ```typescript
+ * resolve('/foo', '/bar')        // '/bar'  (later absolute overrides)
+ * resolve('/foo', '/bar', 'baz') // '/bar/baz'
+ * ```
+ *
+ * @example Dot resolution
+ * ```typescript
+ * resolve('/foo', '.', 'bar')    // '/foo/bar'
+ * resolve('/foo/bar', '..')      // '/foo'
+ * resolve('/foo', '..', '..', 'bar') // '/bar'  (stops at root)
+ * ```
+ *
+ * @example Edge cases
+ * ```typescript
+ * resolve()                      // '/'
+ * resolve('/')                   // '/'
+ * resolve('/', '..')             // '/'  (cannot go above root)
+ * ```
  */
 export function resolve(...paths: string[]): string {
   if (paths.length === 0) return '/'
@@ -78,10 +333,12 @@ export function resolve(...paths: string[]): string {
   let resolved = ''
 
   for (const path of paths) {
-    if (path.startsWith('/')) {
+    if (path.length === 0) continue
+
+    if (isSlash(path.charCodeAt(0))) {
       // Absolute path - start over
       resolved = path
-    } else if (resolved === '') {
+    } else if (resolved.length === 0) {
       resolved = path
     } else {
       resolved = resolved + '/' + path
@@ -89,57 +346,71 @@ export function resolve(...paths: string[]): string {
   }
 
   // Make sure the result is absolute
-  if (!resolved.startsWith('/')) {
+  if (!resolved.length || !isSlash(resolved.charCodeAt(0))) {
     resolved = '/' + resolved
   }
 
   return normalize(resolved)
 }
 
-/**
- * Get the filename portion of a path.
- * Optionally remove an extension if it matches.
- */
-export function basename(path: string, ext?: string): string {
-  if (path === '' || path === '/') return ''
-
-  // Remove trailing slashes
-  let p = path
-  while (p.length > 1 && p.endsWith('/')) {
-    p = p.slice(0, -1)
-  }
-
-  // Get the last segment
-  const lastSlash = p.lastIndexOf('/')
-  const name = lastSlash === -1 ? p : p.slice(lastSlash + 1)
-
-  // Remove extension if provided and matches
-  // But don't remove if ext === name (the entire filename is the extension)
-  if (ext && name.endsWith(ext) && name.length > ext.length) {
-    return name.slice(0, -ext.length)
-  }
-
-  return name
-}
+// =============================================================================
+// PATH COMPONENT EXTRACTION
+// =============================================================================
 
 /**
  * Get the directory portion of a path.
+ *
+ * Returns the path up to (but not including) the final component.
+ * Trailing slashes are ignored when determining the final component.
+ *
+ * @param path - The path to extract the directory from
+ * @returns The directory portion, '.' if no directory, or '/' for root children
+ *
+ * @example Basic directory extraction
+ * ```typescript
+ * dirname('/foo/bar/baz.txt')    // '/foo/bar'
+ * dirname('/foo/bar/baz')        // '/foo/bar'
+ * dirname('/foo')                // '/'
+ * ```
+ *
+ * @example Relative paths
+ * ```typescript
+ * dirname('foo/bar')             // 'foo'
+ * dirname('file.txt')            // '.'
+ * dirname('foo')                 // '.'
+ * ```
+ *
+ * @example Edge cases
+ * ```typescript
+ * dirname('')                    // '.'
+ * dirname('/')                   // '/'
+ * dirname('/foo/bar/')           // '/foo'  (trailing slash ignored)
+ * dirname('.')                   // '.'
+ * dirname('..')                  // '.'
+ * ```
  */
 export function dirname(path: string): string {
-  if (path === '' || path === '/') {
-    return path === '' ? '.' : '/'
-  }
+  if (path.length === 0) return '.'
+
+  const isAbsolute = isSlash(path.charCodeAt(0))
 
   // Remove trailing slashes
-  let p = path
-  while (p.length > 1 && p.endsWith('/')) {
-    p = p.slice(0, -1)
+  let end = path.length
+  while (end > 1 && isSlash(path.charCodeAt(end - 1))) {
+    end--
   }
 
-  const lastSlash = p.lastIndexOf('/')
+  // Find the last slash
+  let lastSlash = -1
+  for (let i = end - 1; i >= 0; i--) {
+    if (isSlash(path.charCodeAt(i))) {
+      lastSlash = i
+      break
+    }
+  }
 
   if (lastSlash === -1) {
-    // No directory part
+    // No directory component
     return '.'
   }
 
@@ -148,63 +419,114 @@ export function dirname(path: string): string {
     return '/'
   }
 
-  return p.slice(0, lastSlash)
+  // Skip consecutive trailing slashes in the directory portion
+  let dirEnd = lastSlash
+  while (dirEnd > 1 && isSlash(path.charCodeAt(dirEnd - 1))) {
+    dirEnd--
+  }
+
+  return path.slice(0, dirEnd === 0 && isAbsolute ? 1 : dirEnd)
 }
 
 /**
- * Join path segments and normalize the result.
+ * Get the filename portion of a path.
+ *
+ * Returns the last component of the path. Optionally removes a
+ * matching extension from the result.
+ *
+ * @param path - The path to extract the filename from
+ * @param ext - Optional extension to remove from the result
+ * @returns The filename, or '' for root/empty paths
+ *
+ * @example Basic filename extraction
+ * ```typescript
+ * basename('/foo/bar/baz.txt')   // 'baz.txt'
+ * basename('/foo/bar/baz')       // 'baz'
+ * basename('file.txt')           // 'file.txt'
+ * ```
+ *
+ * @example Extension removal
+ * ```typescript
+ * basename('/foo/bar.txt', '.txt')  // 'bar'
+ * basename('/foo/bar.txt', '.md')   // 'bar.txt'  (no match)
+ * basename('file.test.ts', '.ts')   // 'file.test'
+ * ```
+ *
+ * @example Edge cases
+ * ```typescript
+ * basename('')                   // ''
+ * basename('/')                  // ''
+ * basename('/foo/bar/')          // 'bar'  (trailing slash ignored)
+ * basename('.txt', '.txt')       // '.txt'  (ext === name, not removed)
+ * ```
  */
-export function join(...paths: string[]): string {
-  if (paths.length === 0) return '.'
+export function basename(path: string, ext?: string): string {
+  if (path.length === 0) return ''
 
-  // Filter out empty segments
-  const filtered = paths.filter((p) => p !== '')
+  // Remove trailing slashes
+  let end = path.length
+  while (end > 0 && isSlash(path.charCodeAt(end - 1))) {
+    end--
+  }
 
-  if (filtered.length === 0) return '.'
+  if (end === 0) return ''
 
-  // Check if first segment is absolute
-  const firstSegment = filtered[0]
-  if (!firstSegment) return '.'
-  const isAbs = firstSegment.startsWith('/')
-
-  // Join all segments, stripping leading slashes from non-first segments
-  let result = firstSegment
-  for (let i = 1; i < filtered.length; i++) {
-    let segment = filtered[i]
-    if (!segment) continue
-    // Strip leading slashes from subsequent segments
-    while (segment.startsWith('/')) {
-      segment = segment.slice(1)
-    }
-    if (segment) {
-      result = result + '/' + segment
+  // Find the start of the basename
+  let start = 0
+  for (let i = end - 1; i >= 0; i--) {
+    if (isSlash(path.charCodeAt(i))) {
+      start = i + 1
+      break
     }
   }
 
-  const normalized = normalize(result)
+  const name = path.slice(start, end)
 
-  // If the original was absolute but normalization returned '.', return '/'
-  if (isAbs && normalized === '.') {
-    return '/'
+  // Remove extension if provided and matches
+  // But don't remove if ext === name (the entire filename is the extension)
+  if (ext !== undefined && ext.length > 0 && name.endsWith(ext) && name.length > ext.length) {
+    return name.slice(0, -ext.length)
   }
 
-  return normalized
-}
-
-/**
- * Check if a path is absolute (starts with /).
- */
-export function isAbsolute(path: string): boolean {
-  return path.startsWith('/')
+  return name
 }
 
 /**
  * Extract the extension from a path.
- * Returns the portion from the last . to the end of the basename.
- * Returns empty string if:
- * - No . exists in basename
- * - The . is the first character of the basename (dotfile)
- * - The path is empty, /, ., or ..
+ *
+ * Returns the portion from the last `.` to the end of the basename,
+ * including the leading dot. Returns empty string for dotfiles
+ * without a second dot.
+ *
+ * @param path - The path to extract the extension from
+ * @returns The extension including leading dot, or '' if none
+ *
+ * @example Basic extension extraction
+ * ```typescript
+ * extname('file.txt')            // '.txt'
+ * extname('/foo/bar.json')       // '.json'
+ * extname('archive.tar.gz')      // '.gz'  (last extension only)
+ * ```
+ *
+ * @example Dotfiles
+ * ```typescript
+ * extname('.gitignore')          // ''  (dotfile without extension)
+ * extname('.gitignore.bak')      // '.bak'  (dotfile with extension)
+ * ```
+ *
+ * @example No extension
+ * ```typescript
+ * extname('file')                // ''
+ * extname('/foo/bar')            // ''
+ * extname('')                    // ''
+ * extname('/')                   // ''
+ * ```
+ *
+ * @example Special cases
+ * ```typescript
+ * extname('file.')               // '.'  (trailing dot)
+ * extname('file..txt')           // '.txt'
+ * ```
  */
 export function extname(path: string): string {
   const base = basename(path)
@@ -214,45 +536,88 @@ export function extname(path: string): string {
   }
 
   // Find the last dot
-  const lastDot = base.lastIndexOf('.')
+  let dotIndex = -1
+  for (let i = base.length - 1; i >= 0; i--) {
+    if (base.charCodeAt(i) === 46) {
+      // '.'
+      dotIndex = i
+      break
+    }
+  }
 
-  // No dot found
-  if (lastDot === -1) {
+  // No dot found or dot is first character (dotfile with no extension)
+  if (dotIndex === -1 || dotIndex === 0) {
     return ''
   }
 
-  // Dot is first character (dotfile with no extension)
-  if (lastDot === 0) {
-    return ''
-  }
-
-  return base.slice(lastDot)
+  return base.slice(dotIndex)
 }
+
+// =============================================================================
+// PATH PARSING AND FORMATTING
+// =============================================================================
 
 /**
  * Parse a path into its component parts.
+ *
+ * Splits a path into root, dir, base, ext, and name components.
+ * Use with `format()` for path manipulation.
+ *
+ * @param path - The path to parse
+ * @returns Object containing path components
+ *
+ * @example Absolute path
+ * ```typescript
+ * parse('/home/user/file.txt')
+ * // {
+ * //   root: '/',
+ * //   dir: '/home/user',
+ * //   base: 'file.txt',
+ * //   ext: '.txt',
+ * //   name: 'file'
+ * // }
+ * ```
+ *
+ * @example Relative path
+ * ```typescript
+ * parse('foo/bar/baz.js')
+ * // {
+ * //   root: '',
+ * //   dir: 'foo/bar',
+ * //   base: 'baz.js',
+ * //   ext: '.js',
+ * //   name: 'baz'
+ * // }
+ * ```
+ *
+ * @example Filename only
+ * ```typescript
+ * parse('file.txt')
+ * // {
+ * //   root: '',
+ * //   dir: '',
+ * //   base: 'file.txt',
+ * //   ext: '.txt',
+ * //   name: 'file'
+ * // }
+ * ```
  */
 export function parse(path: string): ParsedPath {
   if (path === '') {
     return { root: '', dir: '', base: '', ext: '', name: '' }
   }
 
-  const root = path.startsWith('/') ? '/' : ''
+  const isAbs = isSlash(path.charCodeAt(0))
+  const root = isAbs ? '/' : ''
   let dir = dirname(path)
   const base = basename(path)
   const ext = extname(path)
 
   // Calculate name: base without extension
-  let name: string
-  if (ext === '') {
-    name = base
-  } else {
-    name = base.slice(0, -ext.length)
-  }
+  const name = ext === '' ? base : base.slice(0, -ext.length)
 
   // dirname returns '.' for paths without directory component
-  // but parse expects '' for those cases
-  // However, keep '.' for './foo' style paths
+  // but parse expects '' for those cases (unless path starts with ./ or ../)
   if (dir === '.' && !path.startsWith('./') && !path.startsWith('../')) {
     dir = ''
   }
@@ -262,20 +627,51 @@ export function parse(path: string): ParsedPath {
 
 /**
  * Format a parsed path object back to a path string.
- * Priority: dir > root, base > name+ext
+ *
+ * Constructs a path from components. Priority rules:
+ * - `dir` overrides `root` for the directory portion
+ * - `base` overrides `name + ext` for the filename portion
+ *
+ * @param pathObject - Object containing path components
+ * @returns The formatted path string
+ *
+ * @example Full path object
+ * ```typescript
+ * format({
+ *   root: '/',
+ *   dir: '/home/user',
+ *   base: 'file.txt',
+ *   ext: '.txt',
+ *   name: 'file'
+ * }) // '/home/user/file.txt'
+ * ```
+ *
+ * @example Partial objects
+ * ```typescript
+ * format({ dir: '/home/user', base: 'file.txt' })  // '/home/user/file.txt'
+ * format({ root: '/', base: 'file.txt' })          // '/file.txt'
+ * format({ dir: '/home', name: 'file', ext: '.txt' }) // '/home/file.txt'
+ * ```
+ *
+ * @example Priority rules
+ * ```typescript
+ * // base overrides name+ext
+ * format({ base: 'actual.js', name: 'ignored', ext: '.ts' }) // 'actual.js'
+ *
+ * // dir overrides root
+ * format({ root: '/', dir: '/home', base: 'file' }) // '/home/file'
+ * ```
  */
 export function format(pathObject: Partial<ParsedPath>): string {
   const { root = '', dir = '', base = '', ext = '', name = '' } = pathObject
 
-  // Compute the filename portion
-  // base takes priority over name+ext
+  // Compute the filename portion (base takes priority over name+ext)
   const filename = base !== '' ? base : name + ext
 
-  // Compute the directory portion
-  // dir takes priority over root
+  // Compute the directory portion (dir takes priority over root)
   if (dir !== '') {
     // If dir ends with /, don't add another one
-    if (dir.endsWith('/')) {
+    if (isSlash(dir.charCodeAt(dir.length - 1))) {
       return dir + filename
     }
     return filename !== '' ? dir + '/' + filename : dir
@@ -290,9 +686,60 @@ export function format(pathObject: Partial<ParsedPath>): string {
   return filename
 }
 
+// =============================================================================
+// PATH PREDICATES AND UTILITIES
+// =============================================================================
+
+/**
+ * Check if a path is absolute (starts with /).
+ *
+ * @param path - The path to check
+ * @returns True if the path is absolute
+ *
+ * @example
+ * ```typescript
+ * isAbsolute('/foo/bar')         // true
+ * isAbsolute('/')                // true
+ * isAbsolute('//foo')            // true  (multiple slashes)
+ * isAbsolute('foo/bar')          // false
+ * isAbsolute('./foo')            // false
+ * isAbsolute('')                 // false
+ * ```
+ */
+export function isAbsolute(path: string): boolean {
+  return path.length > 0 && isSlash(path.charCodeAt(0))
+}
+
 /**
  * Compute the relative path from `from` to `to`.
- * Both paths are normalized first.
+ *
+ * Both paths are normalized and resolved to absolute paths before
+ * computing the relative path.
+ *
+ * @param from - The starting path
+ * @param to - The destination path
+ * @returns The relative path from `from` to `to`, or '' if same
+ *
+ * @example Basic relative paths
+ * ```typescript
+ * relative('/foo/bar', '/foo/baz')       // '../baz'
+ * relative('/foo', '/foo/bar')           // 'bar'
+ * relative('/foo/bar', '/foo')           // '..'
+ * relative('/foo/bar', '/foo/bar')       // ''  (same path)
+ * ```
+ *
+ * @example Distant paths
+ * ```typescript
+ * relative('/a/b/c', '/x/y/z')           // '../../../x/y/z'
+ * relative('/', '/foo/bar')              // 'foo/bar'
+ * relative('/foo/bar', '/')              // '../..'
+ * ```
+ *
+ * @example Normalized input
+ * ```typescript
+ * relative('/foo/bar', '/foo/./bar')     // ''  (normalized to same)
+ * relative('/foo//bar', '/foo/bar/baz')  // 'baz'
+ * ```
  */
 export function relative(from: string, to: string): string {
   // Normalize both paths and make them absolute for comparison
@@ -338,4 +785,68 @@ export function relative(from: string, to: string): string {
   }
 
   return relativeParts.join('/')
+}
+
+// =============================================================================
+// PATH VALIDATION UTILITIES
+// =============================================================================
+
+/**
+ * Check if a path contains potentially dangerous traversal sequences.
+ *
+ * Detects `..` segments that could escape a base directory.
+ * Use this for security validation before path operations.
+ *
+ * @param path - The path to check
+ * @returns True if the path contains traversal sequences
+ *
+ * @example
+ * ```typescript
+ * hasTraversal('../foo')         // true
+ * hasTraversal('foo/../bar')     // true (could escape depending on resolution)
+ * hasTraversal('/foo/bar')       // false
+ * hasTraversal('./foo')          // false
+ * hasTraversal('foo..bar')       // false (not a segment)
+ * ```
+ */
+export function hasTraversal(path: string): boolean {
+  const normalized = normalize(path)
+  // Check if normalized path starts with .. or contains /..
+  return normalized.startsWith('..') || normalized.includes('/..')
+}
+
+/**
+ * Ensure a path stays within a base directory after normalization.
+ *
+ * Joins the base and path, normalizes the result, and verifies
+ * it starts with the normalized base path.
+ *
+ * @param base - The base directory that must contain the result
+ * @param path - The path to validate
+ * @returns True if the resolved path is within base
+ *
+ * @example
+ * ```typescript
+ * isWithin('/app', 'data/file.txt')     // true -> /app/data/file.txt
+ * isWithin('/app', '../etc/passwd')     // false -> escapes /app
+ * isWithin('/app', '/etc/passwd')       // false -> absolute path escapes
+ * isWithin('/app', './safe/../file')    // true -> /app/file
+ * ```
+ */
+export function isWithin(base: string, path: string): boolean {
+  const normalizedBase = normalize(base)
+  const resolved = resolve(normalizedBase, path)
+
+  // Must start with base path
+  if (!resolved.startsWith(normalizedBase)) {
+    return false
+  }
+
+  // If resolved is longer, the next character must be a slash
+  // (prevents /app matching /application)
+  if (resolved.length > normalizedBase.length) {
+    return isSlash(resolved.charCodeAt(normalizedBase.length))
+  }
+
+  return true
 }

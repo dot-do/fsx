@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { appendFile } from './appendFile'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { appendFile, AppendBuffer } from './appendFile'
 import { ENOENT, EISDIR } from '../errors'
 
 /**
@@ -650,3 +650,200 @@ function createMockStorage(): MockStorage {
     },
   }
 }
+
+// ============================================================================
+// AppendBuffer Tests
+// ============================================================================
+
+describe('AppendBuffer', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  describe('basic functionality', () => {
+    it('should buffer and flush data', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 0, // Disable auto-flush for testing
+      })
+
+      await buffer.append('Line 1\n')
+      await buffer.append('Line 2\n')
+
+      // Data should be buffered, not yet written
+      expect(mockStorage.getFile('/test/log.txt')).toBeUndefined()
+
+      // Manually flush
+      await buffer.flush()
+
+      // Now data should be written
+      const result = mockStorage.getFile('/test/log.txt')
+      expect(result).toBeDefined()
+      expect(new TextDecoder().decode(result?.content)).toBe('Line 1\nLine 2\n')
+
+      await buffer.close()
+    })
+
+    it('should auto-flush when buffer reaches max size', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/log.txt', {
+        maxBufferSize: 10, // Very small buffer
+        flushInterval: 0,
+      })
+
+      // Append data that exceeds buffer size
+      await buffer.append('12345678901') // 11 bytes > 10 max
+
+      // Should have auto-flushed
+      const result = mockStorage.getFile('/test/log.txt')
+      expect(result).toBeDefined()
+      expect(new TextDecoder().decode(result?.content)).toBe('12345678901')
+
+      await buffer.close()
+    })
+
+    it('should track buffered size', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 0,
+      })
+
+      expect(buffer.size).toBe(0)
+      expect(buffer.hasData).toBe(false)
+
+      await buffer.append('Hello')
+      expect(buffer.size).toBe(5)
+      expect(buffer.hasData).toBe(true)
+
+      await buffer.append(' World')
+      expect(buffer.size).toBe(11)
+
+      await buffer.flush()
+      expect(buffer.size).toBe(0)
+      expect(buffer.hasData).toBe(false)
+
+      await buffer.close()
+    })
+
+    it('should close and flush remaining data', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 0,
+      })
+
+      await buffer.append('Final data')
+
+      // Close should flush
+      await buffer.close()
+
+      const result = mockStorage.getFile('/test/log.txt')
+      expect(result).toBeDefined()
+      expect(new TextDecoder().decode(result?.content)).toBe('Final data')
+    })
+
+    it('should throw error when appending to closed buffer', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 0,
+      })
+
+      await buffer.close()
+
+      await expect(buffer.append('data'))
+        .rejects.toThrow('AppendBuffer is closed')
+    })
+
+    it('should handle binary data', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/data.bin', {
+        flushInterval: 0,
+      })
+
+      await buffer.append(new Uint8Array([0x01, 0x02]))
+      await buffer.append(new Uint8Array([0x03, 0x04]))
+      await buffer.flush()
+
+      const result = mockStorage.getFile('/test/data.bin')
+      expect(result?.content).toEqual(new Uint8Array([0x01, 0x02, 0x03, 0x04]))
+
+      await buffer.close()
+    })
+
+    it('should accumulate multiple appends to same file', async () => {
+      const mockStorage = createMockStorage()
+
+      // First buffer session
+      const buffer1 = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 0,
+      })
+      await buffer1.append('Session 1')
+      await buffer1.close()
+
+      // Second buffer session
+      const buffer2 = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 0,
+      })
+      await buffer2.append(' Session 2')
+      await buffer2.close()
+
+      const result = mockStorage.getFile('/test/log.txt')
+      expect(new TextDecoder().decode(result?.content)).toBe('Session 1 Session 2')
+    })
+
+    it('should handle empty flush gracefully', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 0,
+      })
+
+      // Flush with no data should not create file
+      await buffer.flush()
+      expect(mockStorage.getFile('/test/log.txt')).toBeUndefined()
+
+      await buffer.close()
+    })
+
+    it('should handle multiple close calls', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 0,
+      })
+
+      await buffer.append('data')
+      await buffer.close()
+      await buffer.close() // Should not throw
+
+      const result = mockStorage.getFile('/test/log.txt')
+      expect(new TextDecoder().decode(result?.content)).toBe('data')
+    })
+  })
+
+  describe('timer-based flushing', () => {
+    it('should auto-flush on interval', async () => {
+      const mockStorage = createMockStorage()
+      const buffer = new AppendBuffer(mockStorage, '/test/log.txt', {
+        flushInterval: 1000,
+        maxBufferSize: 1024 * 1024, // Large buffer to prevent size-based flush
+      })
+
+      await buffer.append('Timed data')
+
+      // Data should be buffered
+      expect(mockStorage.getFile('/test/log.txt')).toBeUndefined()
+
+      // Advance timer
+      await vi.advanceTimersByTimeAsync(1000)
+
+      // Should have auto-flushed
+      const result = mockStorage.getFile('/test/log.txt')
+      expect(result).toBeDefined()
+      expect(new TextDecoder().decode(result?.content)).toBe('Timed data')
+
+      await buffer.close()
+    })
+  })
+})

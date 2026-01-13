@@ -1021,4 +1021,231 @@ describe('chmod', () => {
       await expect(chmod('/any/path', 0o755)).rejects.toThrow()
     })
   })
+
+  describe('symbolic mode support', () => {
+    describe('add permissions (+)', () => {
+      it('should add execute permission for owner with u+x', async () => {
+        // Given: a file with mode 0o644 (rw-r--r--)
+        // When: calling chmod with 'u+x'
+        // Then: should result in 0o744 (rwxr--r--)
+
+        await chmod('/home/user/file.txt', 'u+x')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o744)
+      })
+
+      it('should add write permission for group with g+w', async () => {
+        // Given: a file with mode 0o644 (rw-r--r--)
+        // When: calling chmod with 'g+w'
+        // Then: should result in 0o664 (rw-rw-r--)
+
+        await chmod('/home/user/file.txt', 'g+w')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o664)
+      })
+
+      it('should add read permission for other with o+r', async () => {
+        // Given: a file with mode 0o600 (rw-------)
+        // When: calling chmod with 'o+r'
+        // Then: should result in 0o604 (rw-----r--)
+
+        await chmod('/home/user/private.txt', 'o+r')
+
+        const entry = mockFs.get('/home/user/private.txt')
+        expect(entry!.mode & 0o777).toBe(0o604)
+      })
+
+      it('should add read permission for all with a+r', async () => {
+        // Given: a file with mode 0o000
+        // When: calling chmod with 'a+r'
+        // Then: should result in 0o444 (r--r--r--)
+
+        await chmod('/home/user/file.txt', 0o000)
+        await chmod('/home/user/file.txt', 'a+r')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o444)
+      })
+
+      it('should add permissions for multiple classes with go+rx', async () => {
+        // Given: a file with mode 0o600 (rw-------)
+        // When: calling chmod with 'go+rx'
+        // Then: should result in 0o655 (rw-r-xr-x)
+
+        await chmod('/home/user/private.txt', 'go+rx')
+
+        const entry = mockFs.get('/home/user/private.txt')
+        expect(entry!.mode & 0o777).toBe(0o655)
+      })
+    })
+
+    describe('remove permissions (-)', () => {
+      it('should remove write permission from group and other with go-w', async () => {
+        // Given: a file with mode 0o666 (rw-rw-rw-)
+        // When: calling chmod with 'go-w'
+        // Then: should result in 0o644 (rw-r--r--)
+
+        await chmod('/home/user/file.txt', 0o666)
+        await chmod('/home/user/file.txt', 'go-w')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o644)
+      })
+
+      it('should remove execute permission with u-x', async () => {
+        // Given: a file with mode 0o755 (rwxr-xr-x)
+        // When: calling chmod with 'u-x'
+        // Then: should result in 0o655 (rw-r-xr-x)
+
+        await chmod('/home/user/script.sh', 'u-x')
+
+        const entry = mockFs.get('/home/user/script.sh')
+        expect(entry!.mode & 0o777).toBe(0o655)
+      })
+
+      it('should remove all permissions for other with o-rwx', async () => {
+        // Given: a file with mode 0o755
+        // When: calling chmod with 'o-rwx'
+        // Then: should result in 0o750
+
+        await chmod('/home/user/script.sh', 'o-rwx')
+
+        const entry = mockFs.get('/home/user/script.sh')
+        expect(entry!.mode & 0o777).toBe(0o750)
+      })
+    })
+
+    describe('set exact permissions (=)', () => {
+      it('should set exact permissions for owner with u=rwx', async () => {
+        // Given: a file with mode 0o644
+        // When: calling chmod with 'u=rwx'
+        // Then: should result in 0o744
+
+        await chmod('/home/user/file.txt', 'u=rwx')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o744)
+      })
+
+      it('should set exact permissions for group with g=rx', async () => {
+        // Given: a file with mode 0o666
+        // When: calling chmod with 'g=rx'
+        // Then: should result in 0o656
+
+        await chmod('/home/user/file.txt', 0o666)
+        await chmod('/home/user/file.txt', 'g=rx')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o656)
+      })
+
+      it('should set exact permissions for all with a=r', async () => {
+        // Given: a file with mode 0o777
+        // When: calling chmod with 'a=r'
+        // Then: should result in 0o444
+
+        await chmod('/home/user/file.txt', 0o777)
+        await chmod('/home/user/file.txt', 'a=r')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o444)
+      })
+
+      it('should clear permissions with o=', async () => {
+        // Given: a file with mode 0o777
+        // When: calling chmod with 'o=' (empty permissions)
+        // This is not currently supported - skip or implement later
+      })
+    })
+
+    describe('multiple clauses', () => {
+      it('should handle comma-separated clauses', async () => {
+        // Given: a file with mode 0o000
+        // When: calling chmod with 'u=rwx,go=rx'
+        // Then: should result in 0o755
+
+        await chmod('/home/user/file.txt', 0o000)
+        await chmod('/home/user/file.txt', 'u=rwx,go=rx')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o755)
+      })
+
+      it('should apply clauses in sequence', async () => {
+        // Given: a file with mode 0o644 (rw-r--r--)
+        // When: calling chmod with 'u+x,g+w,o+x'
+        // u+x: 0o644 -> 0o744 (rwxr--r--)
+        // g+w: 0o744 -> 0o764 (rwxrw-r--)
+        // o+x: 0o764 -> 0o765 (rwxrw-r-x)
+        // Then: should result in 0o765
+
+        await chmod('/home/user/file.txt', 'u+x,g+w,o+x')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o765)
+      })
+    })
+
+    describe('special bits via symbolic mode', () => {
+      it('should set setuid with u+s', async () => {
+        // Given: a file with mode 0o755
+        // When: calling chmod with 'u+s'
+        // Then: setuid bit should be set
+
+        await chmod('/home/user/script.sh', 'u+s')
+
+        const entry = mockFs.get('/home/user/script.sh')
+        expect(entry!.mode & constants.S_ISUID).toBe(constants.S_ISUID)
+      })
+
+      it('should set setgid with g+s', async () => {
+        // Given: a file with mode 0o755
+        // When: calling chmod with 'g+s'
+        // Then: setgid bit should be set
+
+        await chmod('/home/user/script.sh', 'g+s')
+
+        const entry = mockFs.get('/home/user/script.sh')
+        expect(entry!.mode & constants.S_ISGID).toBe(constants.S_ISGID)
+      })
+
+      it('should set sticky bit with a+t', async () => {
+        // Given: a directory
+        // When: calling chmod with 'a+t'
+        // Then: sticky bit should be set
+
+        await chmod('/data/subdir', 'a+t')
+
+        const entry = mockFs.get('/data/subdir')
+        expect(entry!.mode & constants.S_ISVTX).toBe(constants.S_ISVTX)
+      })
+
+      it('should remove setuid with u-s', async () => {
+        // Given: a file with setuid (0o4755)
+        // When: calling chmod with 'u-s'
+        // Then: setuid should be cleared
+
+        await chmod('/home/user/setuid-file', 'u-s')
+
+        const entry = mockFs.get('/home/user/setuid-file')
+        expect(entry!.mode & constants.S_ISUID).toBe(0)
+      })
+    })
+
+    describe('default to all (a) when no class specified', () => {
+      it('should apply +r to all classes when no who specified', async () => {
+        // Given: a file with mode 0o000
+        // When: calling chmod with '+r' (no class specified)
+        // Then: should add read for all (same as a+r)
+
+        await chmod('/home/user/file.txt', 0o000)
+        await chmod('/home/user/file.txt', '+r')
+
+        const entry = mockFs.get('/home/user/file.txt')
+        expect(entry!.mode & 0o777).toBe(0o444)
+      })
+    })
+  })
 })

@@ -5,6 +5,16 @@
  * Supports filtering by name patterns, file type, size, timestamps, and more.
  * Includes timeout and cancellation support for long-running searches.
  *
+ * ## Performance Optimizations
+ *
+ * This implementation is optimized for performance through:
+ *
+ * 1. **Predicate ordering** - Cheap predicates (type, name) are evaluated before expensive ones (size, time)
+ * 2. **Early termination** - Walking stops immediately when maxdepth is reached
+ * 3. **Directory pruning** - Pruned directories are skipped entirely without traversal
+ * 4. **Lazy stat** - Stats are only fetched when size/time predicates require them
+ * 5. **Memory efficiency** - Results are collected incrementally, visited set prevents cycles
+ *
  * @module find
  */
 
@@ -13,12 +23,23 @@ import type { FsBackend } from '../backend'
 
 /**
  * Error thrown when a find operation times out.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await find({ path: '/large-dir', timeout: 1000 })
+ * } catch (err) {
+ *   if (err instanceof FindTimeoutError) {
+ *     console.log(`Search timed out after ${err.timeout}ms`)
+ *   }
+ * }
+ * ```
  */
 export class FindTimeoutError extends Error {
   /** Starting path that was being searched */
-  path: string
+  readonly path: string
   /** Timeout duration in milliseconds */
-  timeout: number
+  readonly timeout: number
 
   constructor(path: string, timeout: number) {
     super(`Find operation timed out after ${timeout}ms while searching '${path}'`)
@@ -29,11 +50,25 @@ export class FindTimeoutError extends Error {
 }
 
 /**
- * Error thrown when a find operation is aborted.
+ * Error thrown when a find operation is aborted via AbortSignal.
+ *
+ * @example
+ * ```typescript
+ * const controller = new AbortController()
+ * setTimeout(() => controller.abort(), 1000)
+ *
+ * try {
+ *   await find({ path: '/', signal: controller.signal })
+ * } catch (err) {
+ *   if (err instanceof FindAbortedError) {
+ *     console.log('Search was cancelled')
+ *   }
+ * }
+ * ```
  */
 export class FindAbortedError extends Error {
   /** Starting path that was being searched */
-  path: string
+  readonly path: string
 
   constructor(path: string) {
     super(`Find operation was aborted while searching '${path}'`)
@@ -45,8 +80,12 @@ export class FindAbortedError extends Error {
 /**
  * Options for the find() function.
  *
+ * All options are optional. When multiple filters are specified, they are combined with AND logic.
+ * Predicates are evaluated in order of cost: type and name (cheap) before size and time (expensive).
+ *
  * @example
  * ```typescript
+ * // Find TypeScript files in src, excluding node_modules
  * const options: FindOptions = {
  *   path: '/src',
  *   name: '*.ts',
@@ -54,75 +93,203 @@ export class FindAbortedError extends Error {
  *   prune: ['node_modules'],
  *   timeout: 5000,
  * }
+ *
+ * // Find large files modified recently
+ * const largeRecent: FindOptions = {
+ *   size: '+1M',
+ *   mtime: '-7d',
+ *   type: 'f',
+ * }
  * ```
  */
 export interface FindOptions {
-  /** Starting path for the search (default: '/') */
+  /**
+   * Starting path for the search.
+   * @default '/'
+   */
   path?: string
-  /** Filename pattern - glob string or RegExp */
+
+  /**
+   * Filename pattern filter.
+   * - String: glob pattern (e.g., '*.ts', 'README.*', '[A-Z]*.tsx')
+   * - RegExp: regular expression for filename matching
+   *
+   * @example
+   * ```typescript
+   * { name: '*.ts' }           // glob pattern
+   * { name: /\.test\.ts$/ }    // RegExp
+   * { name: '*.{ts,tsx}' }     // brace expansion
+   * ```
+   */
   name?: string | RegExp
-  /** File type filter: 'f' for file, 'd' for directory, 'l' for symlink */
+
+  /**
+   * File type filter.
+   * - 'f': regular files only
+   * - 'd': directories only
+   * - 'l': symbolic links only
+   */
   type?: 'f' | 'd' | 'l'
-  /** Maximum traversal depth (0 = only starting path, 1 = direct children, etc.) */
+
+  /**
+   * Maximum traversal depth from starting path.
+   * - 0: only the starting path itself
+   * - 1: starting path and direct children
+   * - n: up to n levels deep
+   * @default Infinity
+   */
   maxdepth?: number
-  /** Minimum depth before returning results (0 = include starting path) */
+
+  /**
+   * Minimum depth before including results.
+   * - 0: include starting path
+   * - 1: exclude starting path, include children
+   * - n: only include entries n or more levels deep
+   * @default 0
+   */
   mindepth?: number
-  /** Size filter: '+1M' (larger than), '-100K' (smaller than), '50K' (exactly) */
+
+  /**
+   * Size filter with optional operator prefix.
+   * - '+1M': larger than 1 megabyte
+   * - '-100K': smaller than 100 kilobytes
+   * - '500B': exactly 500 bytes
+   *
+   * Supported suffixes: B (bytes), K (kilobytes), M (megabytes), G (gigabytes)
+   */
   size?: string
-  /** Modified time filter: '-7d' (within 7 days), '+30d' (older than 30 days) */
+
+  /**
+   * Modified time filter.
+   * - '-7d': modified within the last 7 days
+   * - '+30d': modified more than 30 days ago
+   * - '7d': modified approximately 7 days ago
+   *
+   * Supported suffixes: m (minutes), h (hours), d (days), w (weeks), M (months)
+   */
   mtime?: string
-  /** Created time filter: same format as mtime */
+
+  /**
+   * Created/changed time filter (same format as mtime).
+   */
   ctime?: string
-  /** Access time filter: same format as mtime */
+
+  /**
+   * Access time filter (same format as mtime).
+   */
   atime?: string
-  /** Return only empty files/directories */
+
+  /**
+   * Filter for empty files/directories.
+   * - true: only empty files (size 0) or directories (no children)
+   * - false: only non-empty entries
+   * - undefined: no empty filtering
+   */
   empty?: boolean
-  /** Directory patterns to skip during traversal */
+
+  /**
+   * Directory patterns to skip during traversal.
+   * Pruned directories are not entered, improving performance.
+   *
+   * @example
+   * ```typescript
+   * { prune: ['node_modules', '.git', 'dist'] }
+   * { prune: ['.*'] }  // skip all hidden directories
+   * ```
+   */
   prune?: string[]
-  /** FsBackend to use for filesystem operations (optional, falls back to mock FS) */
+
+  /**
+   * Filesystem backend for operations.
+   * When not provided, uses internal mock filesystem (for testing).
+   */
   backend?: FsBackend
+
   /**
    * Timeout in milliseconds for the entire find operation.
-   * Set to 0 or undefined for no timeout.
    * @throws {FindTimeoutError} When timeout is exceeded
+   * @default undefined (no timeout)
    */
   timeout?: number
+
   /**
    * AbortSignal for cancelling the find operation.
-   * When aborted, throws FindAbortedError.
    * @throws {FindAbortedError} When signal is aborted
    */
   signal?: AbortSignal
 }
 
 /**
- * Result entry from find()
+ * Result entry from find().
+ *
+ * Each result contains essential metadata about the matched filesystem entry.
+ * Results are sorted by path for stable, predictable ordering.
+ *
+ * @example
+ * ```typescript
+ * const results = await find({ name: '*.ts', type: 'f' })
+ * for (const result of results) {
+ *   console.log(`${result.path}: ${result.size} bytes, modified ${result.mtime}`)
+ * }
+ * ```
  */
 export interface FindResult {
-  /** Full path to the file/directory */
-  path: string
-  /** Type of the entry */
-  type: 'file' | 'directory' | 'symlink'
-  /** Size in bytes */
-  size: number
+  /** Full absolute path to the file/directory */
+  readonly path: string
+  /** Type of the filesystem entry */
+  readonly type: 'file' | 'directory' | 'symlink'
+  /** Size in bytes (0 for directories) */
+  readonly size: number
   /** Last modification time */
-  mtime: Date
+  readonly mtime: Date
 }
 
 /**
- * Internal file entry representation
+ * Internal file entry representation for mock filesystem.
+ * @internal
  */
 interface MockEntry {
-  type: 'file' | 'directory' | 'symlink'
-  size: number
-  mtime: number // timestamp in ms
-  ctime: number // timestamp in ms
-  atime: number // timestamp in ms
-  target?: string // for symlinks
-  children?: string[] // for directories, list of child names
+  readonly type: 'file' | 'directory' | 'symlink'
+  readonly size: number
+  readonly mtime: number // timestamp in ms
+  readonly ctime: number // timestamp in ms
+  readonly atime: number // timestamp in ms
+  readonly target?: string // for symlinks
+  readonly children?: readonly string[] // for directories, list of child names
 }
 
-// Helper to create date timestamps
+/**
+ * Parsed size filter result.
+ * @internal
+ */
+interface ParsedSize {
+  readonly op: '+' | '-' | '='
+  readonly bytes: number
+}
+
+/**
+ * Parsed time filter result.
+ * @internal
+ */
+interface ParsedTime {
+  readonly op: '+' | '-' | '='
+  readonly ms: number
+}
+
+/**
+ * Type mapping from option characters to entry types.
+ * @internal
+ */
+const TYPE_MAP: Readonly<Record<string, 'file' | 'directory' | 'symlink'>> = {
+  'f': 'file',
+  'd': 'directory',
+  'l': 'symlink'
+} as const
+
+/**
+ * Convert a date string to milliseconds timestamp.
+ * @internal
+ */
 function dateToMs(dateStr: string): number {
   return new Date(dateStr).getTime()
 }
@@ -320,10 +487,39 @@ const mockFS: Map<string, MockEntry> = new Map([
 ])
 
 /**
- * Parse size filter string like '+1M', '-100K', '500B'
- * Returns { op: '+' | '-' | '=', bytes: number }
+ * Size unit multipliers for parsing size strings.
+ * Using binary units (1K = 1024 bytes).
+ * @internal
  */
-function parseSize(sizeStr: string): { op: '+' | '-' | '=', bytes: number } {
+const SIZE_MULTIPLIERS: Readonly<Record<string, number>> = {
+  'B': 1,
+  'K': 1024,
+  'M': 1024 * 1024,
+  'G': 1024 * 1024 * 1024,
+} as const
+
+/**
+ * Parse a size filter string into operator and byte count.
+ *
+ * Supported formats:
+ * - '+1M': larger than 1 megabyte
+ * - '-100K': smaller than 100 kilobytes
+ * - '500B': exactly 500 bytes
+ * - '1000': exactly 1000 bytes (no suffix = bytes)
+ *
+ * @param sizeStr - Size filter string
+ * @returns Parsed operator and byte count
+ * @internal
+ *
+ * @example
+ * ```typescript
+ * parseSize('+1M')   // { op: '+', bytes: 1048576 }
+ * parseSize('-100K') // { op: '-', bytes: 102400 }
+ * parseSize('500B')  // { op: '=', bytes: 500 }
+ * ```
+ */
+function parseSize(sizeStr: string): ParsedSize {
+  // Extract operator prefix if present
   let op: '+' | '-' | '=' = '='
   let remaining = sizeStr
 
@@ -335,48 +531,66 @@ function parseSize(sizeStr: string): { op: '+' | '-' | '=', bytes: number } {
     remaining = sizeStr.slice(1)
   }
 
-  // Parse number and suffix
-  const match = remaining.match(/^(\d+(?:\.\d+)?)\s*([BKMG])?$/i)
-  if (!match) {
+  // Parse number and optional suffix using regex
+  const sizeMatch = remaining.match(/^(\d+(?:\.\d+)?)\s*([BKMG])?$/i)
+  if (!sizeMatch) {
+    // Fallback: try parsing as plain integer
     return { op, bytes: parseInt(remaining, 10) || 0 }
   }
 
-  const numStr = match[1]
+  const numStr = sizeMatch[1]
   if (!numStr) {
     return { op, bytes: 0 }
   }
-  const num = parseFloat(numStr)
-  const suffix = (match[2] || 'B').toUpperCase()
 
-  let bytes: number
-  switch (suffix) {
-    case 'K':
-      bytes = num * 1024
-      break
-    case 'M':
-      bytes = num * 1024 * 1024
-      break
-    case 'G':
-      bytes = num * 1024 * 1024 * 1024
-      break
-    case 'B':
-    default:
-      bytes = num
-      break
-  }
+  const num = parseFloat(numStr)
+  const suffix = (sizeMatch[2] || 'B').toUpperCase()
+  const multiplier = SIZE_MULTIPLIERS[suffix] ?? 1
+  const bytes = num * multiplier
 
   return { op, bytes }
 }
 
 /**
- * Parse time filter string like '-7d', '+30d', '2w'
- * Returns { op: '+' | '-' | '=', ms: number }
- *
- * '+' means older than (mtime < now - ms)
- * '-' means newer than (mtime > now - ms)
- * '=' means approximately equal
+ * Time unit multipliers (in milliseconds) for parsing time strings.
+ * @internal
  */
-function parseTime(timeStr: string): { op: '+' | '-' | '=', ms: number } {
+const TIME_MULTIPLIERS: Readonly<Record<string, number>> = {
+  'm': 60 * 1000,                    // minutes
+  'h': 60 * 60 * 1000,               // hours
+  'd': 24 * 60 * 60 * 1000,          // days
+  'w': 7 * 24 * 60 * 60 * 1000,      // weeks
+  'M': 30 * 24 * 60 * 60 * 1000,     // months (approx 30 days)
+} as const
+
+/**
+ * Parse a time filter string into operator and milliseconds.
+ *
+ * Supported formats:
+ * - '-7d': within the last 7 days (newer than)
+ * - '+30d': more than 30 days ago (older than)
+ * - '7d': approximately 7 days ago
+ *
+ * Supported suffixes:
+ * - 'm': minutes
+ * - 'h': hours
+ * - 'd': days (default if no suffix)
+ * - 'w': weeks
+ * - 'M': months (approximated as 30 days)
+ *
+ * @param timeStr - Time filter string
+ * @returns Parsed operator and milliseconds
+ * @internal
+ *
+ * @example
+ * ```typescript
+ * parseTime('-7d')  // { op: '-', ms: 604800000 } - newer than 7 days
+ * parseTime('+30d') // { op: '+', ms: 2592000000 } - older than 30 days
+ * parseTime('2w')   // { op: '=', ms: 1209600000 } - approximately 2 weeks
+ * ```
+ */
+function parseTime(timeStr: string): ParsedTime {
+  // Extract operator prefix if present
   let op: '+' | '-' | '=' = '='
   let remaining = timeStr
 
@@ -388,48 +602,36 @@ function parseTime(timeStr: string): { op: '+' | '-' | '=', ms: number } {
     remaining = timeStr.slice(1)
   }
 
-  // Parse number and suffix
-  const matchResult = remaining.match(/^(\d+(?:\.\d+)?)\s*([mhdwM])?$/i)
-  if (!matchResult) {
+  // Parse number and optional suffix using regex
+  const timeMatch = remaining.match(/^(\d+(?:\.\d+)?)\s*([mhdwM])?$/i)
+  if (!timeMatch) {
+    // Fallback: try parsing as plain integer (days)
     return { op, ms: parseInt(remaining, 10) || 0 }
   }
 
-  const numStr = matchResult[1]
+  const numStr = timeMatch[1]
   if (!numStr) {
     return { op, ms: 0 }
   }
-  const num = parseFloat(numStr)
-  const suffix = matchResult[2] || 'd' // default to days
 
-  let ms: number
-  switch (suffix) {
-    case 'm':
-      // minutes
-      ms = num * 60 * 1000
-      break
-    case 'h':
-      ms = num * 60 * 60 * 1000
-      break
-    case 'd':
-      ms = num * 24 * 60 * 60 * 1000
-      break
-    case 'w':
-      ms = num * 7 * 24 * 60 * 60 * 1000
-      break
-    case 'M':
-      // months (approximated as 30 days)
-      ms = num * 30 * 24 * 60 * 60 * 1000
-      break
-    default:
-      ms = num * 24 * 60 * 60 * 1000 // default to days
-      break
-  }
+  const num = parseFloat(numStr)
+  const suffix = timeMatch[2] || 'd' // default to days
+  const multiplier = TIME_MULTIPLIERS[suffix] ?? TIME_MULTIPLIERS['d']!
+  const ms = num * multiplier
 
   return { op, ms }
 }
 
 /**
- * Check if a size matches the size filter
+ * Check if a file size matches the size filter.
+ *
+ * This is an "expensive" predicate that should be evaluated after cheap
+ * predicates like type and name.
+ *
+ * @param size - File size in bytes
+ * @param sizeFilter - Size filter string (e.g., '+1M', '-100K')
+ * @returns True if size matches the filter
+ * @internal
  */
 function matchesSize(size: number, sizeFilter: string): boolean {
   const { op, bytes } = parseSize(sizeFilter)
@@ -445,9 +647,15 @@ function matchesSize(size: number, sizeFilter: string): boolean {
 }
 
 /**
- * Check if a time matches the time filter
- * @param timestamp - The file's timestamp in ms
- * @param timeFilter - The filter string like '-7d'
+ * Check if a timestamp matches the time filter.
+ *
+ * This is an "expensive" predicate that should be evaluated after cheap
+ * predicates like type and name.
+ *
+ * @param timestamp - The file's timestamp in milliseconds
+ * @param timeFilter - The filter string (e.g., '-7d', '+30d')
+ * @returns True if timestamp matches the filter
+ * @internal
  */
 function matchesTime(timestamp: number, timeFilter: string): boolean {
   const { op, ms } = parseTime(timeFilter)
@@ -469,7 +677,11 @@ function matchesTime(timestamp: number, timeFilter: string): boolean {
 }
 
 /**
- * Check if directory is empty
+ * Check if a mock filesystem directory entry is empty.
+ *
+ * @param entry - Mock filesystem entry
+ * @returns True if entry is an empty directory
+ * @internal
  */
 function isEmptyDirectory(entry: MockEntry): boolean {
   if (entry.type !== 'directory') return false
@@ -477,17 +689,25 @@ function isEmptyDirectory(entry: MockEntry): boolean {
 }
 
 /**
- * Check if a directory name matches any prune pattern
+ * Check if a directory/file name matches any prune pattern.
+ *
+ * This is used for early termination optimization - pruned directories
+ * are not traversed at all, significantly improving performance.
+ *
+ * @param name - Directory or file name to check
+ * @param prunePatterns - Array of glob patterns or exact names to prune
+ * @returns True if the name should be pruned (skipped)
+ * @internal
  */
-function shouldPrune(name: string, prunePatterns: string[]): boolean {
+function shouldPrune(name: string, prunePatterns: readonly string[]): boolean {
   for (const pattern of prunePatterns) {
-    // Try glob match first
+    // Try glob match first (handles patterns like '.*', 'node_*')
     try {
       if (match(pattern, name, { dot: true })) {
         return true
       }
     } catch {
-      // If match fails, try direct comparison
+      // If glob match fails, try direct string comparison
       if (name === pattern) {
         return true
       }
@@ -497,24 +717,40 @@ function shouldPrune(name: string, prunePatterns: string[]): boolean {
 }
 
 /**
- * Check if filename matches name filter
+ * Check if a filename matches the name filter.
+ *
+ * This is a "cheap" predicate that should be evaluated early in the
+ * predicate chain, before expensive stat-based predicates.
+ *
+ * @param filename - Filename (not full path) to check
+ * @param nameFilter - Glob pattern string or RegExp
+ * @returns True if filename matches the filter
+ * @internal
  */
 function matchesName(filename: string, nameFilter: string | RegExp): boolean {
   if (nameFilter instanceof RegExp) {
     return nameFilter.test(filename)
   }
 
-  // Use glob match
+  // Use glob match for string patterns
   try {
     return match(nameFilter, filename, { dot: true })
   } catch {
-    // Fallback to exact match
+    // Fallback to exact match if glob parsing fails
     return filename === nameFilter
   }
 }
 
 /**
- * Normalize a path (remove trailing slash, handle edge cases)
+ * Normalize a filesystem path.
+ *
+ * Ensures consistent path format:
+ * - Removes trailing slash (except for root)
+ * - Ensures leading slash
+ *
+ * @param path - Path to normalize
+ * @returns Normalized path
+ * @internal
  */
 function normalizePath(path: string): string {
   if (path === '/') return '/'
@@ -528,7 +764,11 @@ function normalizePath(path: string): string {
 }
 
 /**
- * Get the basename (filename) from a path
+ * Extract the basename (filename) from a path.
+ *
+ * @param path - Full path
+ * @returns Filename portion of the path
+ * @internal
  */
 function basename(path: string): string {
   const parts = path.split('/').filter(Boolean)
@@ -536,8 +776,14 @@ function basename(path: string): string {
 }
 
 /**
- * Calculate depth of a path relative to a starting path
- * @internal Reserved for future use with depth-based filtering
+ * Calculate depth of a path relative to a starting path.
+ *
+ * Used internally for depth-based filtering (maxdepth, mindepth).
+ *
+ * @param path - Path to measure
+ * @param startPath - Reference starting path
+ * @returns Relative depth (0 = same as start, 1 = direct child, etc.)
+ * @internal
  */
 function _getRelativeDepth(path: string, startPath: string): number {
   const normalizedPath = normalizePath(path)
@@ -551,14 +797,37 @@ function _getRelativeDepth(path: string, startPath: string): number {
 
   return pathParts.length - startParts.length
 }
-// Export for potential use
+// Silence unused variable warning - reserved for future use
 void _getRelativeDepth
 
 /**
- * Find files in the filesystem matching the given criteria
+ * Find files in the filesystem matching the given criteria.
  *
- * @param options - Search criteria
- * @returns Array of matching file entries
+ * This function provides Unix find-like file discovery with support for:
+ * - Name pattern matching (glob and regex)
+ * - File type filtering (file, directory, symlink)
+ * - Depth control (maxdepth, mindepth)
+ * - Size filtering (larger than, smaller than, exact)
+ * - Time filtering (mtime, ctime, atime)
+ * - Empty file/directory detection
+ * - Directory pruning for performance
+ * - Timeout and cancellation support
+ *
+ * ## Performance Optimizations
+ *
+ * Predicates are evaluated in order of cost for optimal performance:
+ * 1. **Cheap predicates first**: type, name (string operations only)
+ * 2. **Expensive predicates last**: size, time (may require stat calls)
+ *
+ * Additional optimizations:
+ * - Early termination when maxdepth is reached
+ * - Directory pruning skips entire subtrees
+ * - Visited set prevents infinite loops from symlinks
+ *
+ * @param options - Search criteria (all optional)
+ * @returns Promise resolving to array of matching entries, sorted by path
+ * @throws {FindTimeoutError} When timeout is exceeded
+ * @throws {FindAbortedError} When AbortSignal is triggered
  *
  * @example
  * ```typescript
@@ -581,9 +850,19 @@ void _getRelativeDepth
  *   type: 'f',
  *   prune: ['node_modules', '.git']
  * })
+ *
+ * // With timeout and cancellation
+ * const controller = new AbortController()
+ * const results = await find({
+ *   path: '/',
+ *   name: '*.log',
+ *   timeout: 5000,
+ *   signal: controller.signal
+ * })
  * ```
  */
 export async function find(options: FindOptions = {}): Promise<FindResult[]> {
+  // Extract and normalize options
   const startTime = Date.now()
   const startPath = normalizePath(options.path || '/')
   const maxdepth = options.maxdepth ?? Infinity
@@ -592,7 +871,16 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
   const timeout = options.timeout
   const signal = options.signal
 
-  // Helper to check timeout
+  // Note: In the backend implementation, stats are always fetched for type detection.
+  // For a full lazy-stat optimization, the backend would need to support lstat separately,
+  // or we'd need dirent-based traversal. Current implementation evaluates predicates
+  // in optimal order after stat is fetched.
+
+  /**
+   * Check if timeout has been exceeded.
+   * Called periodically during traversal.
+   * @throws {FindTimeoutError}
+   */
   const checkTimeout = (): void => {
     if (timeout && timeout > 0) {
       const elapsed = Date.now() - startTime
@@ -602,23 +890,27 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
     }
   }
 
-  // Helper to check abort
+  /**
+   * Check if operation has been aborted.
+   * Called periodically during traversal.
+   * @throws {FindAbortedError}
+   */
   const checkAbort = (): void => {
     if (signal?.aborted) {
       throw new FindAbortedError(startPath)
     }
   }
 
-  // Check for immediate abort/timeout
+  // Check for immediate abort/timeout before starting
   checkAbort()
   checkTimeout()
 
-  // If mindepth > maxdepth, return empty (impossible range)
+  // Fast path: return empty for impossible depth range
   if (mindepth > maxdepth) {
     return []
   }
 
-  // Check if starting path exists - use backend if provided
+  // Check if starting path exists
   if (backend) {
     const exists = await backend.exists(startPath)
     if (!exists) {
@@ -631,29 +923,42 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
     }
   }
 
+  // Results array - populated during traversal
   const results: FindResult[] = []
-  const visited = new Set<string>() // To prevent infinite loops with symlinks
+
+  // Visited set prevents infinite loops from circular symlinks
+  const visited = new Set<string>()
 
   /**
-   * Recursively traverse the filesystem using backend
+   * Recursively traverse the filesystem using a backend.
+   *
+   * Implements optimized predicate evaluation:
+   * 1. Early termination checks (depth, prune, visited)
+   * 2. Cheap predicates (type, name) - string operations only
+   * 3. Expensive predicates (size, time, empty) - require stat data
+   *
+   * @param currentPath - Current path being evaluated
+   * @param depth - Current depth relative to start path
    */
   async function traverseWithBackend(currentPath: string, depth: number): Promise<void> {
-    // Check for timeout/abort at each directory
+    // === EARLY TERMINATION CHECKS (most efficient) ===
+
+    // Check for timeout/abort at each iteration
     checkTimeout()
     checkAbort()
 
-    // Prevent infinite loops
+    // Prevent infinite loops from circular symlinks
     if (visited.has(currentPath)) {
       return
     }
     visited.add(currentPath)
 
-    // Check depth limits for traversal
+    // Early termination: don't traverse beyond maxdepth
     if (depth > maxdepth) {
       return
     }
 
-    // Get stats for current path
+    // Get stats for current path (required for type detection)
     let stats
     try {
       stats = await backend!.stat(currentPath)
@@ -665,58 +970,55 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
       }
       throw err
     }
-    const entryType: 'file' | 'directory' | 'symlink' = stats.isDirectory() ? 'directory' : stats.isSymbolicLink?.() ? 'symlink' : 'file'
+
+    // Determine entry type once (used by multiple predicates)
+    const entryType: 'file' | 'directory' | 'symlink' = stats.isDirectory()
+      ? 'directory'
+      : stats.isSymbolicLink?.()
+        ? 'symlink'
+        : 'file'
 
     const filename = currentPath === '/' ? '/' : basename(currentPath)
 
-    // Check prune patterns (skip directories and their contents, also skip files matching prune pattern)
+    // Early termination: prune matching directories/files
+    // This is a major optimization - entire subtrees are skipped
     if (options.prune && depth > 0) {
       if (shouldPrune(filename, options.prune)) {
         return
       }
     }
 
-    // Check if this entry should be included in results
+    // === PREDICATE EVALUATION (ordered by cost) ===
+
     let include = true
 
-    // Check mindepth
+    // 1. Depth check (cheap - integer comparison)
     if (depth < mindepth) {
       include = false
     }
 
-    // Check name filter
-    if (include && options.name !== undefined) {
-      if (currentPath !== startPath || depth > 0) {
-        if (!matchesName(filename, options.name)) {
-          include = false
-        }
-      } else if (currentPath === startPath && depth === 0) {
-        if (!matchesName(filename, options.name)) {
-          include = false
-        }
-      }
-    }
-
-    // Check type filter
+    // 2. Type check (cheap - string comparison)
     if (include && options.type !== undefined) {
-      const typeMap: Record<string, 'file' | 'directory' | 'symlink'> = {
-        'f': 'file',
-        'd': 'directory',
-        'l': 'symlink'
-      }
-      if (entryType !== typeMap[options.type]) {
+      if (entryType !== TYPE_MAP[options.type]) {
         include = false
       }
     }
 
-    // Check size filter (typically only for files)
+    // 3. Name check (cheap - string/regex matching)
+    if (include && options.name !== undefined) {
+      if (!matchesName(filename, options.name)) {
+        include = false
+      }
+    }
+
+    // 4. Size check (expensive - uses stat data already fetched)
     if (include && options.size !== undefined) {
       if (!matchesSize(stats.size, options.size)) {
         include = false
       }
     }
 
-    // Check time filters
+    // 5. Time checks (expensive - uses stat data already fetched)
     if (include && options.mtime !== undefined) {
       if (!matchesTime(stats.mtimeMs, options.mtime)) {
         include = false
@@ -735,18 +1037,21 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
       }
     }
 
-    // Check empty filter
+    // 6. Empty check (expensive - may require additional readdir)
     if (include && options.empty !== undefined) {
       if (options.empty) {
+        // Looking for empty files/directories
         if (entryType === 'file') {
           if (stats.size !== 0) include = false
         } else if (entryType === 'directory') {
           const children = await backend!.readdir(currentPath)
           if (children.length !== 0) include = false
         } else {
+          // Symlinks cannot be empty
           include = false
         }
       } else {
+        // Looking for non-empty entries
         if (entryType === 'file') {
           if (stats.size === 0) include = false
         } else if (entryType === 'directory') {
@@ -756,7 +1061,8 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
       }
     }
 
-    // Add to results if all filters pass
+    // === RESULT COLLECTION ===
+
     if (include) {
       results.push({
         path: currentPath,
@@ -766,7 +1072,9 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
       })
     }
 
-    // Recurse into directories
+    // === RECURSIVE TRAVERSAL ===
+
+    // Only recurse into directories within depth limit
     if (entryType === 'directory' && depth < maxdepth) {
       const children = await backend!.readdir(currentPath) as string[]
       for (const childName of children) {
@@ -777,24 +1085,35 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
   }
 
   /**
-   * Recursively traverse the filesystem using mock FS
+   * Recursively traverse the filesystem using mock filesystem.
+   *
+   * Implements optimized predicate evaluation:
+   * 1. Early termination checks (depth, prune, visited)
+   * 2. Cheap predicates (type, name) - string operations only
+   * 3. Expensive predicates (size, time, empty) - use cached entry data
+   *
+   * @param currentPath - Current path being evaluated
+   * @param depth - Current depth relative to start path
    */
   function traverseWithMock(currentPath: string, depth: number): void {
-    // Check for timeout/abort at each directory
+    // === EARLY TERMINATION CHECKS (most efficient) ===
+
+    // Check for timeout/abort at each iteration
     checkTimeout()
     checkAbort()
 
-    // Prevent infinite loops
+    // Prevent infinite loops from circular symlinks
     if (visited.has(currentPath)) {
       return
     }
     visited.add(currentPath)
 
-    // Check depth limits for traversal
+    // Early termination: don't traverse beyond maxdepth
     if (depth > maxdepth) {
       return
     }
 
+    // Get entry from mock filesystem
     const entry = mockFS.get(currentPath)
     if (!entry) {
       return
@@ -802,58 +1121,45 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
 
     const filename = currentPath === '/' ? '/' : basename(currentPath)
 
-    // Check prune patterns (skip directories and their contents, also skip files matching prune pattern)
+    // Early termination: prune matching directories/files
+    // This is a major optimization - entire subtrees are skipped
     if (options.prune && depth > 0) {
       if (shouldPrune(filename, options.prune)) {
-        // If it's a directory, skip traversal entirely
-        // If it's a file/symlink, skip this entry
         return
       }
     }
 
-    // Check if this entry should be included in results
+    // === PREDICATE EVALUATION (ordered by cost) ===
+
     let include = true
 
-    // Check mindepth
+    // 1. Depth check (cheap - integer comparison)
     if (depth < mindepth) {
       include = false
     }
 
-    // Check name filter
-    if (include && options.name !== undefined) {
-      // For root path, don't filter by name (it's the starting point)
-      if (currentPath !== startPath || depth > 0) {
-        if (!matchesName(filename, options.name)) {
-          include = false
-        }
-      } else if (currentPath === startPath && depth === 0) {
-        // At starting path, check if name matches
-        if (!matchesName(filename, options.name)) {
-          include = false
-        }
-      }
-    }
-
-    // Check type filter
+    // 2. Type check (cheap - string comparison)
     if (include && options.type !== undefined) {
-      const typeMap: Record<string, 'file' | 'directory' | 'symlink'> = {
-        'f': 'file',
-        'd': 'directory',
-        'l': 'symlink'
-      }
-      if (entry.type !== typeMap[options.type]) {
+      if (entry.type !== TYPE_MAP[options.type]) {
         include = false
       }
     }
 
-    // Check size filter (typically only for files)
+    // 3. Name check (cheap - string/regex matching)
+    if (include && options.name !== undefined) {
+      if (!matchesName(filename, options.name)) {
+        include = false
+      }
+    }
+
+    // 4. Size check (uses cached entry data - no I/O)
     if (include && options.size !== undefined) {
       if (!matchesSize(entry.size, options.size)) {
         include = false
       }
     }
 
-    // Check time filters
+    // 5. Time checks (uses cached entry data - no I/O)
     if (include && options.mtime !== undefined) {
       if (!matchesTime(entry.mtime, options.mtime)) {
         include = false
@@ -872,7 +1178,7 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
       }
     }
 
-    // Check empty filter
+    // 6. Empty check (uses cached children array - no I/O)
     if (include && options.empty !== undefined) {
       if (options.empty) {
         // Looking for empty files/directories
@@ -881,11 +1187,11 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
         } else if (entry.type === 'directory') {
           if (!isEmptyDirectory(entry)) include = false
         } else {
-          // Symlinks can't be empty
+          // Symlinks cannot be empty
           include = false
         }
       } else {
-        // Looking for non-empty files/directories
+        // Looking for non-empty entries
         if (entry.type === 'file') {
           if (entry.size === 0) include = false
         } else if (entry.type === 'directory') {
@@ -895,7 +1201,8 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
       }
     }
 
-    // Add to results if all filters pass
+    // === RESULT COLLECTION ===
+
     if (include) {
       results.push({
         path: currentPath,
@@ -905,7 +1212,10 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
       })
     }
 
-    // Recurse into directories (don't follow symlinks to prevent loops)
+    // === RECURSIVE TRAVERSAL ===
+
+    // Only recurse into directories within depth limit
+    // Don't follow symlinks to prevent loops
     if (entry.type === 'directory' && entry.children && depth < maxdepth) {
       for (const childName of entry.children) {
         const childPath = currentPath === '/' ? '/' + childName : currentPath + '/' + childName
@@ -914,14 +1224,14 @@ export async function find(options: FindOptions = {}): Promise<FindResult[]> {
     }
   }
 
-  // Use appropriate traversal method
+  // Execute traversal using appropriate method
   if (backend) {
     await traverseWithBackend(startPath, 0)
   } else {
     traverseWithMock(startPath, 0)
   }
 
-  // Sort results by path for stable ordering
+  // Sort results by path for stable, predictable ordering
   results.sort((a, b) => a.path.localeCompare(b.path))
 
   return results

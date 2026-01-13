@@ -48,6 +48,13 @@ export {
   Stats,
   Dirent,
   FileHandle,
+  // Type Guards
+  isStats,
+  isDirent,
+  isFileHandle,
+  isFileType,
+  isStorageTier,
+  isStatsLike,
 } from './types.js'
 
 export type {
@@ -170,3 +177,18 @@ export { hashToPath, pathToHash } from './cas/path-mapping.js'
 // =============================================================================
 
 export { parsePattern, type ParsedPattern } from './sparse/patterns.js'
+export { createIncludeChecker, type IncludeChecker, type IncludeCheckerOptions } from './sparse/include.js'
+export { SparseFS, type SparseFSOptions, type WalkEntry, type WalkOptions } from './sparse/sparse-fs.js'
+
+// =============================================================================
+// MCP (Model Context Protocol) Tools
+// =============================================================================
+
+export {
+  invokeFsSearch,
+  fsSearchToolSchema,
+  type McpToolResult,
+  type FsSearchOptions,
+  type SearchResultItem,
+  type StorageBackend,
+} from './mcp/fs-search.js'

@@ -3,36 +3,160 @@
  *
  * Write data to a file, creating the file if it does not exist,
  * or overwriting it if it does.
+ *
+ * This implementation supports:
+ * - Multiple encodings (utf-8, base64, hex, ascii, latin1, binary)
+ * - File flags (w, wx, a, ax) for controlling write behavior
+ * - Custom file permissions via mode option
+ * - Proper timestamp handling (preserves birthtime on overwrite)
+ *
+ * @module core/fs/writeFile
  */
 
 import type { BufferEncoding } from '../types'
-import { ENOENT, EISDIR, EEXIST } from '../errors'
+import { ENOENT, EISDIR, EEXIST, EINVAL } from '../errors'
 
 /**
- * Options for writeFile
+ * Valid file system flags for writeFile operations.
+ *
+ * - 'w': Write mode (default) - create or truncate file
+ * - 'wx': Exclusive write - fail with EEXIST if file exists
+ * - 'a': Append mode - create file or append to existing
+ * - 'ax': Exclusive append - fail with EEXIST if file exists, otherwise append
+ */
+export type WriteFileFlag = 'w' | 'wx' | 'a' | 'ax'
+
+/**
+ * Options for writeFile operation.
+ *
+ * Controls how data is written to the file including encoding,
+ * permissions, and write behavior.
+ *
+ * @example
+ * ```typescript
+ * // Write with specific permissions
+ * await writeFile(storage, '/secret.txt', 'data', { mode: 0o600 })
+ *
+ * // Write base64 encoded data
+ * await writeFile(storage, '/image.bin', base64Data, { encoding: 'base64' })
+ *
+ * // Exclusive write (fail if exists)
+ * await writeFile(storage, '/new.txt', 'content', { flag: 'wx' })
+ *
+ * // Append to existing file
+ * await writeFile(storage, '/log.txt', 'entry\n', { flag: 'a' })
+ * ```
  */
 export interface WriteFileOptions {
-  /** File encoding (for string data) */
+  /**
+   * Character encoding for string data.
+   *
+   * - 'utf-8' / 'utf8': UTF-8 encoding (default)
+   * - 'base64': Base64 decode the input string
+   * - 'hex': Hex decode the input string
+   * - 'ascii': ASCII encoding (7-bit)
+   * - 'latin1' / 'binary': Latin-1 encoding (8-bit)
+   *
+   * @default 'utf-8'
+   */
   encoding?: BufferEncoding
-  /** File mode (permissions) */
+
+  /**
+   * File mode (permissions) for the created file.
+   *
+   * Specified as an octal number (e.g., 0o644 for rw-r--r--).
+   * Only applies when creating a new file; existing files retain
+   * their current permissions unless explicitly changed.
+   *
+   * @default 0o644
+   */
   mode?: number
-  /** File system flag (w, a, wx, etc.) */
+
+  /**
+   * File system flag controlling write behavior.
+   *
+   * - 'w': Write mode (default) - create or truncate
+   * - 'wx': Exclusive write - fail if file exists
+   * - 'a': Append mode - create or append to existing
+   * - 'ax': Exclusive append - fail if file exists
+   *
+   * @default 'w'
+   */
   flag?: string
 }
 
 /**
- * Storage interface that writeFile operates on
+ * Storage interface that writeFile operates on.
+ *
+ * This interface defines the minimal storage backend requirements
+ * for the writeFile operation. Implementations must provide methods
+ * for reading files, checking directory status, and writing files.
  */
 export interface WriteFileStorage {
-  getFile(path: string): { content: Uint8Array; metadata: { mode: number; mtime: number; birthtime: number; ctime: number } } | undefined
+  /**
+   * Get file content and metadata by path.
+   *
+   * @param path - Normalized absolute path to the file
+   * @returns File entry with content and metadata, or undefined if not found
+   */
+  getFile(path: string): {
+    content: Uint8Array
+    metadata: {
+      mode: number
+      mtime: number
+      birthtime: number
+      ctime: number
+    }
+  } | undefined
+
+  /**
+   * Create a directory at the specified path.
+   *
+   * @param path - Normalized absolute path for the new directory
+   */
   addDirectory(path: string): void
+
+  /**
+   * Write a file with content and metadata.
+   *
+   * @param path - Normalized absolute path for the file
+   * @param content - File content as Uint8Array
+   * @param metadata - Optional metadata (mode, birthtime)
+   */
   addFile(path: string, content: Uint8Array, metadata?: { mode?: number; birthtime?: number }): void
+
+  /**
+   * Check if a path is a directory.
+   *
+   * @param path - Path to check
+   * @returns true if path is a directory, false otherwise
+   */
   isDirectory(path: string): boolean
+
+  /**
+   * Check if the parent directory exists.
+   *
+   * @param path - Path whose parent to check
+   * @returns true if parent directory exists, false otherwise
+   */
   parentExists(path: string): boolean
 }
 
 /**
- * Normalize a path: remove double slashes, resolve . and ..
+ * Normalize a filesystem path.
+ *
+ * - Removes empty segments and '.' references
+ * - Resolves '..' parent directory references
+ * - Ensures path starts with '/'
+ *
+ * @param path - Path to normalize
+ * @returns Normalized absolute path
+ *
+ * @example
+ * normalizePath('/foo//bar/./baz/../qux') // '/foo/bar/qux'
+ * normalizePath('foo/bar') // '/foo/bar'
+ *
+ * @internal
  */
 function normalizePath(path: string): string {
   // Split path into segments and filter out empty ones and '.'
@@ -52,7 +176,16 @@ function normalizePath(path: string): string {
 }
 
 /**
- * Get parent path from a path
+ * Get the parent directory path.
+ *
+ * @param path - Path to get parent of
+ * @returns Parent directory path, or '/' for root-level paths
+ *
+ * @example
+ * getParentPath('/foo/bar/baz.txt') // '/foo/bar'
+ * getParentPath('/foo.txt') // '/'
+ *
+ * @internal
  */
 function getParentPath(path: string): string {
   const lastSlash = path.lastIndexOf('/')
@@ -61,9 +194,50 @@ function getParentPath(path: string): string {
 }
 
 /**
- * Encode string data to Uint8Array based on encoding
+ * Set of valid buffer encodings for validation.
+ * @internal
+ */
+const VALID_ENCODINGS = new Set<BufferEncoding>([
+  'utf-8', 'utf8', 'ascii', 'base64', 'hex', 'binary', 'latin1'
+])
+
+/**
+ * Validate that an encoding is supported.
+ *
+ * @param encoding - Encoding to validate
+ * @returns true if valid, false otherwise
+ * @internal
+ */
+function isValidEncoding(encoding: string): encoding is BufferEncoding {
+  return VALID_ENCODINGS.has(encoding as BufferEncoding)
+}
+
+/**
+ * Encode string data to Uint8Array based on the specified encoding.
+ *
+ * Handles various encodings commonly used in file operations:
+ * - UTF-8: Standard Unicode text encoding
+ * - Base64: Binary-to-text encoding (decodes to binary)
+ * - Hex: Hexadecimal representation (decodes to binary)
+ * - ASCII/Latin1/Binary: Single-byte encodings
+ *
+ * @param data - String data to encode
+ * @param encoding - Target encoding (default: 'utf-8')
+ * @returns Encoded data as Uint8Array
+ *
+ * @example
+ * encodeData('Hello') // UTF-8 bytes
+ * encodeData('SGVsbG8=', 'base64') // Decodes to 'Hello' bytes
+ * encodeData('48656c6c6f', 'hex') // Decodes to 'Hello' bytes
+ *
+ * @internal
  */
 function encodeData(data: string, encoding: BufferEncoding = 'utf-8'): Uint8Array {
+  // Fast path: empty string returns empty array
+  if (data.length === 0) {
+    return new Uint8Array(0)
+  }
+
   switch (encoding) {
     case 'utf-8':
     case 'utf8':
@@ -71,7 +245,9 @@ function encodeData(data: string, encoding: BufferEncoding = 'utf-8'): Uint8Arra
 
     case 'base64': {
       // Decode base64 to binary
-      const binaryString = atob(data)
+      // Handle URL-safe base64 by replacing - and _ with standard chars
+      const normalized = data.replace(/-/g, '+').replace(/_/g, '/')
+      const binaryString = atob(normalized)
       const bytes = new Uint8Array(binaryString.length)
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i)
@@ -81,10 +257,18 @@ function encodeData(data: string, encoding: BufferEncoding = 'utf-8'): Uint8Arra
 
     case 'hex': {
       // Decode hex to binary
+      // Handle odd-length hex strings by treating as invalid
+      if (data.length % 2 !== 0) {
+        throw new Error(`Invalid hex string: odd length (${data.length})`)
+      }
       const length = data.length / 2
       const bytes = new Uint8Array(length)
       for (let i = 0; i < length; i++) {
-        bytes[i] = parseInt(data.substr(i * 2, 2), 16)
+        const byte = parseInt(data.substring(i * 2, i * 2 + 2), 16)
+        if (Number.isNaN(byte)) {
+          throw new Error(`Invalid hex character at position ${i * 2}`)
+        }
+        bytes[i] = byte
       }
       return bytes
     }
@@ -100,20 +284,51 @@ function encodeData(data: string, encoding: BufferEncoding = 'utf-8'): Uint8Arra
     }
 
     default:
+      // Fall back to UTF-8 for unknown encodings
       return new TextEncoder().encode(data)
   }
 }
 
 /**
- * Write data to a file
+ * Write data to a file.
  *
- * @param storage - Storage backend
- * @param path - File path
+ * Creates the file if it does not exist, or overwrites it if it does.
+ * The storage tier is automatically selected based on file size when
+ * used with tiered storage backends.
+ *
+ * Supported file flags:
+ * - 'w' (default): Write mode - create or truncate file
+ * - 'wx': Exclusive write - fail with EEXIST if file exists
+ * - 'a': Append mode - create file or append to existing
+ * - 'ax': Exclusive append - fail with EEXIST if file exists
+ *
+ * @param storage - Storage backend implementing WriteFileStorage
+ * @param path - Absolute path to the file
  * @param data - Data to write (string or Uint8Array)
- * @param options - Write options
- * @throws ENOENT if parent directory does not exist
- * @throws EISDIR if path is a directory
- * @throws EEXIST if flag is 'wx' and file already exists
+ * @param options - Write options (encoding, mode, flag)
+ * @returns Promise that resolves when write is complete
+ *
+ * @throws {ENOENT} If parent directory does not exist
+ * @throws {EISDIR} If path is a directory
+ * @throws {EEXIST} If flag is 'wx' or 'ax' and file already exists
+ *
+ * @example
+ * ```typescript
+ * // Write string content
+ * await writeFile(storage, '/hello.txt', 'Hello, World!')
+ *
+ * // Write binary data
+ * await writeFile(storage, '/data.bin', new Uint8Array([1, 2, 3]))
+ *
+ * // Write with specific permissions
+ * await writeFile(storage, '/secret.txt', 'data', { mode: 0o600 })
+ *
+ * // Append to existing file
+ * await writeFile(storage, '/log.txt', 'entry\n', { flag: 'a' })
+ *
+ * // Exclusive write (fail if exists)
+ * await writeFile(storage, '/new.txt', 'content', { flag: 'wx' })
+ * ```
  */
 export async function writeFile(
   storage: WriteFileStorage,
@@ -125,6 +340,12 @@ export async function writeFile(
   const flag = options?.flag ?? 'w'
   const mode = options?.mode ?? 0o644
   const encoding = options?.encoding ?? 'utf-8'
+
+  // Validate flag
+  const validFlags = ['w', 'wx', 'a', 'ax']
+  if (!validFlags.includes(flag)) {
+    throw new EINVAL('open', normalizedPath)
+  }
 
   // Check if path is root directory
   if (normalizedPath === '/') {
@@ -159,9 +380,9 @@ export async function writeFile(
     throw new ENOENT('open', parentPath)
   }
 
-  // Check for exclusive write flag
+  // Check for exclusive flags (wx, ax) - fail if file exists
   const existingFile = storage.getFile(normalizedPath)
-  if (flag === 'wx' && existingFile !== undefined) {
+  if ((flag === 'wx' || flag === 'ax') && existingFile !== undefined) {
     throw new EEXIST('open', normalizedPath)
   }
 
@@ -173,8 +394,9 @@ export async function writeFile(
     bytes = data
   }
 
-  // Handle append flag
-  if (flag === 'a' && existingFile !== undefined) {
+  // Handle append flags (a, ax)
+  // For 'ax', we already checked file doesn't exist above, so this handles 'a' on existing files
+  if ((flag === 'a' || flag === 'ax') && existingFile !== undefined) {
     // Append to existing file
     const newContent = new Uint8Array(existingFile.content.length + bytes.length)
     newContent.set(existingFile.content)

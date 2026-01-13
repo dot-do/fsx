@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { unlink, setContext, getContext, type FileEntry, type UnlinkContext } from './unlink'
-import { ENOENT, EISDIR } from '../errors'
+import { ENOENT, EISDIR, ENOTDIR } from '../errors'
 import { normalize, dirname, basename } from '../path'
 
 // Mock filesystem state for testing
@@ -283,12 +283,22 @@ describe('unlink', () => {
       await expect(unlink('')).rejects.toThrow()
     })
 
-    it('should handle trailing slashes', async () => {
-      // Trailing slash typically indicates directory, should throw EISDIR or normalize
-      // Behavior may vary - this tests the implementation handles it consistently
-      const result = unlink('/test.txt/')
-      // Should either succeed (after normalizing) or throw appropriate error
-      await expect(result).rejects.toThrow()
+    it('should handle trailing slashes on files with ENOTDIR', async () => {
+      // Trailing slash on a file path indicates user expected a directory
+      // This should throw ENOTDIR (not a directory)
+      await expect(unlink('/test.txt/')).rejects.toThrow(ENOTDIR)
+    })
+
+    it('should include original path in ENOTDIR error', async () => {
+      try {
+        await unlink('/test.txt/')
+        expect.fail('Should have thrown an error')
+      } catch (error) {
+        expect(error).toBeInstanceOf(ENOTDIR)
+        expect((error as ENOTDIR).syscall).toBe('unlink')
+        // Error should include the original path with trailing slash
+        expect((error as ENOTDIR).path).toBe('/test.txt/')
+      }
     })
   })
 
@@ -425,3 +435,112 @@ async function createFile(path: string, content: string): Promise<void> {
 async function getBlobCount(): Promise<number> {
   return fs.blobs.size
 }
+
+// ============================================================================
+// Reference Counting Tests
+// ============================================================================
+
+describe('unlink with reference counting', () => {
+  let fsWithRefCounts: {
+    files: Map<string, FileEntry>
+    blobs: Map<string, Uint8Array>
+    blobRefCounts: Map<string, number>
+  }
+
+  beforeEach(() => {
+    // Set up a filesystem with reference counting support
+    fsWithRefCounts = {
+      files: new Map<string, FileEntry>([
+        ['/', { type: 'directory' }],
+        // Two files sharing the same blob (simulating hard links)
+        ['/file1.txt', { type: 'file', content: new TextEncoder().encode('shared content'), blobId: 'shared-blob' }],
+        ['/file2.txt', { type: 'file', content: new TextEncoder().encode('shared content'), blobId: 'shared-blob' }],
+        // A file with unique blob
+        ['/unique.txt', { type: 'file', content: new TextEncoder().encode('unique'), blobId: 'unique-blob' }],
+      ]),
+      blobs: new Map<string, Uint8Array>([
+        ['shared-blob', new TextEncoder().encode('shared content')],
+        ['unique-blob', new TextEncoder().encode('unique')],
+      ]),
+      blobRefCounts: new Map<string, number>([
+        ['shared-blob', 2], // Referenced by file1 and file2
+        ['unique-blob', 1], // Only referenced by unique.txt
+      ]),
+    }
+
+    setContext(fsWithRefCounts as UnlinkContext)
+  })
+
+  afterEach(() => {
+    setContext(null)
+  })
+
+  it('should decrement ref count but preserve blob when other references exist', async () => {
+    // file1 and file2 share the same blob
+    await unlink('/file1.txt')
+
+    // File should be gone
+    expect(fsWithRefCounts.files.has('/file1.txt')).toBe(false)
+
+    // Blob should still exist (file2 still references it)
+    expect(fsWithRefCounts.blobs.has('shared-blob')).toBe(true)
+
+    // Ref count should be decremented
+    expect(fsWithRefCounts.blobRefCounts.get('shared-blob')).toBe(1)
+  })
+
+  it('should delete blob when last reference is removed', async () => {
+    // Remove both files that share the blob
+    await unlink('/file1.txt')
+    await unlink('/file2.txt')
+
+    // Both files should be gone
+    expect(fsWithRefCounts.files.has('/file1.txt')).toBe(false)
+    expect(fsWithRefCounts.files.has('/file2.txt')).toBe(false)
+
+    // Blob should be deleted (no more references)
+    expect(fsWithRefCounts.blobs.has('shared-blob')).toBe(false)
+    expect(fsWithRefCounts.blobRefCounts.has('shared-blob')).toBe(false)
+  })
+
+  it('should delete blob immediately for single-reference files', async () => {
+    await unlink('/unique.txt')
+
+    // File should be gone
+    expect(fsWithRefCounts.files.has('/unique.txt')).toBe(false)
+
+    // Blob should be deleted
+    expect(fsWithRefCounts.blobs.has('unique-blob')).toBe(false)
+    expect(fsWithRefCounts.blobRefCounts.has('unique-blob')).toBe(false)
+  })
+
+  it('should handle missing ref count gracefully (assume 1)', async () => {
+    // Add a file with blob but no ref count entry
+    fsWithRefCounts.files.set('/no-refcount.txt', {
+      type: 'file',
+      content: new TextEncoder().encode('test'),
+      blobId: 'orphan-blob',
+    })
+    fsWithRefCounts.blobs.set('orphan-blob', new TextEncoder().encode('test'))
+    // Note: no entry in blobRefCounts
+
+    await unlink('/no-refcount.txt')
+
+    // File should be gone
+    expect(fsWithRefCounts.files.has('/no-refcount.txt')).toBe(false)
+
+    // Blob should be deleted (assumed ref count of 1)
+    expect(fsWithRefCounts.blobs.has('orphan-blob')).toBe(false)
+  })
+
+  it('should not affect other blobs when deleting', async () => {
+    const sharedBlobBefore = fsWithRefCounts.blobs.get('shared-blob')
+    const sharedRefCountBefore = fsWithRefCounts.blobRefCounts.get('shared-blob')
+
+    await unlink('/unique.txt')
+
+    // Shared blob should be unchanged
+    expect(fsWithRefCounts.blobs.get('shared-blob')).toBe(sharedBlobBefore)
+    expect(fsWithRefCounts.blobRefCounts.get('shared-blob')).toBe(sharedRefCountBefore)
+  })
+})

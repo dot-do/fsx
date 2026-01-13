@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { hashToPath, pathToHash } from './path-mapping'
+import { hashToPath, pathToHash, createPathMapper, isValidHash, isValidPath } from './path-mapping'
 
 describe('hashToPath', () => {
   describe('SHA-1 hashes (40 characters)', () => {
@@ -287,6 +287,256 @@ describe('round-trip: path -> hash -> path', () => {
       const hash = pathToHash(originalPath)
       const reconstructedPath = hashToPath(hash)
       expect(reconstructedPath).toBe(originalPath)
+    })
+  })
+})
+
+describe('configurable options', () => {
+  describe('custom base directory', () => {
+    it('should use custom base directory when specified', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const path = hashToPath(hash, { baseDir: 'blobs' })
+      expect(path).toBe('blobs/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should handle nested base directory', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const path = hashToPath(hash, { baseDir: '.git/objects' })
+      expect(path).toBe('.git/objects/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should strip trailing slash from base directory', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const path = hashToPath(hash, { baseDir: 'objects/' })
+      expect(path).toBe('objects/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should use default "objects" when baseDir is empty string', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const path = hashToPath(hash, { baseDir: '' })
+      expect(path).toBe('objects/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+  })
+
+  describe('custom prefix length', () => {
+    it('should use 1-character prefix when prefixLen is 1', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const path = hashToPath(hash, { prefixLen: 1 })
+      expect(path).toBe('objects/a/af4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should use 3-character prefix when prefixLen is 3', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const path = hashToPath(hash, { prefixLen: 3 })
+      expect(path).toBe('objects/aaf/4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should use 4-character prefix when prefixLen is 4', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const path = hashToPath(hash, { prefixLen: 4 })
+      expect(path).toBe('objects/aaf4/c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should reject prefixLen less than 1', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      expect(() => hashToPath(hash, { prefixLen: 0 })).toThrow('prefixLen must be between 1 and 8')
+    })
+
+    it('should reject prefixLen greater than 8', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      expect(() => hashToPath(hash, { prefixLen: 9 })).toThrow('prefixLen must be between 1 and 8')
+    })
+
+    it('should reject non-integer prefixLen', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      expect(() => hashToPath(hash, { prefixLen: 2.5 })).toThrow('prefixLen must be an integer')
+    })
+  })
+
+  describe('combined options', () => {
+    it('should apply both baseDir and prefixLen together', () => {
+      const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const path = hashToPath(hash, { baseDir: 'store', prefixLen: 3 })
+      expect(path).toBe('store/aaf/4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should work with SHA-256 and custom options', () => {
+      const hash = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+      const path = hashToPath(hash, { baseDir: 'cas', prefixLen: 4 })
+      expect(path).toBe('cas/2cf2/4dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824')
+    })
+  })
+})
+
+describe('pathToHash with options', () => {
+  describe('custom base directory', () => {
+    it('should extract hash from custom base directory path', () => {
+      const path = 'blobs/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const hash = pathToHash(path, { baseDir: 'blobs' })
+      expect(hash).toBe('aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should handle nested base directory', () => {
+      const path = '.git/objects/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const hash = pathToHash(path, { baseDir: '.git/objects' })
+      expect(hash).toBe('aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should reject path that does not match baseDir', () => {
+      const path = 'wrong/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      expect(() => pathToHash(path, { baseDir: 'blobs' })).toThrow()
+    })
+  })
+
+  describe('custom prefix length', () => {
+    it('should extract hash with 1-character prefix', () => {
+      const path = 'objects/a/af4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const hash = pathToHash(path, { prefixLen: 1 })
+      expect(hash).toBe('aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should extract hash with 3-character prefix', () => {
+      const path = 'objects/aaf/4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const hash = pathToHash(path, { prefixLen: 3 })
+      expect(hash).toBe('aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should extract hash with 4-character prefix', () => {
+      const path = 'objects/aaf4/c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const hash = pathToHash(path, { prefixLen: 4 })
+      expect(hash).toBe('aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should reject path with wrong prefix length', () => {
+      const path = 'objects/aaa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434' // 3-char prefix
+      expect(() => pathToHash(path, { prefixLen: 2 })).toThrow()
+    })
+  })
+
+  describe('combined options', () => {
+    it('should extract hash with both baseDir and prefixLen', () => {
+      const path = 'store/aaf/4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const hash = pathToHash(path, { baseDir: 'store', prefixLen: 3 })
+      expect(hash).toBe('aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    })
+
+    it('should work with SHA-256 and custom options', () => {
+      const path = 'cas/2cf2/4dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+      const hash = pathToHash(path, { baseDir: 'cas', prefixLen: 4 })
+      expect(hash).toBe('2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824')
+    })
+  })
+
+  describe('round-trip with custom options', () => {
+    it('should round-trip with custom baseDir', () => {
+      const originalHash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const options = { baseDir: 'blobs' }
+      const path = hashToPath(originalHash, options)
+      const extractedHash = pathToHash(path, options)
+      expect(extractedHash).toBe(originalHash)
+    })
+
+    it('should round-trip with custom prefixLen', () => {
+      const originalHash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+      const options = { prefixLen: 3 }
+      const path = hashToPath(originalHash, options)
+      const extractedHash = pathToHash(path, options)
+      expect(extractedHash).toBe(originalHash)
+    })
+
+    it('should round-trip with both custom options', () => {
+      const originalHash = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+      const options = { baseDir: 'store', prefixLen: 4 }
+      const path = hashToPath(originalHash, options)
+      const extractedHash = pathToHash(path, options)
+      expect(extractedHash).toBe(originalHash)
+    })
+  })
+})
+
+describe('createPathMapper factory', () => {
+  it('should create a mapper with default options', () => {
+    const mapper = createPathMapper()
+    const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+    expect(mapper.hashToPath(hash)).toBe('objects/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+  })
+
+  it('should create a mapper with custom baseDir', () => {
+    const mapper = createPathMapper({ baseDir: 'blobs' })
+    const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+    expect(mapper.hashToPath(hash)).toBe('blobs/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+  })
+
+  it('should create a mapper with custom prefixLen', () => {
+    const mapper = createPathMapper({ prefixLen: 3 })
+    const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+    expect(mapper.hashToPath(hash)).toBe('objects/aaf/4c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+  })
+
+  it('should create a mapper with both custom options', () => {
+    const mapper = createPathMapper({ baseDir: 'store', prefixLen: 4 })
+    const hash = 'aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d'
+    expect(mapper.hashToPath(hash)).toBe('store/aaf4/c61ddcc5e8a2dabede0f3b482cd9aea9434d')
+    expect(mapper.pathToHash('store/aaf4/c61ddcc5e8a2dabede0f3b482cd9aea9434d')).toBe(hash)
+  })
+
+  it('should expose the options used to create the mapper', () => {
+    const mapper = createPathMapper({ baseDir: 'cas', prefixLen: 3 })
+    expect(mapper.options.baseDir).toBe('cas')
+    expect(mapper.options.prefixLen).toBe(3)
+  })
+})
+
+describe('validation utilities', () => {
+  describe('isValidHash', () => {
+    it('should return true for valid SHA-1 hash', () => {
+      expect(isValidHash('aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d')).toBe(true)
+    })
+
+    it('should return true for valid SHA-256 hash', () => {
+      expect(isValidHash('2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824')).toBe(true)
+    })
+
+    it('should return false for invalid length', () => {
+      expect(isValidHash('aaf4c61')).toBe(false)
+    })
+
+    it('should return false for non-hex characters', () => {
+      expect(isValidHash('gggggggggggggggggggggggggggggggggggggggg')).toBe(false)
+    })
+
+    it('should return false for empty string', () => {
+      expect(isValidHash('')).toBe(false)
+    })
+
+    it('should accept uppercase hex', () => {
+      expect(isValidHash('AAF4C61DDCC5E8A2DABEDE0F3B482CD9AEA9434D')).toBe(true)
+    })
+  })
+
+  describe('isValidPath', () => {
+    it('should return true for valid path with default options', () => {
+      expect(isValidPath('objects/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')).toBe(true)
+    })
+
+    it('should return true for valid path with custom baseDir', () => {
+      expect(isValidPath('blobs/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d', { baseDir: 'blobs' })).toBe(true)
+    })
+
+    it('should return true for valid path with custom prefixLen', () => {
+      expect(isValidPath('objects/aaf/4c61ddcc5e8a2dabede0f3b482cd9aea9434d', { prefixLen: 3 })).toBe(true)
+    })
+
+    it('should return false for path with wrong baseDir', () => {
+      expect(isValidPath('wrong/aa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')).toBe(false)
+    })
+
+    it('should return false for path with wrong prefix length', () => {
+      expect(isValidPath('objects/aaa/f4c61ddcc5e8a2dabede0f3b482cd9aea9434')).toBe(false)
+    })
+
+    it('should return false for path with non-hex directory', () => {
+      expect(isValidPath('objects/gg/f4c61ddcc5e8a2dabede0f3b482cd9aea9434d')).toBe(false)
     })
   })
 })

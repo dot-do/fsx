@@ -41,10 +41,36 @@ import type {
 } from '../core/index.js'
 import { Dirent, FileHandle, constants } from '../core/index.js'
 import { ENOENT, EEXIST, EISDIR, ENOTDIR, ENOTEMPTY } from '../core/errors.js'
+import {
+  computeChecksum,
+  blobIdFromChecksum,
+  selectTierBySize,
+  type CleanupConfig,
+  type CleanupResult,
+  type CleanupSchedulerState,
+  createCleanupSchedulerState,
+  DEFAULT_CLEANUP_CONFIG,
+} from '../storage/blob-utils.js'
 
 // Re-export security module for backward compatibility
 export { PathValidator, pathValidator, SecurityConstants } from './security.js'
 export type { ValidationResult, ValidationSuccess, ValidationFailure } from './security.js'
+
+// Re-export blob utilities for consumers
+export {
+  computeChecksum,
+  generateBlobId,
+  blobIdFromChecksum,
+  checksumFromBlobId,
+  isValidBlobId,
+  selectTierBySize,
+  getTierTransition,
+  isValidTierTransition,
+  type CleanupConfig,
+  type CleanupResult,
+  type CleanupSchedulerState,
+  type BlobStats,
+} from '../storage/blob-utils.js'
 
 // ============================================================================
 // TYPES
@@ -68,24 +94,27 @@ export interface FsModuleConfig {
   defaultMode?: number
   /** Default directory mode (default: 0o755) */
   defaultDirMode?: number
+  /** Configuration for scheduled blob cleanup */
+  cleanupConfig?: CleanupConfig
 }
 
 /**
- * Internal file entry stored in SQLite
+ * Internal file entry stored in SQLite.
+ * Maps to the files table schema defined in FILES_TABLE_COLUMNS.
  */
 interface FileEntry {
   id: number
   path: string
   name: string
   parent_id: number | null
-  type: 'file' | 'directory' | 'symlink'
+  type: FileType
   mode: number
   uid: number
   gid: number
   size: number
   blob_id: string | null
   link_target: string | null
-  tier: 'hot' | 'warm' | 'cold'
+  tier: StorageTier
   atime: number
   mtime: number
   ctime: number
@@ -95,46 +124,143 @@ interface FileEntry {
 }
 
 // ============================================================================
-// SCHEMA
+// SCHEMA DEFINITIONS
 // ============================================================================
 
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS files (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    path TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    parent_id INTEGER,
-    type TEXT NOT NULL CHECK(type IN ('file', 'directory', 'symlink')),
-    mode INTEGER NOT NULL DEFAULT 420,
-    uid INTEGER NOT NULL DEFAULT 0,
-    gid INTEGER NOT NULL DEFAULT 0,
-    size INTEGER NOT NULL DEFAULT 0,
-    blob_id TEXT,
-    link_target TEXT,
-    tier TEXT NOT NULL DEFAULT 'hot' CHECK(tier IN ('hot', 'warm', 'cold')),
-    atime INTEGER NOT NULL,
-    mtime INTEGER NOT NULL,
-    ctime INTEGER NOT NULL,
-    birthtime INTEGER NOT NULL,
-    nlink INTEGER NOT NULL DEFAULT 1,
-    FOREIGN KEY (parent_id) REFERENCES files(id) ON DELETE CASCADE
-  );
+/**
+ * Schema version for migration tracking.
+ * Increment when making breaking changes to the schema.
+ */
+export const SCHEMA_VERSION = 1
 
-  CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
-  CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent_id);
-  CREATE INDEX IF NOT EXISTS idx_files_tier ON files(tier);
+/**
+ * Valid file types stored in the files table.
+ * Used for CHECK constraint and TypeScript type safety.
+ */
+export const FILE_TYPES = ['file', 'directory', 'symlink'] as const
+export type FileType = (typeof FILE_TYPES)[number]
 
-  CREATE TABLE IF NOT EXISTS blobs (
-    id TEXT PRIMARY KEY,
-    data BLOB,
-    size INTEGER NOT NULL,
-    checksum TEXT,
-    tier TEXT NOT NULL DEFAULT 'hot' CHECK(tier IN ('hot', 'warm', 'cold')),
-    created_at INTEGER NOT NULL
-  );
+/**
+ * Storage tiers for blob data.
+ * - hot: SQLite storage (fast, limited size)
+ * - warm: R2 storage (medium latency, larger files)
+ * - cold: Archive R2 storage (slow, archival)
+ */
+export const STORAGE_TIERS = ['hot', 'warm', 'cold'] as const
+export type StorageTier = (typeof STORAGE_TIERS)[number]
 
-  CREATE INDEX IF NOT EXISTS idx_blobs_tier ON blobs(tier);
-`
+/**
+ * Default file mode (0o644 = rw-r--r--)
+ */
+export const DEFAULT_FILE_MODE = 0o644
+
+/**
+ * Default directory mode (0o755 = rwxr-xr-x)
+ */
+export const DEFAULT_DIR_MODE = 0o755
+
+/**
+ * Column definitions for the files table.
+ * Each column specifies its SQL type, constraints, and optional default value.
+ */
+export const FILES_TABLE_COLUMNS = {
+  id: { type: 'INTEGER', constraints: 'PRIMARY KEY AUTOINCREMENT' },
+  path: { type: 'TEXT', constraints: 'UNIQUE NOT NULL' },
+  name: { type: 'TEXT', constraints: 'NOT NULL' },
+  parent_id: { type: 'INTEGER', constraints: '' },
+  type: { type: 'TEXT', constraints: `NOT NULL CHECK(type IN (${FILE_TYPES.map((t) => `'${t}'`).join(', ')}))` },
+  mode: { type: 'INTEGER', constraints: `NOT NULL DEFAULT ${DEFAULT_FILE_MODE}` },
+  uid: { type: 'INTEGER', constraints: 'NOT NULL DEFAULT 0' },
+  gid: { type: 'INTEGER', constraints: 'NOT NULL DEFAULT 0' },
+  size: { type: 'INTEGER', constraints: 'NOT NULL DEFAULT 0' },
+  blob_id: { type: 'TEXT', constraints: '' },
+  link_target: { type: 'TEXT', constraints: '' },
+  tier: { type: 'TEXT', constraints: `NOT NULL DEFAULT 'hot' CHECK(tier IN (${STORAGE_TIERS.map((t) => `'${t}'`).join(', ')}))` },
+  atime: { type: 'INTEGER', constraints: 'NOT NULL' },
+  mtime: { type: 'INTEGER', constraints: 'NOT NULL' },
+  ctime: { type: 'INTEGER', constraints: 'NOT NULL' },
+  birthtime: { type: 'INTEGER', constraints: 'NOT NULL' },
+  nlink: { type: 'INTEGER', constraints: 'NOT NULL DEFAULT 1' },
+} as const
+
+/**
+ * Column definitions for the blobs table.
+ * Stores binary content with tiered storage support.
+ * Content-addressable: id is derived from SHA-256 hash of content.
+ * ref_count tracks how many files reference this blob for dedup and cleanup.
+ */
+export const BLOBS_TABLE_COLUMNS = {
+  id: { type: 'TEXT', constraints: 'PRIMARY KEY' },
+  data: { type: 'BLOB', constraints: '' },
+  size: { type: 'INTEGER', constraints: 'NOT NULL' },
+  checksum: { type: 'TEXT', constraints: 'NOT NULL' },
+  tier: { type: 'TEXT', constraints: `NOT NULL DEFAULT 'hot' CHECK(tier IN (${STORAGE_TIERS.map((t) => `'${t}'`).join(', ')}))` },
+  ref_count: { type: 'INTEGER', constraints: 'NOT NULL DEFAULT 1' },
+  created_at: { type: 'INTEGER', constraints: 'NOT NULL' },
+} as const
+
+/**
+ * Index definitions for performance optimization.
+ * Each index targets specific query patterns.
+ */
+export const SCHEMA_INDEXES = {
+  /** Fast path lookups: SELECT * FROM files WHERE path = ? */
+  idx_files_path: { table: 'files', columns: ['path'] },
+  /** Fast directory listings: SELECT * FROM files WHERE parent_id = ? */
+  idx_files_parent: { table: 'files', columns: ['parent_id'] },
+  /** Tier-based queries for storage management */
+  idx_files_tier: { table: 'files', columns: ['tier'] },
+  /** Tier-based blob queries for storage management */
+  idx_blobs_tier: { table: 'blobs', columns: ['tier'] },
+} as const
+
+/**
+ * Builds a CREATE TABLE statement from column definitions.
+ * @param tableName - Name of the table
+ * @param columns - Column definitions object
+ * @param foreignKeys - Optional foreign key constraints
+ */
+function buildCreateTable(
+  tableName: string,
+  columns: Record<string, { type: string; constraints: string }>,
+  foreignKeys: string[] = []
+): string {
+  const columnDefs = Object.entries(columns)
+    .map(([name, def]) => `    ${name} ${def.type}${def.constraints ? ' ' + def.constraints : ''}`)
+    .join(',\n')
+
+  const fkDefs = foreignKeys.length > 0 ? ',\n' + foreignKeys.map((fk) => `    ${fk}`).join(',\n') : ''
+
+  return `CREATE TABLE IF NOT EXISTS ${tableName} (\n${columnDefs}${fkDefs}\n  )`
+}
+
+/**
+ * Builds CREATE INDEX statements from index definitions.
+ */
+function buildCreateIndexes(indexes: typeof SCHEMA_INDEXES): string[] {
+  return Object.entries(indexes).map(
+    ([name, def]) => `CREATE INDEX IF NOT EXISTS ${name} ON ${def.table}(${def.columns.join(', ')})`
+  )
+}
+
+/**
+ * Complete schema SQL generated from typed definitions.
+ *
+ * Schema Design Decisions:
+ * 1. files table uses path as unique identifier for fast lookups
+ * 2. parent_id enables efficient directory listings via index
+ * 3. Blob content is stored separately to allow tiered storage
+ * 4. Type CHECK constraints ensure data integrity
+ * 5. Foreign key with CASCADE ensures orphan cleanup
+ */
+const SCHEMA = [
+  buildCreateTable('files', FILES_TABLE_COLUMNS, [
+    'FOREIGN KEY (parent_id) REFERENCES files(id) ON DELETE CASCADE',
+  ]),
+  ...buildCreateIndexes(SCHEMA_INDEXES).slice(0, 3), // files indexes
+  buildCreateTable('blobs', BLOBS_TABLE_COLUMNS),
+  ...buildCreateIndexes(SCHEMA_INDEXES).slice(3), // blobs indexes
+].join(';\n\n') + ';'
 
 // ============================================================================
 // FSMODULE CLASS
@@ -174,14 +300,20 @@ export class FsModule implements FsCapability {
   private transactionLog: FsTransactionLogEntry[] = []
   private currentTransactionId: string | null = null
 
+  // Cleanup scheduler state
+  private cleanupConfig: Required<CleanupConfig>
+  private cleanupState: CleanupSchedulerState
+
   constructor(config: FsModuleConfig) {
     this.sql = config.sql
     this.r2 = config.r2
     this.archive = config.archive
     this.basePath = config.basePath ?? '/'
     this.hotMaxSize = config.hotMaxSize ?? 1024 * 1024 // 1MB
-    this.defaultMode = config.defaultMode ?? 0o644
-    this.defaultDirMode = config.defaultDirMode ?? 0o755
+    this.defaultMode = config.defaultMode ?? DEFAULT_FILE_MODE
+    this.defaultDirMode = config.defaultDirMode ?? DEFAULT_DIR_MODE
+    this.cleanupConfig = { ...DEFAULT_CLEANUP_CONFIG, ...config.cleanupConfig }
+    this.cleanupState = createCleanupSchedulerState()
   }
 
   // ===========================================================================
@@ -321,9 +453,10 @@ export class FsModule implements FsCapability {
     await this.sql.exec(SCHEMA)
 
     // Create root directory if not exists
-    const root = this.sql.exec<FileEntry>('SELECT * FROM files WHERE path = ?', '/').one()
+    // Note: Use .toArray() instead of .one() since .one() throws if no results
+    const rootResults = this.sql.exec<FileEntry>('SELECT * FROM files WHERE path = ?', '/').toArray()
 
-    if (!root) {
+    if (rootResults.length === 0) {
       const now = Date.now()
       this.sql.exec(
         `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, tier, atime, mtime, ctime, birthtime, nlink)
@@ -404,54 +537,145 @@ export class FsModule implements FsCapability {
   private async getFile(path: string): Promise<FileEntry | null> {
     await this.initialize()
     const normalized = this.normalizePath(path)
-    const result = this.sql.exec<FileEntry>('SELECT * FROM files WHERE path = ?', normalized).one()
-    return result || null
+    // Note: Use .toArray() instead of .one() since .one() throws if no results
+    const results = this.sql.exec<FileEntry>('SELECT * FROM files WHERE path = ?', normalized).toArray()
+    return results.length > 0 ? results[0]! : null
   }
 
-  private selectTier(size: number): 'hot' | 'warm' | 'cold' {
-    if (size <= this.hotMaxSize) return 'hot'
-    if (this.r2) return 'warm'
-    return 'hot' // Fall back to hot if R2 not configured
+  private selectTier(size: number, explicitTier?: StorageTier): StorageTier {
+    if (explicitTier) return explicitTier
+    return selectTierBySize(size, this.hotMaxSize, !!this.r2)
   }
 
-  private async storeBlob(id: string, data: Uint8Array, tier: 'hot' | 'warm' | 'cold'): Promise<void> {
+  /**
+   * Compute SHA-256 hash of data and return as hex string.
+   * Uses shared utility from storage/blob-utils.ts.
+   */
+  private computeBlobChecksum(data: Uint8Array): Promise<string> {
+    return computeChecksum(data)
+  }
+
+  /**
+   * Generate content-addressable blob ID from checksum.
+   * Uses shared utility from storage/blob-utils.ts.
+   */
+  private generateBlobIdFromChecksum(checksum: string): string {
+    return blobIdFromChecksum(checksum)
+  }
+
+  /**
+   * Store blob with content-addressable ID and reference counting.
+   * If blob already exists (same content), just increment ref_count.
+   * Returns the blob ID.
+   *
+   * Optimized deduplication: uses single query to check existence
+   * and atomic UPDATE for ref_count increment.
+   */
+  private async storeBlob(data: Uint8Array, tier: StorageTier): Promise<string> {
     const now = Date.now()
+    const checksum = await this.computeBlobChecksum(data)
+    const blobId = this.generateBlobIdFromChecksum(checksum)
 
+    // Check if blob already exists (deduplication)
+    const existing = this.sql.exec<{ id: string; ref_count: number; tier: string }>(
+      'SELECT id, ref_count, tier FROM blobs WHERE id = ?',
+      blobId
+    ).toArray()
+
+    if (existing.length > 0) {
+      // Blob exists - increment ref_count
+      this.sql.exec('UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?', blobId)
+      return blobId
+    }
+
+    // New blob - store with ref_count = 1
     if (tier === 'hot') {
       this.sql.exec(
-        'INSERT OR REPLACE INTO blobs (id, data, size, tier, created_at) VALUES (?, ?, ?, ?, ?)',
-        id,
+        'INSERT INTO blobs (id, data, size, checksum, tier, ref_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        blobId,
         data.buffer,
         data.length,
+        checksum,
         tier,
+        1,
         now
       )
     } else if (tier === 'warm' && this.r2) {
-      await this.r2.put(id, data)
+      await this.r2.put(blobId, data)
       this.sql.exec(
-        'INSERT OR REPLACE INTO blobs (id, size, tier, created_at) VALUES (?, ?, ?, ?)',
-        id,
+        'INSERT INTO blobs (id, size, checksum, tier, ref_count, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        blobId,
         data.length,
+        checksum,
         tier,
+        1,
         now
       )
     } else if (tier === 'cold' && this.archive) {
-      await this.archive.put(id, data)
+      await this.archive.put(blobId, data)
       this.sql.exec(
-        'INSERT OR REPLACE INTO blobs (id, size, tier, created_at) VALUES (?, ?, ?, ?)',
-        id,
+        'INSERT INTO blobs (id, size, checksum, tier, ref_count, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        blobId,
         data.length,
+        checksum,
         tier,
+        1,
         now
       )
     }
+
+    return blobId
+  }
+
+  /**
+   * Decrement blob reference count. If ref_count reaches 0, delete the blob.
+   */
+  private async decrementBlobRef(blobId: string, tier: StorageTier): Promise<void> {
+    // Get current ref_count
+    const blob = this.sql.exec<{ ref_count: number }>(
+      'SELECT ref_count FROM blobs WHERE id = ?',
+      blobId
+    ).toArray()
+
+    if (blob.length === 0) return
+
+    const newRefCount = blob[0]!.ref_count - 1
+
+    if (newRefCount <= 0) {
+      // Delete blob completely
+      await this.deleteBlobCompletely(blobId, tier)
+    } else {
+      // Just decrement ref_count
+      this.sql.exec('UPDATE blobs SET ref_count = ? WHERE id = ?', newRefCount, blobId)
+    }
+  }
+
+  /**
+   * Completely delete a blob from storage
+   */
+  private async deleteBlobCompletely(blobId: string, tier: StorageTier): Promise<void> {
+    this.sql.exec('DELETE FROM blobs WHERE id = ?', blobId)
+
+    if (tier === 'warm' && this.r2) {
+      await this.r2.delete(blobId)
+    } else if (tier === 'cold' && this.archive) {
+      await this.archive.delete(blobId)
+    }
+  }
+
+  /**
+   * Increment blob reference count (for hard links)
+   */
+  private incrementBlobRef(blobId: string): void {
+    this.sql.exec('UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?', blobId)
   }
 
   private async getBlob(id: string, tier: 'hot' | 'warm' | 'cold'): Promise<Uint8Array | null> {
     if (tier === 'hot') {
-      const blob = this.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', id).one()
-      if (!blob?.data) return null
-      return new Uint8Array(blob.data)
+      // Note: Use .toArray() instead of .one() since .one() throws if no results
+      const blobs = this.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', id).toArray()
+      if (blobs.length === 0 || !blobs[0]?.data) return null
+      return new Uint8Array(blobs[0].data)
     }
 
     if (tier === 'warm' && this.r2) {
@@ -505,7 +729,7 @@ export class FsModule implements FsCapability {
       return options?.encoding ? '' : new Uint8Array(0)
     }
 
-    const data = await this.getBlob(file.blob_id, file.tier as 'hot' | 'warm' | 'cold')
+    const data = await this.getBlob(file.blob_id, file.tier as StorageTier)
     if (!data) {
       return options?.encoding ? '' : new Uint8Array(0)
     }
@@ -556,82 +780,81 @@ export class FsModule implements FsCapability {
       }
     }
 
-    // Wrap the actual write operation in a transaction for atomicity
-    await this.transaction(async () => {
-      const now = Date.now()
+    // Note: In Cloudflare Durable Objects, each request is processed atomically.
+    // We don't use explicit SQL transactions (BEGIN/COMMIT) as they're not allowed.
+    const now = Date.now()
 
-      // Handle append flag
-      if (options?.flag === 'a' || options?.flag === 'ax') {
-        if (existing && existing.blob_id) {
-          const existingData = await this.getBlob(existing.blob_id, existing.tier as 'hot' | 'warm' | 'cold')
-          if (existingData) {
-            const combined = new Uint8Array(existingData.length + bytes.length)
-            combined.set(existingData)
-            combined.set(bytes, existingData.length)
-            const blobId = crypto.randomUUID()
-            await this.storeBlob(blobId, combined, tier)
+    // Handle append flag
+    if (options?.flag === 'a' || options?.flag === 'ax') {
+      if (existing && existing.blob_id) {
+        const existingData = await this.getBlob(existing.blob_id, existing.tier as StorageTier)
+        if (existingData) {
+          const combined = new Uint8Array(existingData.length + bytes.length)
+          combined.set(existingData)
+          combined.set(bytes, existingData.length)
 
-            // Delete old blob
-            await this.deleteBlob(existing.blob_id, existing.tier as 'hot' | 'warm' | 'cold')
+          // Decrement ref on old blob
+          await this.decrementBlobRef(existing.blob_id, existing.tier as StorageTier)
 
-            // Update file
-            this.sql.exec(
-              'UPDATE files SET blob_id = ?, size = ?, tier = ?, mtime = ?, ctime = ? WHERE id = ?',
-              blobId,
-              combined.length,
-              tier,
-              now,
-              now,
-              existing.id
-            )
-            return
-          }
+          // Store new blob (content-addressable)
+          const blobId = await this.storeBlob(combined, tier)
+
+          // Update file
+          this.sql.exec(
+            'UPDATE files SET blob_id = ?, size = ?, tier = ?, mtime = ?, ctime = ? WHERE id = ?',
+            blobId,
+            combined.length,
+            tier,
+            now,
+            now,
+            existing.id
+          )
+          return
         }
       }
+    }
 
-      // Store blob
-      const blobId = crypto.randomUUID()
-      await this.storeBlob(blobId, bytes, tier)
+    // Store blob (content-addressable with dedup)
+    const blobId = await this.storeBlob(bytes, tier)
 
-      if (existing) {
-        // Delete old blob
-        if (existing.blob_id) {
-          await this.deleteBlob(existing.blob_id, existing.tier as 'hot' | 'warm' | 'cold')
-        }
-
-        // Update file
-        this.sql.exec(
-          'UPDATE files SET blob_id = ?, size = ?, tier = ?, mtime = ?, ctime = ? WHERE id = ?',
-          blobId,
-          bytes.length,
-          tier,
-          now,
-          now,
-          existing.id
-        )
-      } else {
-        // Create new file
-        this.sql.exec(
-          `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, blob_id, tier, atime, mtime, ctime, birthtime, nlink)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          normalized,
-          name,
-          parent.id,
-          'file',
-          options?.mode ?? this.defaultMode,
-          0,
-          0,
-          bytes.length,
-          blobId,
-          tier,
-          now,
-          now,
-          now,
-          now,
-          1
-        )
+    if (existing) {
+      // Decrement ref on old blob (may delete if ref_count reaches 0)
+      if (existing.blob_id) {
+        await this.decrementBlobRef(existing.blob_id, existing.tier as StorageTier)
       }
-    })
+
+      // Update file
+      this.sql.exec(
+        'UPDATE files SET blob_id = ?, size = ?, tier = ?, mtime = ?, ctime = ? WHERE id = ?',
+        blobId,
+        bytes.length,
+        tier,
+        now,
+        now,
+        existing.id
+      )
+    } else {
+      // Create new file
+      this.sql.exec(
+        `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, blob_id, tier, atime, mtime, ctime, birthtime, nlink)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        normalized,
+        name,
+        parent.id,
+        'file',
+        options?.mode ?? this.defaultMode,
+        0,
+        0,
+        bytes.length,
+        blobId,
+        tier,
+        now,
+        now,
+        now,
+        now,
+        1
+      )
+    }
   }
 
   async append(path: string, data: string | Uint8Array): Promise<void> {
@@ -651,9 +874,9 @@ export class FsModule implements FsCapability {
       throw new EISDIR(undefined, normalized)
     }
 
-    // Delete blob
+    // Decrement blob ref_count (will delete blob if ref_count reaches 0)
     if (file.blob_id) {
-      await this.deleteBlob(file.blob_id, file.tier as 'hot' | 'warm' | 'cold')
+      await this.decrementBlobRef(file.blob_id, file.tier as StorageTier)
     }
 
     // Delete file entry
@@ -683,38 +906,36 @@ export class FsModule implements FsCapability {
       throw new ENOENT(undefined, newParentPath)
     }
 
-    // Wrap the actual rename operation in a transaction for atomicity
-    await this.transaction(async () => {
-      const now = Date.now()
-      const newName = this.getFileName(newNormalized)
+    // Note: In Cloudflare Durable Objects, each request is processed atomically.
+    const now = Date.now()
+    const newName = this.getFileName(newNormalized)
 
-      // Delete existing if overwriting
-      if (existing) {
-        if (existing.blob_id) {
-          await this.deleteBlob(existing.blob_id, existing.tier as 'hot' | 'warm' | 'cold')
-        }
-        this.sql.exec('DELETE FROM files WHERE id = ?', existing.id)
+    // Delete existing if overwriting
+    if (existing) {
+      if (existing.blob_id) {
+        await this.decrementBlobRef(existing.blob_id, existing.tier as StorageTier)
       }
+      this.sql.exec('DELETE FROM files WHERE id = ?', existing.id)
+    }
 
-      // Update file
-      this.sql.exec(
-        'UPDATE files SET path = ?, name = ?, parent_id = ?, ctime = ? WHERE id = ?',
-        newNormalized,
-        newName,
-        newParent.id,
-        now,
-        file.id
-      )
+    // Update file
+    this.sql.exec(
+      'UPDATE files SET path = ?, name = ?, parent_id = ?, ctime = ? WHERE id = ?',
+      newNormalized,
+      newName,
+      newParent.id,
+      now,
+      file.id
+    )
 
-      // If directory, update all children paths
-      if (file.type === 'directory') {
-        const children = this.sql.exec<FileEntry>('SELECT * FROM files WHERE path LIKE ?', oldNormalized + '/%').toArray()
-        for (const child of children) {
-          const newChildPath = newNormalized + child.path.substring(oldNormalized.length)
-          this.sql.exec('UPDATE files SET path = ? WHERE id = ?', newChildPath, child.id)
-        }
+    // If directory, update all children paths
+    if (file.type === 'directory') {
+      const children = this.sql.exec<FileEntry>('SELECT * FROM files WHERE path LIKE ?', oldNormalized + '/%').toArray()
+      for (const child of children) {
+        const newChildPath = newNormalized + child.path.substring(oldNormalized.length)
+        this.sql.exec('UPDATE files SET path = ? WHERE id = ?', newChildPath, child.id)
       }
-    })
+    }
   }
 
   async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
@@ -756,14 +977,16 @@ export class FsModule implements FsCapability {
     const now = Date.now()
 
     if (file.blob_id) {
-      const data = await this.getBlob(file.blob_id, file.tier as 'hot' | 'warm' | 'cold')
+      const data = await this.getBlob(file.blob_id, file.tier as StorageTier)
       if (data) {
         const truncated = data.slice(0, length)
-        const newBlobId = crypto.randomUUID()
         const newTier = this.selectTier(truncated.length)
 
-        await this.storeBlob(newBlobId, truncated, newTier)
-        await this.deleteBlob(file.blob_id, file.tier as 'hot' | 'warm' | 'cold')
+        // Store new blob (content-addressable)
+        const newBlobId = await this.storeBlob(truncated, newTier)
+
+        // Decrement ref on old blob
+        await this.decrementBlobRef(file.blob_id, file.tier as StorageTier)
 
         this.sql.exec(
           'UPDATE files SET blob_id = ?, size = ?, tier = ?, mtime = ?, ctime = ? WHERE id = ?',
@@ -874,10 +1097,9 @@ export class FsModule implements FsCapability {
     }
 
     if (options?.recursive) {
-      // Delete all descendants recursively - wrap in transaction for atomicity
-      await this.transaction(async () => {
-        await this.deleteRecursive(file)
-      })
+      // Delete all descendants recursively
+      // Note: In Cloudflare Durable Objects, each request is processed atomically.
+      await this.deleteRecursive(file)
     } else {
       this.sql.exec('DELETE FROM files WHERE id = ?', file.id)
     }
@@ -891,7 +1113,7 @@ export class FsModule implements FsCapability {
         await this.deleteRecursive(child)
       } else {
         if (child.blob_id) {
-          await this.deleteBlob(child.blob_id, child.tier as 'hot' | 'warm' | 'cold')
+          await this.decrementBlobRef(child.blob_id, child.tier as StorageTier)
         }
         this.sql.exec('DELETE FROM files WHERE id = ?', child.id)
       }
@@ -1156,8 +1378,13 @@ export class FsModule implements FsCapability {
       throw new ENOENT(undefined, parentPath)
     }
 
-    // Increment nlink
+    // Increment nlink on original file
     this.sql.exec('UPDATE files SET nlink = nlink + 1 WHERE id = ?', file.id)
+
+    // Increment blob ref_count if file has a blob
+    if (file.blob_id) {
+      this.incrementBlobRef(file.blob_id)
+    }
 
     // Create new entry
     this.sql.exec(
@@ -1283,7 +1510,7 @@ export class FsModule implements FsCapability {
 
     let data: Uint8Array
     if (file) {
-      data = file.blob_id ? ((await this.getBlob(file.blob_id, file.tier as 'hot' | 'warm' | 'cold')) ?? new Uint8Array(0)) : new Uint8Array(0)
+      data = file.blob_id ? ((await this.getBlob(file.blob_id, file.tier as StorageTier)) ?? new Uint8Array(0)) : new Uint8Array(0)
     } else {
       // Create file if flags allow
       if (flags === 'w' || flags === 'w+' || flags === 'a' || flags === 'a+') {
@@ -1416,22 +1643,18 @@ export class FsModule implements FsCapability {
 
     if (!file.blob_id) return
 
-    const currentTier = file.tier as 'hot' | 'warm' | 'cold'
+    const currentTier = file.tier as StorageTier
     if (currentTier === tier) return
 
     // Read from current tier
     const data = await this.getBlob(file.blob_id, currentTier)
     if (!data) return
 
-    // Store in new tier
-    const newBlobId = crypto.randomUUID()
-    await this.storeBlob(newBlobId, data, tier)
+    // Move blob to new tier - delete from old tier first
+    await this.moveBlobToTier(file.blob_id, data, currentTier, tier)
 
-    // Delete from old tier
-    await this.deleteBlob(file.blob_id, currentTier)
-
-    // Update file
-    this.sql.exec('UPDATE files SET blob_id = ?, tier = ? WHERE id = ?', newBlobId, tier, file.id)
+    // Update file tier
+    this.sql.exec('UPDATE files SET tier = ? WHERE id = ?', tier, file.id)
   }
 
   async demote(path: string, tier: 'warm' | 'cold'): Promise<void> {
@@ -1445,25 +1668,48 @@ export class FsModule implements FsCapability {
 
     if (!file.blob_id) return
 
-    const currentTier = file.tier as 'hot' | 'warm' | 'cold'
+    const currentTier = file.tier as StorageTier
     if (currentTier === tier) return
 
-    // Wrap in transaction for atomicity
-    await this.transaction(async () => {
-      // Read from current tier
-      const data = await this.getBlob(file.blob_id!, currentTier)
-      if (!data) return
+    // Read from current tier
+    const data = await this.getBlob(file.blob_id!, currentTier)
+    if (!data) return
 
-      // Store in new tier
-      const newBlobId = crypto.randomUUID()
-      await this.storeBlob(newBlobId, data, tier)
+    // Move blob to new tier - delete from old tier first
+    await this.moveBlobToTier(file.blob_id, data, currentTier, tier)
 
-      // Delete from old tier
-      await this.deleteBlob(file.blob_id!, currentTier)
+    // Update file tier
+    this.sql.exec('UPDATE files SET tier = ? WHERE id = ?', tier, file.id)
+  }
 
-      // Update file
-      this.sql.exec('UPDATE files SET blob_id = ?, tier = ? WHERE id = ?', newBlobId, tier, file.id)
-    })
+  /**
+   * Move a blob from one tier to another, preserving its ID and ref_count.
+   */
+  private async moveBlobToTier(
+    blobId: string,
+    data: Uint8Array,
+    fromTier: StorageTier,
+    toTier: StorageTier
+  ): Promise<void> {
+    // Store data in new tier
+    if (toTier === 'hot') {
+      // Hot tier stores data inline in SQLite
+      this.sql.exec('UPDATE blobs SET data = ?, tier = ? WHERE id = ?', data.buffer, toTier, blobId)
+    } else if (toTier === 'warm' && this.r2) {
+      await this.r2.put(blobId, data)
+      this.sql.exec('UPDATE blobs SET data = NULL, tier = ? WHERE id = ?', toTier, blobId)
+    } else if (toTier === 'cold' && this.archive) {
+      await this.archive.put(blobId, data)
+      this.sql.exec('UPDATE blobs SET data = NULL, tier = ? WHERE id = ?', toTier, blobId)
+    }
+
+    // Clean up old tier data
+    if (fromTier === 'warm' && this.r2) {
+      await this.r2.delete(blobId)
+    } else if (fromTier === 'cold' && this.archive) {
+      await this.archive.delete(blobId)
+    }
+    // Hot tier data is overwritten in place, no cleanup needed
   }
 
   async getTier(path: string): Promise<'hot' | 'warm' | 'cold'> {
@@ -1474,7 +1720,7 @@ export class FsModule implements FsCapability {
       throw new ENOENT(undefined, path)
     }
 
-    return file.tier as 'hot' | 'warm' | 'cold'
+    return file.tier as StorageTier
   }
 
   // ===========================================================================
@@ -1507,41 +1753,39 @@ export class FsModule implements FsCapability {
       throw new ENOTDIR(undefined, srcNormalized)
     }
 
-    // Execute within a transaction for atomicity
-    await this.transaction(async () => {
-      // Create destination directory
-      const destParentPath = this.getParentPath(destNormalized)
-      const destParent = await this.getFile(destParentPath)
-      if (!destParent) {
-        throw new ENOENT(undefined, destParentPath)
-      }
+    // Note: In Cloudflare Durable Objects, each request is processed atomically.
+    // Create destination directory
+    const destParentPath = this.getParentPath(destNormalized)
+    const destParent = await this.getFile(destParentPath)
+    if (!destParent) {
+      throw new ENOENT(undefined, destParentPath)
+    }
 
-      const now = Date.now()
-      const destName = this.getFileName(destNormalized)
+    const now = Date.now()
+    const destName = this.getFileName(destNormalized)
 
-      // Create the destination directory entry
-      this.sql.exec(
-        `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, tier, atime, mtime, ctime, birthtime, nlink)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        destNormalized,
-        destName,
-        destParent.id,
-        'directory',
-        options?.preserveMetadata ? srcDir.mode : this.defaultDirMode,
-        srcDir.uid,
-        srcDir.gid,
-        0,
-        'hot',
-        now,
-        now,
-        now,
-        now,
-        2
-      )
+    // Create the destination directory entry
+    this.sql.exec(
+      `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, tier, atime, mtime, ctime, birthtime, nlink)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      destNormalized,
+      destName,
+      destParent.id,
+      'directory',
+      options?.preserveMetadata ? srcDir.mode : this.defaultDirMode,
+      srcDir.uid,
+      srcDir.gid,
+      0,
+      'hot',
+      now,
+      now,
+      now,
+      now,
+      2
+    )
 
-      // Recursively copy contents
-      await this.copyDirContents(srcNormalized, destNormalized, options)
-    })
+    // Recursively copy contents
+    await this.copyDirContents(srcNormalized, destNormalized, options)
   }
 
   /**
@@ -1590,14 +1834,12 @@ export class FsModule implements FsCapability {
           await this.copyDirContents(child.path, destChildPath, options)
         }
       } else if (child.type === 'file') {
-        // Copy file content
+        // Copy file - reuse blob with incremented ref_count (deduplication)
         let blobId: string | null = null
         if (child.blob_id) {
-          const data = await this.getBlob(child.blob_id, child.tier as 'hot' | 'warm' | 'cold')
-          if (data) {
-            blobId = crypto.randomUUID()
-            await this.storeBlob(blobId, data, child.tier as 'hot' | 'warm' | 'cold')
-          }
+          // Increment ref_count on existing blob instead of copying data
+          this.incrementBlobRef(child.blob_id)
+          blobId = child.blob_id
         }
 
         this.sql.exec(
@@ -1646,15 +1888,14 @@ export class FsModule implements FsCapability {
 
   /**
    * Write multiple files atomically. Either all succeed or all are rolled back.
+   * Note: In Cloudflare Durable Objects, each request is processed atomically.
    *
    * @param files - Array of file paths and content to write
    */
   async writeMany(files: Array<{ path: string; content: string | Uint8Array }>): Promise<void> {
-    await this.transaction(async () => {
-      for (const file of files) {
-        await this.write(file.path, file.content)
-      }
-    })
+    for (const file of files) {
+      await this.write(file.path, file.content)
+    }
   }
 
   /**
@@ -1687,9 +1928,457 @@ export class FsModule implements FsCapability {
       }
     } else {
       if (file.blob_id) {
-        await this.deleteBlob(file.blob_id, file.tier as 'hot' | 'warm' | 'cold')
+        await this.decrementBlobRef(file.blob_id, file.tier as StorageTier)
       }
       this.sql.exec('DELETE FROM files WHERE id = ?', file.id)
     }
+  }
+
+  // ===========================================================================
+  // BLOB MANAGEMENT OPERATIONS
+  // ===========================================================================
+
+  /**
+   * Get information about a blob by file path.
+   *
+   * @param path - The file path to look up
+   * @returns Blob information or null if not found
+   */
+  async getBlobInfoByPath(path: string): Promise<{
+    blobId: string
+    size: number
+    checksum: string
+    tier: StorageTier
+    refCount: number
+    createdAt: number
+  } | null> {
+    await this.initialize()
+    const normalized = this.normalizePath(path)
+    const file = await this.getFile(normalized)
+
+    if (!file || !file.blob_id) return null
+
+    const blob = this.sql.exec<{
+      id: string
+      size: number
+      checksum: string
+      tier: string
+      ref_count: number
+      created_at: number
+    }>('SELECT id, size, checksum, tier, ref_count, created_at FROM blobs WHERE id = ?', file.blob_id).toArray()
+
+    if (blob.length === 0) return null
+
+    return {
+      blobId: blob[0]!.id,
+      size: blob[0]!.size,
+      checksum: blob[0]!.checksum,
+      tier: blob[0]!.tier as StorageTier,
+      refCount: blob[0]!.ref_count,
+      createdAt: blob[0]!.created_at,
+    }
+  }
+
+  /**
+   * Get information about a blob by ID.
+   *
+   * @param blobId - The blob ID to look up
+   * @returns Blob information or null if not found
+   */
+  async getBlobInfo(blobId: string): Promise<{
+    id: string
+    size: number
+    checksum: string
+    tier: StorageTier
+    ref_count: number
+    created_at: number
+  } | null> {
+    await this.initialize()
+    const blob = this.sql.exec<{
+      id: string
+      size: number
+      checksum: string
+      tier: string
+      ref_count: number
+      created_at: number
+    }>('SELECT id, size, checksum, tier, ref_count, created_at FROM blobs WHERE id = ?', blobId).toArray()
+
+    if (blob.length === 0) return null
+
+    return {
+      id: blob[0]!.id,
+      size: blob[0]!.size,
+      checksum: blob[0]!.checksum,
+      tier: blob[0]!.tier as StorageTier,
+      ref_count: blob[0]!.ref_count,
+      created_at: blob[0]!.created_at,
+    }
+  }
+
+  /**
+   * Get a blob by its ID, returning both metadata and data.
+   *
+   * @param blobId - The blob ID to retrieve
+   * @returns Blob data and metadata or null if not found
+   */
+  async getBlobById(blobId: string): Promise<{
+    id: string
+    data: Uint8Array
+    size: number
+    checksum: string
+    tier: StorageTier
+  } | null> {
+    await this.initialize()
+    const blobMeta = this.sql.exec<{
+      id: string
+      size: number
+      checksum: string
+      tier: string
+    }>('SELECT id, size, checksum, tier FROM blobs WHERE id = ?', blobId).toArray()
+
+    if (blobMeta.length === 0) return null
+
+    const tier = blobMeta[0]!.tier as StorageTier
+    const data = await this.getBlob(blobId, tier)
+
+    if (!data) return null
+
+    return {
+      id: blobMeta[0]!.id,
+      data,
+      size: blobMeta[0]!.size,
+      checksum: blobMeta[0]!.checksum,
+      tier,
+    }
+  }
+
+  /**
+   * Verify the integrity of a blob by checking its checksum.
+   *
+   * @param blobId - The blob ID to verify
+   * @returns Object with valid flag and details
+   */
+  async verifyBlobIntegrity(blobId: string): Promise<{
+    valid: boolean
+    storedChecksum: string
+    actualChecksum: string
+    size: number
+  }> {
+    await this.initialize()
+    const blobMeta = this.sql.exec<{
+      id: string
+      size: number
+      checksum: string
+      tier: string
+    }>('SELECT id, size, checksum, tier FROM blobs WHERE id = ?', blobId).toArray()
+
+    if (blobMeta.length === 0) {
+      throw new Error(`Blob not found: ${blobId}`)
+    }
+
+    const tier = blobMeta[0]!.tier as StorageTier
+    const data = await this.getBlob(blobId, tier)
+
+    if (!data) {
+      throw new Error(`Blob data not found: ${blobId}`)
+    }
+
+    const actualChecksum = await this.computeBlobChecksum(data)
+    const storedChecksum = blobMeta[0]!.checksum
+
+    return {
+      valid: actualChecksum === storedChecksum,
+      storedChecksum,
+      actualChecksum,
+      size: data.length,
+    }
+  }
+
+  /**
+   * Verify a checksum matches for given data content.
+   *
+   * @param checksum - Expected checksum
+   * @param content - Content to verify (string or Uint8Array)
+   * @returns true if checksum matches
+   */
+  async verifyChecksum(checksum: string, content: string | Uint8Array): Promise<boolean> {
+    const data = typeof content === 'string' ? new TextEncoder().encode(content) : content
+    const actualChecksum = await this.computeBlobChecksum(data)
+    return actualChecksum === checksum
+  }
+
+  /**
+   * List all orphaned blobs (blobs with ref_count = 0).
+   *
+   * @returns Array of orphaned blob IDs
+   */
+  async listOrphanedBlobs(): Promise<string[]> {
+    await this.initialize()
+    const blobs = this.sql.exec<{ id: string }>('SELECT id FROM blobs WHERE ref_count = 0').toArray()
+    return blobs.map(b => b.id)
+  }
+
+  /**
+   * Clean up all orphaned blobs (blobs with ref_count = 0).
+   *
+   * @returns Number of blobs cleaned up
+   */
+  async cleanupOrphanedBlobs(): Promise<number> {
+    await this.initialize()
+    const orphaned = await this.listOrphanedBlobs()
+
+    for (const blobId of orphaned) {
+      // Get blob tier before deleting
+      const blobMeta = this.sql.exec<{ tier: string }>('SELECT tier FROM blobs WHERE id = ?', blobId).toArray()
+      if (blobMeta.length > 0) {
+        const tier = blobMeta[0]!.tier as StorageTier
+        await this.deleteBlobCompletely(blobId, tier)
+      }
+    }
+
+    return orphaned.length
+  }
+
+  /**
+   * Get statistics about blobs by storage tier.
+   *
+   * @returns Object with counts and sizes by tier
+   */
+  async getTierStats(): Promise<{
+    hot: { count: number; totalSize: number }
+    warm: { count: number; totalSize: number }
+    cold: { count: number; totalSize: number }
+  }> {
+    await this.initialize()
+    const stats = this.sql.exec<{ tier: string; count: number; total_size: number }>(
+      'SELECT tier, COUNT(*) as count, COALESCE(SUM(size), 0) as total_size FROM blobs GROUP BY tier'
+    ).toArray()
+
+    const result = {
+      hot: { count: 0, totalSize: 0 },
+      warm: { count: 0, totalSize: 0 },
+      cold: { count: 0, totalSize: 0 },
+    }
+
+    for (const s of stats) {
+      const tier = s.tier as StorageTier
+      result[tier] = { count: s.count, totalSize: s.total_size }
+    }
+
+    return result
+  }
+
+  /**
+   * Get deduplication statistics.
+   *
+   * @returns Object with deduplication metrics
+   */
+  async getDedupStats(): Promise<{
+    totalBlobs: number
+    uniqueBlobs: number
+    totalRefs: number
+    dedupRatio: number
+    savedBytes: number
+  }> {
+    await this.initialize()
+
+    // Get total blobs and refs
+    const blobStats = this.sql.exec<{ total: number; total_refs: number; total_size: number }>(
+      'SELECT COUNT(*) as total, COALESCE(SUM(ref_count), 0) as total_refs, COALESCE(SUM(size), 0) as total_size FROM blobs'
+    ).toArray()
+
+    const totalBlobs = blobStats[0]?.total ?? 0
+    const totalRefs = blobStats[0]?.total_refs ?? 0
+    const totalSize = blobStats[0]?.total_size ?? 0
+
+    // Unique blobs is same as totalBlobs (since content-addressable IDs)
+    const uniqueBlobs = totalBlobs
+
+    // Dedup ratio is refs / blobs (how many times each blob is referenced on average)
+    const dedupRatio = totalBlobs > 0 ? totalRefs / totalBlobs : 1
+
+    // Saved bytes: (totalRefs - totalBlobs) * avgBlobSize
+    // This represents bytes saved by deduplication
+    const avgBlobSize = totalBlobs > 0 ? totalSize / totalBlobs : 0
+    const savedBytes = Math.max(0, (totalRefs - totalBlobs) * avgBlobSize)
+
+    return {
+      totalBlobs,
+      uniqueBlobs,
+      totalRefs,
+      dedupRatio,
+      savedBytes: Math.round(savedBytes),
+    }
+  }
+
+  /**
+   * Get the reference count for a blob.
+   *
+   * @param blobId - The blob ID to check
+   * @returns Reference count or 0 if not found
+   */
+  async getBlobRefCount(blobId: string): Promise<number> {
+    await this.initialize()
+    const blob = this.sql.exec<{ ref_count: number }>('SELECT ref_count FROM blobs WHERE id = ?', blobId).toArray()
+    return blob.length > 0 ? blob[0]!.ref_count : 0
+  }
+
+  // ===========================================================================
+  // SCHEDULED CLEANUP OPERATIONS
+  // ===========================================================================
+
+  /**
+   * Get the current cleanup scheduler state.
+   *
+   * @returns Current cleanup scheduler state
+   */
+  getCleanupState(): CleanupSchedulerState {
+    return { ...this.cleanupState }
+  }
+
+  /**
+   * Check if cleanup should be triggered based on current conditions.
+   *
+   * @returns true if cleanup should run
+   */
+  async shouldRunCleanup(): Promise<boolean> {
+    if (this.cleanupState.running) return false
+
+    await this.initialize()
+    const orphanedCount = await this.countOrphanedBlobs()
+    return orphanedCount >= this.cleanupConfig.minOrphanCount
+  }
+
+  /**
+   * Count orphaned blobs that are eligible for cleanup.
+   *
+   * @returns Number of orphaned blobs
+   */
+  private async countOrphanedBlobs(): Promise<number> {
+    const result = this.sql.exec<{ count: number }>(
+      'SELECT COUNT(*) as count FROM blobs WHERE ref_count = 0'
+    ).toArray()
+    return result[0]?.count ?? 0
+  }
+
+  /**
+   * Run scheduled cleanup of orphaned blobs.
+   *
+   * This method respects the cleanup configuration:
+   * - minOrphanCount: Minimum orphans before cleanup triggers
+   * - minOrphanAgeMs: Grace period for recently orphaned blobs
+   * - batchSize: Maximum blobs to clean per invocation
+   *
+   * @param force - Force cleanup even if thresholds not met
+   * @returns Cleanup result with statistics
+   */
+  async runScheduledCleanup(force = false): Promise<CleanupResult> {
+    await this.initialize()
+
+    const startTime = Date.now()
+
+    // Check if cleanup should run
+    if (!force && !(await this.shouldRunCleanup())) {
+      return {
+        cleaned: 0,
+        skipped: 0,
+        found: 0,
+        durationMs: Date.now() - startTime,
+      }
+    }
+
+    // Mark as running
+    this.cleanupState.running = true
+
+    try {
+      // Find orphaned blobs with age filter
+      const cutoffTime = Date.now() - this.cleanupConfig.minOrphanAgeMs
+      const orphaned = this.sql.exec<{ id: string; tier: string; created_at: number }>(
+        `SELECT id, tier, created_at FROM blobs
+         WHERE ref_count = 0
+         ORDER BY created_at ASC
+         LIMIT ?`,
+        this.cleanupConfig.batchSize
+      ).toArray()
+
+      let cleaned = 0
+      let skipped = 0
+
+      for (const blob of orphaned) {
+        // Check age - skip if too recent
+        if (blob.created_at > cutoffTime) {
+          skipped++
+          continue
+        }
+
+        // Delete the blob
+        const tier = blob.tier as StorageTier
+        await this.deleteBlobCompletely(blob.id, tier)
+        cleaned++
+      }
+
+      // Update scheduler state
+      this.cleanupState.lastCleanup = Date.now()
+      this.cleanupState.cleanupCount++
+      this.cleanupState.totalCleaned += cleaned
+
+      return {
+        cleaned,
+        skipped,
+        found: orphaned.length,
+        durationMs: Date.now() - startTime,
+      }
+    } finally {
+      this.cleanupState.running = false
+    }
+  }
+
+  /**
+   * Trigger background cleanup if conditions are met.
+   *
+   * This is a non-blocking method that can be called after
+   * file operations to opportunistically clean up orphans.
+   *
+   * @returns Promise that resolves when cleanup check is scheduled
+   */
+  async maybeRunBackgroundCleanup(): Promise<void> {
+    if (!this.cleanupConfig.async) {
+      // Synchronous mode - run inline
+      await this.runScheduledCleanup()
+      return
+    }
+
+    // Async mode - check and run in background
+    // Note: In Durable Objects, we can't truly run in background
+    // but we can defer the cleanup to avoid blocking the response
+    const shouldRun = await this.shouldRunCleanup()
+    if (shouldRun) {
+      // Schedule cleanup (will run on next tick)
+      queueMicrotask(async () => {
+        try {
+          await this.runScheduledCleanup()
+        } catch {
+          // Swallow errors in background cleanup
+        }
+      })
+    }
+  }
+
+  /**
+   * Get cleanup configuration.
+   *
+   * @returns Current cleanup configuration
+   */
+  getCleanupConfig(): Required<CleanupConfig> {
+    return { ...this.cleanupConfig }
+  }
+
+  /**
+   * Update cleanup configuration.
+   *
+   * @param config - Partial configuration to merge
+   */
+  setCleanupConfig(config: Partial<CleanupConfig>): void {
+    this.cleanupConfig = { ...this.cleanupConfig, ...config }
   }
 }

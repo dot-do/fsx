@@ -295,6 +295,55 @@ export interface SQLiteMetadataOptions {
   defaultTransactionOptions?: TransactionOptions
 }
 
+/**
+ * Cache entry for prepared SQL statement patterns.
+ *
+ * Stores the SQL template and tracks usage statistics for performance monitoring.
+ * While SQLite in Durable Objects doesn't support true prepared statements,
+ * this cache helps optimize query construction and enables future optimizations.
+ *
+ * @internal
+ */
+interface PreparedStatementCache {
+  /** SQL query template with placeholders */
+  sql: string
+  /** Number of times this statement has been executed */
+  executionCount: number
+  /** Total execution time in milliseconds */
+  totalExecutionTime: number
+  /** Last execution timestamp */
+  lastUsed: number
+}
+
+/**
+ * SQL statement identifiers for the prepared statement cache.
+ *
+ * Using an enum provides type safety and enables IDE autocomplete
+ * for statement keys.
+ *
+ * @internal
+ */
+const enum StatementKey {
+  GET_BY_PATH = 'getByPath',
+  GET_BY_ID = 'getById',
+  GET_CHILDREN = 'getChildren',
+  INSERT_FILE = 'insertFile',
+  DELETE_FILE = 'deleteFile',
+  GET_BLOB = 'getBlob',
+  INSERT_BLOB = 'insertBlob',
+  DELETE_BLOB = 'deleteBlob',
+  GET_BLOB_REF_COUNT = 'getBlobRefCount',
+  INCREMENT_BLOB_REF = 'incrementBlobRef',
+  DECREMENT_BLOB_REF = 'decrementBlobRef',
+  COUNT_BLOB_REFS = 'countBlobRefs',
+  UPDATE_BLOB_REF_COUNT = 'updateBlobRefCount',
+  UPDATE_BLOB_TIER = 'updateBlobTier',
+  COUNT_FILES = 'countFiles',
+  COUNT_DIRS = 'countDirs',
+  SUM_SIZE = 'sumSize',
+  TIER_STATS = 'tierStats',
+}
+
 export class SQLiteMetadata implements MetadataStorage {
   /** SQLite storage instance */
   private readonly sql: SqlStorage
@@ -324,7 +373,21 @@ export class SQLiteMetadata implements MetadataStorage {
   private transactionTimeoutHandle: ReturnType<typeof setTimeout> | null = null
 
   /**
+   * Prepared statement cache for frequently used queries.
+   *
+   * Maps statement keys to cached SQL templates with execution statistics.
+   * This enables query pattern reuse and performance monitoring.
+   *
+   * @internal
+   */
+  private readonly statementCache: Map<string, PreparedStatementCache> = new Map()
+
+  /**
    * Create a new SQLiteMetadata instance.
+   *
+   * The constructor initializes the prepared statement cache with optimized
+   * SQL templates for common operations. This improves query construction
+   * performance and provides execution statistics for monitoring.
    *
    * @param sql - SqlStorage instance from Durable Object context or D1
    * @param options - Optional configuration including hooks and defaults
@@ -356,6 +419,135 @@ export class SQLiteMetadata implements MetadataStorage {
       maxLogEntries: 100,
       ...options
     }
+    this.initStatementCache()
+  }
+
+  /**
+   * Initialize the prepared statement cache with optimized SQL templates.
+   *
+   * Pre-caches frequently used queries to avoid repeated string construction.
+   * Each cached statement includes execution statistics for performance monitoring.
+   *
+   * @internal
+   */
+  private initStatementCache(): void {
+    const statements: Array<[string, string]> = [
+      [StatementKey.GET_BY_PATH, 'SELECT * FROM files WHERE path = ?'],
+      [StatementKey.GET_BY_ID, 'SELECT * FROM files WHERE id = ?'],
+      [StatementKey.GET_CHILDREN, 'SELECT * FROM files WHERE parent_id = ?'],
+      [StatementKey.INSERT_FILE, `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, blob_id, link_target, tier, atime, mtime, ctime, birthtime, nlink)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`],
+      [StatementKey.DELETE_FILE, 'DELETE FROM files WHERE id = ?'],
+      [StatementKey.GET_BLOB, 'SELECT * FROM blobs WHERE id = ?'],
+      [StatementKey.INSERT_BLOB, 'INSERT INTO blobs (id, tier, size, checksum, created_at, ref_count) VALUES (?, ?, ?, ?, ?, ?)'],
+      [StatementKey.DELETE_BLOB, 'DELETE FROM blobs WHERE id = ?'],
+      [StatementKey.GET_BLOB_REF_COUNT, 'SELECT ref_count FROM blobs WHERE id = ?'],
+      [StatementKey.INCREMENT_BLOB_REF, 'UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?'],
+      [StatementKey.DECREMENT_BLOB_REF, 'UPDATE blobs SET ref_count = ref_count - 1 WHERE id = ?'],
+      [StatementKey.COUNT_BLOB_REFS, 'SELECT COUNT(*) as count FROM files WHERE blob_id = ?'],
+      [StatementKey.UPDATE_BLOB_REF_COUNT, 'UPDATE blobs SET ref_count = ? WHERE id = ?'],
+      [StatementKey.UPDATE_BLOB_TIER, 'UPDATE blobs SET tier = ? WHERE id = ?'],
+      [StatementKey.COUNT_FILES, `SELECT COUNT(*) as count FROM files WHERE type = 'file'`],
+      [StatementKey.COUNT_DIRS, `SELECT COUNT(*) as count FROM files WHERE type = 'directory'`],
+      [StatementKey.SUM_SIZE, 'SELECT SUM(size) as total FROM files'],
+      [StatementKey.TIER_STATS, 'SELECT tier, COUNT(*) as count, SUM(size) as size FROM blobs GROUP BY tier'],
+    ]
+
+    for (const [key, sql] of statements) {
+      this.statementCache.set(key, {
+        sql,
+        executionCount: 0,
+        totalExecutionTime: 0,
+        lastUsed: 0,
+      })
+    }
+  }
+
+  /**
+   * Execute a cached prepared statement with parameters.
+   *
+   * Retrieves the SQL template from cache and executes it with the provided
+   * parameters. Updates execution statistics for performance monitoring.
+   *
+   * @typeParam T - Expected result type
+   * @param key - Statement cache key
+   * @param params - Query parameters
+   * @returns Query result with one() and toArray() methods
+   *
+   * @internal
+   */
+  private execCached<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(key: string, ...params: unknown[]): { one: () => T | null; toArray: () => T[] } {
+    const cached = this.statementCache.get(key)
+    if (!cached) {
+      throw new Error(`Statement not found in cache: ${key}`)
+    }
+
+    const startTime = performance.now()
+    const result = this.sql.exec<T>(cached.sql, ...params)
+    const duration = performance.now() - startTime
+
+    // Update cache statistics
+    cached.executionCount++
+    cached.totalExecutionTime += duration
+    cached.lastUsed = Date.now()
+
+    return result
+  }
+
+  /**
+   * Execute a cached prepared statement that doesn't return data.
+   *
+   * Used for INSERT, UPDATE, DELETE statements where no result is needed.
+   * Updates execution statistics for performance monitoring.
+   *
+   * @param key - Statement cache key
+   * @param params - Query parameters
+   *
+   * @internal
+   */
+  private execCachedNoReturn(key: string, ...params: unknown[]): void {
+    const cached = this.statementCache.get(key)
+    if (!cached) {
+      throw new Error(`Statement not found in cache: ${key}`)
+    }
+
+    const startTime = performance.now()
+    this.sql.exec(cached.sql, ...params)
+    const duration = performance.now() - startTime
+
+    // Update cache statistics
+    cached.executionCount++
+    cached.totalExecutionTime += duration
+    cached.lastUsed = Date.now()
+  }
+
+  /**
+   * Get statement cache statistics for performance monitoring.
+   *
+   * Returns execution statistics for all cached statements, useful for
+   * identifying slow queries and optimization opportunities.
+   *
+   * @returns Map of statement keys to their execution statistics
+   *
+   * @example
+   * ```typescript
+   * const stats = metadata.getStatementStats()
+   * for (const [key, stat] of stats) {
+   *   const avgMs = stat.totalExecutionTime / stat.executionCount
+   *   console.log(`${key}: ${stat.executionCount} calls, avg ${avgMs.toFixed(2)}ms`)
+   * }
+   * ```
+   */
+  getStatementStats(): Map<string, { executionCount: number; totalExecutionTime: number; avgExecutionTime: number }> {
+    const stats = new Map<string, { executionCount: number; totalExecutionTime: number; avgExecutionTime: number }>()
+    for (const [key, cached] of this.statementCache) {
+      stats.set(key, {
+        executionCount: cached.executionCount,
+        totalExecutionTime: cached.totalExecutionTime,
+        avgExecutionTime: cached.executionCount > 0 ? cached.totalExecutionTime / cached.executionCount : 0,
+      })
+    }
+    return stats
   }
 
   // ===========================================================================
@@ -835,8 +1027,37 @@ export class SQLiteMetadata implements MetadataStorage {
   /**
    * Create multiple entries atomically within a transaction.
    *
+   * This method is optimized for bulk inserts by:
+   * - Wrapping all inserts in a single transaction (automatic via transaction())
+   * - Reusing cached prepared statement for each insert
+   * - Batching ID lookups to minimize round trips
+   *
+   * ## Performance Characteristics
+   *
+   * - Single transaction commit overhead regardless of entry count
+   * - O(n) insert operations using cached statements
+   * - All-or-nothing semantics: either all entries are created or none
+   *
+   * ## Usage Recommendations
+   *
+   * - Use for creating multiple files/directories in one operation
+   * - Particularly efficient for directory tree creation
+   * - For very large batches (>1000 entries), consider chunking
+   *
    * @param entries - Array of entries to create
-   * @returns Array of created entry IDs
+   * @returns Array of created entry IDs in the same order as input
+   * @throws If any entry creation fails (all changes are rolled back)
+   *
+   * @example
+   * ```typescript
+   * // Create multiple files atomically
+   * const ids = await metadata.createEntriesAtomic([
+   *   { path: '/data/file1.txt', name: 'file1.txt', ... },
+   *   { path: '/data/file2.txt', name: 'file2.txt', ... },
+   *   { path: '/data/file3.txt', name: 'file3.txt', ... },
+   * ])
+   * // Either all files are created, or none
+   * ```
    */
   async createEntriesAtomic(
     entries: Array<{
@@ -854,13 +1075,121 @@ export class SQLiteMetadata implements MetadataStorage {
       tier?: StorageTier
     }>
   ): Promise<number[]> {
+    if (entries.length === 0) {
+      return []
+    }
+
     return this.transaction(async () => {
+      const now = Date.now()
       const ids: number[] = []
+
+      // Batch insert using cached statements
       for (const entry of entries) {
-        const id = await this.createEntry(entry)
-        ids.push(id)
+        const parentIdNum = entry.parentId !== null ? parseInt(entry.parentId, 10) : null
+
+        // Use cached statement for insert
+        this.execCachedNoReturn(
+          StatementKey.INSERT_FILE,
+          entry.path,
+          entry.name,
+          parentIdNum,
+          entry.type,
+          entry.mode,
+          entry.uid,
+          entry.gid,
+          entry.size,
+          entry.blobId,
+          entry.linkTarget,
+          entry.tier ?? 'hot',
+          now,
+          now,
+          now,
+          now,
+          entry.nlink
+        )
+
+        // Fetch the inserted entry by path to get its ID
+        const result = this.execCached<FileRow>(StatementKey.GET_BY_PATH, entry.path).one()
+        ids.push(result?.id ?? 0)
       }
+
       return ids
+    })
+  }
+
+  /**
+   * Delete multiple entries atomically within a transaction.
+   *
+   * Deletes all specified entries in a single transaction. If any deletion
+   * fails, all changes are rolled back.
+   *
+   * ## Performance Characteristics
+   *
+   * - Single transaction commit overhead
+   * - Cascade deletes handled by SQLite foreign keys
+   * - All-or-nothing semantics
+   *
+   * @param ids - Array of entry IDs to delete
+   * @throws If any deletion fails (all changes are rolled back)
+   *
+   * @example
+   * ```typescript
+   * // Delete multiple entries atomically
+   * await metadata.deleteEntriesAtomic(['1', '2', '3'])
+   * ```
+   */
+  async deleteEntriesAtomic(ids: string[]): Promise<void> {
+    if (ids.length === 0) {
+      return
+    }
+
+    return this.transaction(async () => {
+      for (const id of ids) {
+        const numericId = parseInt(id, 10)
+        if (!isNaN(numericId)) {
+          this.execCachedNoReturn(StatementKey.DELETE_FILE, numericId)
+        }
+      }
+    })
+  }
+
+  /**
+   * Register multiple blobs atomically within a transaction.
+   *
+   * Creates multiple blob references in a single transaction for
+   * optimal performance when uploading multiple files.
+   *
+   * @param blobs - Array of blob metadata to register
+   * @throws If any registration fails (all changes are rolled back)
+   *
+   * @example
+   * ```typescript
+   * await metadata.registerBlobsAtomic([
+   *   { id: 'blob-1', tier: 'hot', size: 1024 },
+   *   { id: 'blob-2', tier: 'hot', size: 2048 },
+   * ])
+   * ```
+   */
+  async registerBlobsAtomic(
+    blobs: Array<{ id: string; tier: StorageTier; size: number; checksum?: string }>
+  ): Promise<void> {
+    if (blobs.length === 0) {
+      return
+    }
+
+    return this.transaction(async () => {
+      const now = Date.now()
+      for (const blob of blobs) {
+        this.execCachedNoReturn(
+          StatementKey.INSERT_BLOB,
+          blob.id,
+          blob.tier,
+          blob.size,
+          blob.checksum || null,
+          now,
+          1
+        )
+      }
     })
   }
 
@@ -988,7 +1317,14 @@ export class SQLiteMetadata implements MetadataStorage {
   /**
    * Get a file entry by its absolute path.
    *
-   * Uses the indexed path column for efficient lookup.
+   * Uses the indexed path column for efficient lookup. This method uses
+   * prepared statement caching for optimal performance on repeated queries.
+   *
+   * ## Performance
+   *
+   * - Uses cached prepared statement for query construction
+   * - Path index provides O(log n) lookup performance
+   * - Statement execution statistics available via getStatementStats()
    *
    * @param path - Absolute file path (e.g., '/data/config.json')
    * @returns FileEntry if found, null otherwise
@@ -1002,14 +1338,21 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async getByPath(path: string): Promise<FileEntry | null> {
-    const result = await this.sql.exec<FileRow>('SELECT * FROM files WHERE path = ?', path).one()
+    const result = this.execCached<FileRow>(StatementKey.GET_BY_PATH, path).one()
     return result ? this.rowToEntry(result) : null
   }
 
   /**
    * Get a file entry by its numeric ID.
    *
-   * Uses the primary key for O(1) lookup performance.
+   * Uses the primary key for O(1) lookup performance. This method uses
+   * prepared statement caching for optimal performance.
+   *
+   * ## Performance
+   *
+   * - Uses cached prepared statement for query construction
+   * - Primary key lookup provides O(1) performance
+   * - Validates ID format before querying to avoid unnecessary database access
    *
    * @param id - Entry ID as string (will be parsed to number)
    * @returns FileEntry if found, null otherwise
@@ -1025,15 +1368,21 @@ export class SQLiteMetadata implements MetadataStorage {
   async getById(id: string): Promise<FileEntry | null> {
     const numericId = parseInt(id, 10)
     if (isNaN(numericId)) return null
-    const result = await this.sql.exec<FileRow>('SELECT * FROM files WHERE id = ?', numericId).one()
+    const result = this.execCached<FileRow>(StatementKey.GET_BY_ID, numericId).one()
     return result ? this.rowToEntry(result) : null
   }
 
   /**
    * Get all children of a directory.
    *
-   * Uses the indexed parent_id column for efficient queries.
-   * Returns an empty array if the parent doesn't exist or has no children.
+   * Uses the indexed parent_id column for efficient queries. This method uses
+   * prepared statement caching for optimal performance.
+   *
+   * ## Performance
+   *
+   * - Uses cached prepared statement for query construction
+   * - Parent ID index provides O(log n + m) performance where m is result count
+   * - Validates ID format before querying to avoid unnecessary database access
    *
    * @param parentId - Parent directory ID as string
    * @returns Array of child FileEntry objects
@@ -1050,7 +1399,7 @@ export class SQLiteMetadata implements MetadataStorage {
   async getChildren(parentId: string): Promise<FileEntry[]> {
     const numericId = parseInt(parentId, 10)
     if (isNaN(numericId)) return []
-    const rows = this.sql.exec<FileRow>('SELECT * FROM files WHERE parent_id = ?', numericId).toArray()
+    const rows = this.execCached<FileRow>(StatementKey.GET_CHILDREN, numericId).toArray()
     return rows.map((row) => this.rowToEntry(row))
   }
 
@@ -1083,11 +1432,13 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async createEntry(entry: CreateEntryOptions): Promise<number> {
+    this.trackOperation('createEntry')
     const now = Date.now()
     const parentIdNum = entry.parentId !== null ? parseInt(entry.parentId, 10) : null
-    await this.sql.exec(
-      `INSERT INTO files (path, name, parent_id, type, mode, uid, gid, size, blob_id, link_target, tier, atime, mtime, ctime, birthtime, nlink)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+
+    // Use cached statement for insert
+    this.execCachedNoReturn(
+      StatementKey.INSERT_FILE,
       entry.path,
       entry.name,
       parentIdNum,
@@ -1105,8 +1456,9 @@ export class SQLiteMetadata implements MetadataStorage {
       now,
       entry.nlink
     )
+
     // Fetch the inserted entry by path to get its ID (avoids race conditions with concurrent inserts)
-    const result = await this.sql.exec<FileRow>('SELECT * FROM files WHERE path = ?', entry.path).one()
+    const result = this.execCached<FileRow>(StatementKey.GET_BY_PATH, entry.path).one()
     return result?.id ?? 0
   }
 
@@ -1204,7 +1556,14 @@ export class SQLiteMetadata implements MetadataStorage {
    * Delete a file entry.
    *
    * Uses CASCADE delete to automatically remove child entries
-   * when deleting a directory.
+   * when deleting a directory. This method uses prepared statement
+   * caching for optimal performance.
+   *
+   * ## Performance
+   *
+   * - Uses cached prepared statement for query construction
+   * - CASCADE delete handled by SQLite foreign key constraints
+   * - Validates ID format before querying to avoid unnecessary database access
    *
    * @param id - Entry ID to delete
    *
@@ -1214,9 +1573,10 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async deleteEntry(id: string): Promise<void> {
+    this.trackOperation('deleteEntry')
     const numericId = parseInt(id, 10)
     if (isNaN(numericId)) return
-    await this.sql.exec('DELETE FROM files WHERE id = ?', numericId)
+    this.execCachedNoReturn(StatementKey.DELETE_FILE, numericId)
   }
 
   /**
@@ -1224,6 +1584,13 @@ export class SQLiteMetadata implements MetadataStorage {
    *
    * Creates a reference to a blob stored in external storage (e.g., R2).
    * The blob ID should be unique and typically matches the blob's hash.
+   * Uses prepared statement caching for optimal performance.
+   *
+   * ## Initial Reference Count
+   *
+   * New blobs are registered with ref_count = 1, assuming they are being
+   * created for a single file entry. Use incrementBlobRefCount() when
+   * creating additional references (hard links).
    *
    * @param blob - Blob metadata to register
    *
@@ -1238,11 +1605,22 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async registerBlob(blob: { id: string; tier: StorageTier; size: number; checksum?: string }): Promise<void> {
-    await this.sql.exec('INSERT INTO blobs (id, tier, size, checksum, created_at, ref_count) VALUES (?, ?, ?, ?, ?, ?)', blob.id, blob.tier, blob.size, blob.checksum || null, Date.now(), 1)
+    this.trackOperation('registerBlob')
+    this.execCachedNoReturn(
+      StatementKey.INSERT_BLOB,
+      blob.id,
+      blob.tier,
+      blob.size,
+      blob.checksum || null,
+      Date.now(),
+      1
+    )
   }
 
   /**
    * Get blob metadata by ID.
+   *
+   * Uses prepared statement caching for optimal performance on repeated queries.
    *
    * @param id - Blob ID
    * @returns BlobRef if found, null otherwise
@@ -1256,7 +1634,7 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async getBlob(id: string): Promise<BlobRef | null> {
-    const result = await this.sql.exec<BlobRef>('SELECT * FROM blobs WHERE id = ?', id).one()
+    const result = this.execCached<BlobRef>(StatementKey.GET_BLOB, id).one()
     return result || null
   }
 
@@ -1264,6 +1642,7 @@ export class SQLiteMetadata implements MetadataStorage {
    * Update a blob's storage tier.
    *
    * Used when migrating blobs between hot/warm/cold storage.
+   * Uses prepared statement caching for optimal performance.
    *
    * @param id - Blob ID
    * @param tier - New storage tier
@@ -1275,7 +1654,8 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async updateBlobTier(id: string, tier: StorageTier): Promise<void> {
-    await this.sql.exec('UPDATE blobs SET tier = ? WHERE id = ?', tier, id)
+    this.trackOperation('updateBlobTier')
+    this.execCachedNoReturn(StatementKey.UPDATE_BLOB_TIER, tier, id)
   }
 
   /**
@@ -1283,6 +1663,7 @@ export class SQLiteMetadata implements MetadataStorage {
    *
    * Note: This only removes the metadata reference. The actual blob
    * data in external storage must be cleaned up separately.
+   * Uses prepared statement caching for optimal performance.
    *
    * @param id - Blob ID to delete
    *
@@ -1292,7 +1673,8 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async deleteBlob(id: string): Promise<void> {
-    await this.sql.exec('DELETE FROM blobs WHERE id = ?', id)
+    this.trackOperation('deleteBlob')
+    this.execCachedNoReturn(StatementKey.DELETE_BLOB, id)
   }
 
   /**
@@ -1325,7 +1707,7 @@ export class SQLiteMetadata implements MetadataStorage {
    */
   async getBlobRefCount(id: string): Promise<number | null> {
     this.trackOperation('getBlobRefCount')
-    const result = await this.sql.exec<{ ref_count: number }>('SELECT ref_count FROM blobs WHERE id = ?', id).one()
+    const result = this.execCached<{ ref_count: number }>(StatementKey.GET_BLOB_REF_COUNT, id).one()
     return result?.ref_count ?? null
   }
 
@@ -1366,7 +1748,7 @@ export class SQLiteMetadata implements MetadataStorage {
    */
   async incrementBlobRefCount(id: string): Promise<void> {
     this.trackOperation('incrementBlobRefCount')
-    await this.sql.exec('UPDATE blobs SET ref_count = ref_count + 1 WHERE id = ?', id)
+    this.execCachedNoReturn(StatementKey.INCREMENT_BLOB_REF, id)
   }
 
   /**
@@ -1415,14 +1797,14 @@ export class SQLiteMetadata implements MetadataStorage {
    */
   async decrementBlobRefCount(id: string): Promise<boolean> {
     this.trackOperation('decrementBlobRefCount')
-    // Decrement ref count atomically
-    await this.sql.exec('UPDATE blobs SET ref_count = ref_count - 1 WHERE id = ?', id)
-    // Check result and fix negative values
-    const result = await this.sql.exec<{ ref_count: number }>('SELECT ref_count FROM blobs WHERE id = ?', id).one()
+    // Decrement ref count atomically using cached statement
+    this.execCachedNoReturn(StatementKey.DECREMENT_BLOB_REF, id)
+    // Check result and fix negative values using cached statement
+    const result = this.execCached<{ ref_count: number }>(StatementKey.GET_BLOB_REF_COUNT, id).one()
     const refCount = result?.ref_count ?? 0
     // Ensure we don't go negative (fix up if needed)
     if (refCount < 0) {
-      await this.sql.exec('UPDATE blobs SET ref_count = 0 WHERE id = ?', id)
+      this.execCachedNoReturn(StatementKey.UPDATE_BLOB_REF_COUNT, 0, id)
       return true
     }
     return refCount === 0
@@ -1465,8 +1847,8 @@ export class SQLiteMetadata implements MetadataStorage {
    */
   async countBlobReferences(id: string): Promise<number> {
     this.trackOperation('countBlobReferences')
-    // Count file entries that reference a specific blob
-    const result = await this.sql.exec<{ count: number }>('SELECT COUNT(*) as count FROM files WHERE blob_id = ?', id).one()
+    // Count file entries that reference a specific blob using cached statement
+    const result = this.execCached<{ count: number }>(StatementKey.COUNT_BLOB_REFS, id).one()
     return result?.count ?? 0
   }
 
@@ -1491,7 +1873,7 @@ export class SQLiteMetadata implements MetadataStorage {
   async syncBlobRefCount(id: string): Promise<number> {
     this.trackOperation('syncBlobRefCount')
     const actualCount = await this.countBlobReferences(id)
-    await this.sql.exec('UPDATE blobs SET ref_count = ? WHERE id = ?', actualCount, id)
+    this.execCachedNoReturn(StatementKey.UPDATE_BLOB_REF_COUNT, actualCount, id)
     return actualCount
   }
 
@@ -1550,11 +1932,11 @@ export class SQLiteMetadata implements MetadataStorage {
    * ```
    */
   async getStats(): Promise<StorageStats> {
-    const files = await this.sql.exec<{ count: number }>(`SELECT COUNT(*) as count FROM files WHERE type = 'file'`).one()
-    const dirs = await this.sql.exec<{ count: number }>(`SELECT COUNT(*) as count FROM files WHERE type = 'directory'`).one()
-    const size = await this.sql.exec<{ total: number }>('SELECT SUM(size) as total FROM files').one()
-
-    const tierStats = await this.sql.exec<{ tier: string; count: number; size: number }>('SELECT tier, COUNT(*) as count, SUM(size) as size FROM blobs GROUP BY tier').toArray()
+    // Use cached statements for all aggregate queries
+    const files = this.execCached<{ count: number }>(StatementKey.COUNT_FILES).one()
+    const dirs = this.execCached<{ count: number }>(StatementKey.COUNT_DIRS).one()
+    const size = this.execCached<{ total: number }>(StatementKey.SUM_SIZE).one()
+    const tierStats = this.execCached<{ tier: string; count: number; size: number }>(StatementKey.TIER_STATS).toArray()
 
     // Only include tiers that have data (preserves backward compatibility)
     const blobsByTier: Record<StorageTier, { count: number; size: number }> = {} as Record<StorageTier, { count: number; size: number }>

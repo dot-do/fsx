@@ -100,6 +100,13 @@ export interface FileHandle {
    * Synchronize file data (not metadata) to storage.
    */
   datasync(): Promise<void>
+
+  /**
+   * Truncate the file to a specified length.
+   *
+   * @param length - The new file length in bytes (default: 0)
+   */
+  truncate(length?: number): Promise<void>
 }
 
 // =============================================================================

@@ -1,5 +1,5 @@
 /**
- * Tests for lstat operation (RED phase - should fail)
+ * Tests for lstat operation
  *
  * lstat gets file/directory metadata WITHOUT following symbolic links.
  * This is the key difference from stat():
@@ -13,13 +13,167 @@
  * - Does NOT throw for broken symlinks (can stat the link itself)
  */
 
-import { describe, it, expect } from 'vitest'
-import { lstat } from './lstat'
-import { Stats } from '../types'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { lstat, setStorage, type LstatStorage } from './lstat'
+import { Stats, type FileEntry, type FileType } from '../types'
 import { ENOENT } from '../errors'
 import { constants } from '../constants'
 
+// =============================================================================
+// Test Mock Filesystem Setup
+// =============================================================================
+
+/**
+ * Create a FileEntry with sensible defaults
+ */
+function createEntry(
+  path: string,
+  type: FileType,
+  options: {
+    size?: number
+    mode?: number
+    uid?: number
+    gid?: number
+    nlink?: number
+    atime?: number
+    mtime?: number
+    ctime?: number
+    birthtime?: number
+    linkTarget?: string
+  } = {}
+): FileEntry {
+  const now = Date.now() - 86400000 // 24 hours ago
+  const name = path.split('/').filter(Boolean).pop() || ''
+  const parentPath = path.substring(0, path.lastIndexOf('/')) || '/'
+
+  // Default mode based on type
+  let defaultMode: number
+  switch (type) {
+    case 'directory':
+      defaultMode = 0o755
+      break
+    case 'symlink':
+      defaultMode = 0o777
+      break
+    default:
+      defaultMode = 0o644
+  }
+
+  return {
+    id: `entry-${path.replace(/\//g, '-')}`,
+    path,
+    name,
+    parentId: parentPath === '/' ? null : `entry-${parentPath.replace(/\//g, '-')}`,
+    type,
+    mode: options.mode ?? defaultMode,
+    uid: options.uid ?? 0,
+    gid: options.gid ?? 0,
+    size: options.size ?? (type === 'directory' ? 4096 : type === 'symlink' ? (options.linkTarget?.length ?? 0) : 0),
+    blobId: type === 'file' ? `blob-${path}` : null,
+    linkTarget: options.linkTarget ?? null,
+    atime: options.atime ?? now,
+    mtime: options.mtime ?? now,
+    ctime: options.ctime ?? now,
+    birthtime: options.birthtime ?? now,
+    nlink: options.nlink ?? (type === 'directory' ? 2 : 1),
+  }
+}
+
+/**
+ * Mock filesystem for testing
+ */
+const mockFS: Map<string, FileEntry> = new Map([
+  // Root directory
+  ['/', createEntry('/', 'directory', { nlink: 2 })],
+
+  // Home directory structure
+  ['/home', createEntry('/home', 'directory', { nlink: 3 })],
+  ['/home/user', createEntry('/home/user', 'directory', { nlink: 4 })],
+  ['/home/user/file.txt', createEntry('/home/user/file.txt', 'file', { size: 13 })], // "Hello, World!"
+  ['/home/user/document.txt', createEntry('/home/user/document.txt', 'file', { size: 16 })], // "Document content"
+  ['/home/user/hello.txt', createEntry('/home/user/hello.txt', 'file', { size: 5 })], // "Hello"
+  ['/home/user/empty.txt', createEntry('/home/user/empty.txt', 'file', { size: 0 })],
+  ['/home/user/documents', createEntry('/home/user/documents', 'directory')],
+  ['/home/user/link', createEntry('/home/user/link', 'symlink', { linkTarget: '/home/user/target.txt' })],
+  ['/home/user/target.txt', createEntry('/home/user/target.txt', 'file', { size: 14 })], // "Target content"
+  ['/home/user/my documents', createEntry('/home/user/my documents', 'directory')],
+  ['/home/user/my documents/file.txt', createEntry('/home/user/my documents/file.txt', 'file', { size: 11 })], // "Spaced file"
+  ['/home/user/archivo.txt', createEntry('/home/user/archivo.txt', 'file', { size: 15 })], // Unicode filename
+  ['/home/user/regular-file.txt', createEntry('/home/user/regular-file.txt', 'file', { size: 12 })],
+  ['/home/user/directory', createEntry('/home/user/directory', 'directory')],
+
+  // Links directory with various symlink scenarios
+  ['/links', createEntry('/links', 'directory')],
+  ['/links/mylink', createEntry('/links/mylink', 'symlink', { linkTarget: '/data/largefile.bin' })],
+  ['/links/file-link', createEntry('/links/file-link', 'symlink', { linkTarget: '/data/file.txt' })],
+  ['/links/dir-link', createEntry('/links/dir-link', 'symlink', { linkTarget: '/data/directory' })],
+  ['/links/link', createEntry('/links/link', 'symlink', { linkTarget: '/path/to/target' })],
+  ['/links/broken', createEntry('/links/broken', 'symlink', { linkTarget: '/nonexistent/target' })],
+  ['/links/broken-symlink', createEntry('/links/broken-symlink', 'symlink', { linkTarget: '/does/not/exist' })],
+  ['/links/long-target-link', createEntry('/links/long-target-link', 'symlink', {
+    linkTarget: '/very/long/path/that/goes/on/and/on/and/on/to/simulate/a/really/long/symlink/target/path/that/exceeds/one/hundred/characters',
+  })],
+  ['/links/dot', createEntry('/links/dot', 'symlink', { linkTarget: '.' })],
+  ['/links/dotdot', createEntry('/links/dotdot', 'symlink', { linkTarget: '..' })],
+
+  // Data directory with targets
+  ['/data', createEntry('/data', 'directory', { nlink: 3 })],
+  ['/data/largefile.bin', createEntry('/data/largefile.bin', 'file', { size: 1024 * 1024 })], // 1MB
+  ['/data/file.txt', createEntry('/data/file.txt', 'file', { size: 9 })], // "Data file"
+  ['/data/directory', createEntry('/data/directory', 'directory')],
+  ['/data/target', createEntry('/data/target', 'file', { size: 6 })], // "Target"
+
+  // Symlink chain: /link -> /target
+  ['/link', createEntry('/link', 'symlink', { linkTarget: '/target' })],
+  ['/target', createEntry('/target', 'file', { size: 11 })], // "Target file"
+
+  // Symlink to symlink: /link1 -> /link2 -> /final-target
+  ['/link1', createEntry('/link1', 'symlink', { linkTarget: '/link2' })],
+  ['/link2', createEntry('/link2', 'symlink', { linkTarget: '/final-target' })],
+  ['/final-target', createEntry('/final-target', 'file', { size: 5 })], // "Final"
+
+  // Circular symlinks
+  ['/circular', createEntry('/circular', 'directory')],
+  ['/circular/a', createEntry('/circular/a', 'symlink', { linkTarget: '/circular/b' })],
+  ['/circular/b', createEntry('/circular/b', 'symlink', { linkTarget: '/circular/a' })],
+
+  // Absolute path test
+  ['/absolute', createEntry('/absolute', 'directory')],
+  ['/absolute/path', createEntry('/absolute/path', 'directory')],
+  ['/absolute/path/to', createEntry('/absolute/path/to', 'directory')],
+  ['/absolute/path/to/file.txt', createEntry('/absolute/path/to/file.txt', 'file', { size: 8 })], // "Absolute"
+
+  // Path test
+  ['/path', createEntry('/path', 'directory')],
+  ['/path/to', createEntry('/path/to', 'directory')],
+  ['/path/to/target', createEntry('/path/to/target', 'file', { size: 11 })], // "Path target"
+])
+
+/**
+ * Create storage implementation from mock filesystem
+ */
+function createMockStorage(): LstatStorage {
+  return {
+    get: (path: string) => mockFS.get(path),
+    has: (path: string) => mockFS.has(path),
+  }
+}
+
+// =============================================================================
+// Test Suite
+// =============================================================================
+
 describe('lstat', () => {
+  // Set up storage before tests
+  beforeAll(() => {
+    setStorage(createMockStorage())
+  })
+
+  // Clean up after tests
+  afterAll(() => {
+    setStorage(null)
+  })
+
   describe('basic usage', () => {
     it('should return Stats object for regular file', async () => {
       // Given: a regular file at /home/user/file.txt

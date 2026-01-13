@@ -138,6 +138,85 @@ describe('Serialization', () => {
   })
 })
 
+describe('Metadata fields', () => {
+  it('Event can include optional size field', () => {
+    const event = createWatchEvent('create', '/test/file.txt', { size: 1024 })
+
+    expect(event.size).toBe(1024)
+  })
+
+  it('Event can include optional mtime field', () => {
+    const mtime = Date.now() - 1000
+    const event = createWatchEvent('modify', '/test/file.txt', { mtime })
+
+    expect(event.mtime).toBe(mtime)
+  })
+
+  it('Event can include optional isDirectory field', () => {
+    const fileEvent = createWatchEvent('create', '/test/file.txt', { isDirectory: false })
+    const dirEvent = createWatchEvent('create', '/test/dir', { isDirectory: true })
+
+    expect(fileEvent.isDirectory).toBe(false)
+    expect(dirEvent.isDirectory).toBe(true)
+  })
+
+  it('Event can include all metadata fields together', () => {
+    const mtime = Date.now() - 1000
+    const event = createWatchEvent('create', '/test/file.txt', {
+      size: 2048,
+      mtime,
+      isDirectory: false,
+    })
+
+    expect(event.size).toBe(2048)
+    expect(event.mtime).toBe(mtime)
+    expect(event.isDirectory).toBe(false)
+  })
+
+  it('Metadata is optional - events work without it', () => {
+    const event = createWatchEvent('create', '/test/file.txt')
+
+    expect(event.size).toBeUndefined()
+    expect(event.mtime).toBeUndefined()
+    expect(event.isDirectory).toBeUndefined()
+  })
+
+  it('Rename events can include metadata for the new file', () => {
+    const event = createWatchEvent('rename', '/old.txt', '/new.txt', {
+      size: 512,
+      isDirectory: false,
+    })
+
+    expect(event.type).toBe('rename')
+    expect(event.path).toBe('/new.txt')
+    expect(event.oldPath).toBe('/old.txt')
+    expect(event.size).toBe(512)
+  })
+
+  it('Delete events do not include size or mtime (file no longer exists)', () => {
+    const event = createWatchEvent('delete', '/test/file.txt')
+
+    // Delete events should work without size/mtime since file is gone
+    expect(event.type).toBe('delete')
+    expect(event.path).toBe('/test/file.txt')
+  })
+
+  it('Metadata serializes to JSON correctly', () => {
+    const mtime = Date.now() - 1000
+    const event = createWatchEvent('create', '/test/file.txt', {
+      size: 1024,
+      mtime,
+      isDirectory: false,
+    })
+    const json = JSON.stringify(event)
+    const parsed = JSON.parse(json)
+
+    expect(parsed.size).toBe(1024)
+    expect(parsed.mtime).toBe(mtime)
+    expect(parsed.isDirectory).toBe(false)
+  })
+})
+
 describe('Type guards', () => {
   it('isCreateEvent(event) returns true for create events', () => {
     const createEvent = createWatchEvent('create', '/test')

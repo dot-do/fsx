@@ -68,3 +68,56 @@ export {
 export { sha1, sha256, bytesToHex, hexToBytes } from '../core/cas/hash.js'
 export { compress, decompress } from '../core/cas/compression.js'
 export { hashToPath, pathToHash } from '../core/cas/path-mapping.js'
+
+// Columnar Storage Pattern (cost-optimized DO SQLite)
+export {
+  // Write buffer cache
+  WriteBufferCache,
+  type WriteBufferCacheOptions,
+  type EvictionReason,
+  type CacheStats,
+} from './write-buffer.js'
+
+export {
+  // Columnar store
+  ColumnarStore,
+  type ColumnType,
+  type ColumnDefinition,
+  type SchemaDefinition,
+  type CheckpointTriggers,
+  type ColumnarStoreOptions,
+  type CheckpointStats,
+  type CostComparison,
+  // Cost analysis utilities
+  analyzeWorkloadCost,
+  printCostReport,
+} from './columnar.js'
+
+// Blob Management Utilities
+export {
+  // ID generation
+  computeChecksum,
+  generateBlobId,
+  blobIdFromChecksum,
+  checksumFromBlobId,
+  isValidBlobId,
+  BLOB_ID_PREFIX,
+  // Tier management
+  selectTierBySize,
+  getTierTransition,
+  isValidTierTransition,
+  type TierTransition,
+  // Cleanup scheduling
+  type CleanupConfig,
+  type CleanupResult,
+  type CleanupSchedulerState,
+  createCleanupSchedulerState,
+  DEFAULT_CLEANUP_CONFIG,
+  // Deduplication
+  prepareDedupCheck,
+  type DedupCheckResult,
+  // Statistics
+  calculateDedupSavings,
+  calculateDedupRatio,
+  type BlobStats,
+} from './blob-utils.js'

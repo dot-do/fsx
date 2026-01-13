@@ -13,8 +13,8 @@
  * - ! at start negates the entire pattern
  */
 
-import { describe, it, expect } from 'vitest'
-import { match, createMatcher } from './match'
+import { describe, it, expect, beforeEach } from 'vitest'
+import { match, createMatcher, CompiledPatterns, clearPatternCache, getPatternCacheSize } from './match'
 
 describe('match', () => {
   // ========================================
@@ -699,5 +699,322 @@ describe('match', () => {
       expect(match('src/**/test/**/*.{spec,test}.ts', 'src/utils/test/a/b/c.spec.ts')).toBe(true)
       expect(match('src/**/test/**/*.{spec,test}.ts', 'src/foo.ts')).toBe(false)
     })
+  })
+})
+
+// =============================================================================
+// CompiledPatterns class tests
+// =============================================================================
+describe('CompiledPatterns', () => {
+  describe('construction', () => {
+    it('should create instance with patterns array', () => {
+      const patterns = new CompiledPatterns(['*.ts', '*.js'])
+
+      expect(patterns.size).toBe(2)
+      expect(patterns.patterns).toEqual(['*.ts', '*.js'])
+    })
+
+    it('should handle empty patterns array', () => {
+      const patterns = new CompiledPatterns([])
+
+      expect(patterns.size).toBe(0)
+      expect(patterns.patterns).toEqual([])
+    })
+
+    it('should throw on empty pattern string', () => {
+      expect(() => new CompiledPatterns(['*.ts', '', '*.js'])).toThrow('Pattern cannot be empty')
+    })
+
+    it('should accept options', () => {
+      const patterns = new CompiledPatterns(['*.TS'], { nocase: true })
+
+      expect(patterns.match('file.ts')).toBe(true)
+    })
+  })
+
+  describe('match()', () => {
+    it('should return true when path matches any pattern', () => {
+      const patterns = new CompiledPatterns(['*.ts', '*.js', '*.tsx'])
+
+      expect(patterns.match('file.ts')).toBe(true)
+      expect(patterns.match('file.js')).toBe(true)
+      expect(patterns.match('file.tsx')).toBe(true)
+    })
+
+    it('should return false when path matches no patterns', () => {
+      const patterns = new CompiledPatterns(['*.ts', '*.js'])
+
+      expect(patterns.match('file.py')).toBe(false)
+      expect(patterns.match('file.go')).toBe(false)
+    })
+
+    it('should return false for empty path', () => {
+      const patterns = new CompiledPatterns(['**'])
+
+      expect(patterns.match('')).toBe(false)
+    })
+
+    it('should return false when no patterns', () => {
+      const patterns = new CompiledPatterns([])
+
+      expect(patterns.match('any.ts')).toBe(false)
+    })
+
+    it('should handle globstar patterns', () => {
+      const patterns = new CompiledPatterns(['src/**/*.ts', 'lib/**/*.js'])
+
+      expect(patterns.match('src/index.ts')).toBe(true)
+      expect(patterns.match('src/utils/helper.ts')).toBe(true)
+      expect(patterns.match('lib/core/main.js')).toBe(true)
+      expect(patterns.match('test/index.ts')).toBe(false)
+    })
+
+    it('should handle negated patterns', () => {
+      const patterns = new CompiledPatterns(['!*.test.ts'])
+
+      // Negated pattern: returns true when path does NOT match
+      expect(patterns.match('file.test.ts')).toBe(false)
+      expect(patterns.match('file.ts')).toBe(true)
+    })
+  })
+
+  describe('matchAll()', () => {
+    it('should return matching paths from array', () => {
+      const patterns = new CompiledPatterns(['*.ts', '*.tsx'])
+      const paths = ['index.ts', 'App.tsx', 'readme.md', 'style.css']
+
+      expect(patterns.matchAll(paths)).toEqual(['index.ts', 'App.tsx'])
+    })
+
+    it('should return empty array when no matches', () => {
+      const patterns = new CompiledPatterns(['*.ts'])
+      const paths = ['readme.md', 'style.css']
+
+      expect(patterns.matchAll(paths)).toEqual([])
+    })
+
+    it('should handle empty paths array', () => {
+      const patterns = new CompiledPatterns(['*.ts'])
+
+      expect(patterns.matchAll([])).toEqual([])
+    })
+
+    it('should handle complex patterns efficiently', () => {
+      const patterns = new CompiledPatterns([
+        'src/**/*.{ts,tsx}',
+        'lib/**/*.js',
+        'package.json',
+      ])
+      const paths = [
+        'src/index.ts',
+        'src/components/Button.tsx',
+        'lib/utils.js',
+        'package.json',
+        'readme.md',
+        'test/index.spec.ts',
+      ]
+
+      expect(patterns.matchAll(paths)).toEqual([
+        'src/index.ts',
+        'src/components/Button.tsx',
+        'lib/utils.js',
+        'package.json',
+      ])
+    })
+  })
+
+  describe('matchingPatterns()', () => {
+    it('should return all patterns that match a path', () => {
+      const patterns = new CompiledPatterns(['*.ts', '**/*.ts', 'index.*'])
+
+      expect(patterns.matchingPatterns('index.ts')).toEqual(['*.ts', '**/*.ts', 'index.*'])
+    })
+
+    it('should return single matching pattern', () => {
+      const patterns = new CompiledPatterns(['*.ts', '*.js', '*.tsx'])
+
+      expect(patterns.matchingPatterns('file.js')).toEqual(['*.js'])
+    })
+
+    it('should return empty array when no matches', () => {
+      const patterns = new CompiledPatterns(['*.ts', '*.js'])
+
+      expect(patterns.matchingPatterns('file.py')).toEqual([])
+    })
+
+    it('should return empty array for empty path', () => {
+      const patterns = new CompiledPatterns(['**'])
+
+      expect(patterns.matchingPatterns('')).toEqual([])
+    })
+  })
+})
+
+// =============================================================================
+// Pattern cache tests
+// =============================================================================
+describe('pattern cache', () => {
+  beforeEach(() => {
+    clearPatternCache()
+  })
+
+  it('should cache compiled patterns', () => {
+    // First call compiles the pattern
+    match('*.ts', 'file.ts')
+    const sizeAfterFirst = getPatternCacheSize()
+
+    // Second call should use cache
+    match('*.ts', 'other.ts')
+    const sizeAfterSecond = getPatternCacheSize()
+
+    expect(sizeAfterFirst).toBe(1)
+    expect(sizeAfterSecond).toBe(1) // Same pattern, no new entry
+  })
+
+  it('should cache different patterns separately', () => {
+    match('*.ts', 'file.ts')
+    match('*.js', 'file.js')
+    match('src/**', 'src/file')
+
+    expect(getPatternCacheSize()).toBe(3)
+  })
+
+  it('should cache same pattern with different options separately', () => {
+    match('*.ts', 'file.ts')
+    match('*.ts', 'FILE.TS', { nocase: true })
+    match('*.ts', '.hidden.ts', { dot: true })
+
+    expect(getPatternCacheSize()).toBe(3)
+  })
+
+  it('should clear cache correctly', () => {
+    match('*.ts', 'file.ts')
+    match('*.js', 'file.js')
+    expect(getPatternCacheSize()).toBe(2)
+
+    clearPatternCache()
+    expect(getPatternCacheSize()).toBe(0)
+  })
+
+  it('should return correct cache size', () => {
+    expect(getPatternCacheSize()).toBe(0)
+
+    match('a', 'a')
+    expect(getPatternCacheSize()).toBe(1)
+
+    match('b', 'b')
+    expect(getPatternCacheSize()).toBe(2)
+  })
+})
+
+// =============================================================================
+// Optimization tests - Literal fast-path
+// =============================================================================
+describe('literal pattern optimization', () => {
+  it('should match literal patterns exactly', () => {
+    // Literal patterns use fast O(1) string comparison
+    expect(match('src/index.ts', 'src/index.ts')).toBe(true)
+    expect(match('package.json', 'package.json')).toBe(true)
+    expect(match('a/b/c/d.txt', 'a/b/c/d.txt')).toBe(true)
+  })
+
+  it('should reject non-matching literal patterns', () => {
+    expect(match('src/index.ts', 'src/main.ts')).toBe(false)
+    expect(match('package.json', 'tsconfig.json')).toBe(false)
+    expect(match('a/b/c', 'a/b/d')).toBe(false)
+  })
+
+  it('should respect nocase option for literal patterns', () => {
+    expect(match('SRC/INDEX.TS', 'src/index.ts', { nocase: true })).toBe(true)
+    expect(match('package.json', 'PACKAGE.JSON', { nocase: true })).toBe(true)
+  })
+
+  it('should handle negated literal patterns', () => {
+    expect(match('!src/index.ts', 'src/index.ts')).toBe(false)
+    expect(match('!src/index.ts', 'src/main.ts')).toBe(true)
+  })
+})
+
+// =============================================================================
+// Optimization tests - Early termination
+// =============================================================================
+describe('early termination optimization', () => {
+  it('should reject paths with too few segments', () => {
+    // Pattern requires 2 segments, path has 1
+    expect(match('src/*.ts', 'foo.ts')).toBe(false)
+    // Pattern requires 3 segments, path has 2
+    expect(match('a/b/*.ts', 'a/foo.ts')).toBe(false)
+  })
+
+  it('should reject paths with too many segments (no globstar)', () => {
+    // Pattern allows exactly 2 segments
+    expect(match('src/*.ts', 'src/foo.ts')).toBe(true)
+    expect(match('src/*.ts', 'src/a/foo.ts')).toBe(false)
+  })
+
+  it('should allow variable segments with globstar', () => {
+    // ** allows any number of segments
+    expect(match('**/*.ts', 'foo.ts')).toBe(true)
+    expect(match('**/*.ts', 'a/foo.ts')).toBe(true)
+    expect(match('**/*.ts', 'a/b/c/d/foo.ts')).toBe(true)
+  })
+
+  it('should handle negated patterns with early termination', () => {
+    // Negated pattern - too few segments returns true (inverted)
+    expect(match('!src/*.ts', 'foo.ts')).toBe(true)
+  })
+})
+
+// =============================================================================
+// Performance characteristics tests
+// =============================================================================
+describe('performance characteristics', () => {
+  it('should handle many paths efficiently with createMatcher', () => {
+    const matcher = createMatcher('src/**/*.{ts,tsx}')
+    const paths = [
+      'src/index.ts',
+      'src/app.tsx',
+      'src/utils/helpers.ts',
+      'src/components/Button.tsx',
+      'lib/index.ts',
+      'test/app.test.ts',
+      'package.json',
+    ]
+
+    const matches = paths.filter(matcher)
+    expect(matches).toEqual([
+      'src/index.ts',
+      'src/app.tsx',
+      'src/utils/helpers.ts',
+      'src/components/Button.tsx',
+    ])
+  })
+
+  it('should handle CompiledPatterns with many patterns', () => {
+    const patterns = new CompiledPatterns([
+      '*.ts',
+      '*.tsx',
+      '*.js',
+      '*.jsx',
+      'src/**/*.ts',
+      'lib/**/*.js',
+      'package.json',
+      'tsconfig.json',
+    ])
+
+    expect(patterns.match('index.ts')).toBe(true)
+    expect(patterns.match('app.tsx')).toBe(true)
+    expect(patterns.match('src/utils/helper.ts')).toBe(true)
+    expect(patterns.match('readme.md')).toBe(false)
+  })
+
+  it('should use literal fast-path in CompiledPatterns', () => {
+    // Literal patterns like 'package.json' should use string comparison
+    const patterns = new CompiledPatterns(['package.json', 'tsconfig.json', '*.ts'])
+
+    expect(patterns.match('package.json')).toBe(true)
+    expect(patterns.match('tsconfig.json')).toBe(true)
+    expect(patterns.match('index.ts')).toBe(true)
+    expect(patterns.match('readme.md')).toBe(false)
   })
 })

@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
-import { glob, type GlobOptions } from './glob'
+import { glob, globStream, type GlobOptions } from './glob'
 
 /**
  * Mock filesystem structure for tests:
@@ -1027,6 +1027,86 @@ describe('glob', () => {
       expect(result).toContain('src/index.ts')
       expect(result).toContain('lib/index.js')
       expect(result).not.toContain('test/index.test.ts')
+    })
+  })
+
+  // ========================================
+  // 15. globStream tests (5 tests)
+  // ========================================
+  describe('globStream (streaming generator)', () => {
+    it('should yield files as they are found', async () => {
+      // Given: a glob pattern
+      // When: using globStream
+      // Then: should yield matching files
+
+      const results: string[] = []
+      for await (const file of globStream('**/*.ts')) {
+        results.push(file)
+      }
+
+      expect(results).toContain('src/index.ts')
+      expect(results).toContain('src/utils/helpers.ts')
+      expect(results).toContain('test/index.test.ts')
+    })
+
+    it('should support early termination', async () => {
+      // Given: a pattern that matches many files
+      // When: breaking out of the loop early
+      // Then: should stop iteration
+
+      const results: string[] = []
+      let count = 0
+      for await (const file of globStream('**/*')) {
+        results.push(file)
+        count++
+        if (count >= 3) break
+      }
+
+      expect(results.length).toBe(3)
+    })
+
+    it('should deduplicate results', async () => {
+      // Given: overlapping patterns
+      // When: streaming
+      // Then: each file should appear only once
+
+      const results: string[] = []
+      for await (const file of globStream(['**/*.ts', 'src/**/*.ts'])) {
+        results.push(file)
+      }
+
+      const unique = new Set(results)
+      expect(results.length).toBe(unique.size)
+    })
+
+    it('should respect ignore option', async () => {
+      // Given: ignore patterns
+      // When: streaming
+      // Then: ignored files should not appear
+
+      const results: string[] = []
+      for await (const file of globStream('**/*.ts', {
+        ignore: ['**/*.test.ts']
+      })) {
+        results.push(file)
+      }
+
+      expect(results).toContain('src/index.ts')
+      expect(results).not.toContain('test/index.test.ts')
+    })
+
+    it('should support absolute paths', async () => {
+      // Given: absolute: true option
+      // When: streaming
+      // Then: paths should be absolute
+
+      const results: string[] = []
+      for await (const file of globStream('src/*.ts', { absolute: true })) {
+        results.push(file)
+      }
+
+      expect(results.every(p => p.startsWith('/'))).toBe(true)
+      expect(results).toContain('/src/index.ts')
     })
   })
 })

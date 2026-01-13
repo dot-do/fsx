@@ -8,6 +8,26 @@
  * - Improved error handling with descriptive messages
  * - Progress callbacks for large traversals
  *
+ * ## Performance Optimizations
+ *
+ * This module is optimized to minimize system calls:
+ *
+ * 1. **Dirent Type Inference**: Uses `withFileTypes: true` in readdir to get
+ *    entry types without additional stat calls. Most modern filesystems provide
+ *    this information directly from directory entries.
+ *
+ * 2. **Lazy Stat Collection**: Only calls stat() when explicitly requested via
+ *    `collectStats: true`. Otherwise, type information comes from dirent.
+ *
+ * 3. **Symlink Stat Caching**: When following symlinks, caches the stat result
+ *    to avoid duplicate calls when collectStats is also enabled.
+ *
+ * 4. **Early Directory Pruning**: Prune patterns are checked before traversing
+ *    subdirectories, avoiding entire subtrees.
+ *
+ * 5. **Dotfile Filtering at Source**: Filters dotfiles before any stat calls,
+ *    reducing syscalls on large directories with many hidden files.
+ *
  * @module traversal
  */
 
@@ -97,62 +117,185 @@ export class TraversalError extends Error {
 
 /**
  * Options for traversal operations
+ *
+ * ## Performance Considerations
+ *
+ * The traversal function is designed to minimize system calls. Key options
+ * that affect performance:
+ *
+ * - **prunePatterns**: Use these aggressively to skip directories like
+ *   `node_modules`, `.git`, `dist` - this avoids entire subtrees.
+ *
+ * - **maxDepth**: Limiting depth prevents deep recursion into large trees.
+ *
+ * - **collectStats**: Set to `false` (default) unless you need file sizes
+ *   and modification times. When `false`, type information comes from
+ *   dirent without any additional stat() calls.
+ *
+ * - **followSymlinks**: When `true` (default), symlinks require a stat()
+ *   call to determine the target type. Set to `false` if you don't need
+ *   to traverse symlinked directories.
+ *
+ * - **includeDotFiles**: Filtering dotfiles happens before type checking,
+ *   so this doesn't add syscall overhead.
+ *
+ * @example
+ * ```typescript
+ * // Efficient traversal of a source directory
+ * const result = await traverse({
+ *   startPath: '/project',
+ *   backend: myBackend,
+ *   maxDepth: 10,
+ *   prunePatterns: ['node_modules', '.git', 'dist', 'coverage'],
+ *   collectStats: false, // Don't need sizes/times
+ * })
+ * ```
  */
 export interface TraversalOptions {
-  /** Starting path for traversal (default: '/') */
+  /**
+   * Starting path for traversal.
+   * @default '/'
+   */
   startPath?: string
 
-  /** Maximum depth to traverse (undefined = unlimited, 0 = only starting path) */
+  /**
+   * Maximum depth to traverse relative to startPath.
+   * - `undefined` = unlimited depth
+   * - `0` = only the starting path itself (if it's a file)
+   * - `1` = direct children only
+   *
+   * Lower values improve performance on deep directory trees.
+   */
   maxDepth?: number
 
-  /** Minimum depth before collecting entries (default: 0) */
+  /**
+   * Minimum depth before collecting entries.
+   * Entries at depths less than this value are traversed but not returned.
+   * @default 0
+   */
   minDepth?: number
 
-  /** Include dotfiles/dotdirs in traversal (default: false) */
+  /**
+   * Include hidden files/directories (names starting with `.`).
+   *
+   * This filter is applied before type checking, so it doesn't add
+   * syscall overhead. Setting to `false` can significantly reduce
+   * the number of entries in directories with many dotfiles.
+   *
+   * @default false
+   */
   includeDotFiles?: boolean
 
-  /** Follow symbolic links (default: true) */
+  /**
+   * Follow symbolic links to determine their target type.
+   *
+   * Performance note: When `true`, each symlink encountered requires
+   * a stat() call to determine if the target is a file or directory.
+   * When `false`, symlinks are reported as type 'symlink' and not
+   * traversed, avoiding the stat() call.
+   *
+   * @default true
+   */
   followSymlinks?: boolean
 
-  /** Directory patterns to skip during traversal */
+  /**
+   * Directory name patterns to skip during traversal.
+   *
+   * This is the most effective performance optimization - matching
+   * directories and all their contents are completely skipped.
+   *
+   * Supports simple wildcards:
+   * - Exact match: `'node_modules'`
+   * - Wildcard: `'*.cache'`, `'__*__'`
+   *
+   * @example
+   * ```typescript
+   * prunePatterns: ['node_modules', '.git', 'dist', '*.cache']
+   * ```
+   */
   prunePatterns?: string[]
 
   /**
    * Timeout in milliseconds for the entire traversal operation.
-   * Set to 0 or undefined for no timeout.
+   *
+   * When exceeded, throws `TraversalTimeoutError` with partial results
+   * available in the error's associated `TraversalResult`.
+   *
+   * Set to `0` or `undefined` for no timeout.
    */
   timeout?: number
 
   /**
    * AbortSignal for cancelling the traversal.
-   * When aborted, throws TraversalAbortedError.
+   *
+   * When the signal is aborted, the traversal stops and throws
+   * `TraversalAbortedError`. Partial results collected before
+   * cancellation are available.
+   *
+   * @example
+   * ```typescript
+   * const controller = new AbortController()
+   * setTimeout(() => controller.abort(), 5000)
+   *
+   * const result = await traverse({
+   *   backend: myBackend,
+   *   signal: controller.signal,
+   * })
+   * ```
    */
   signal?: AbortSignal
 
   /**
-   * Callback invoked for each entry before it's added to results.
-   * Return false to skip the entry, true to include it.
-   * Can be used for filtering or progress reporting.
+   * Filter callback invoked for each entry before it's added to results.
+   *
+   * Return `true` to include the entry, `false` to skip it.
+   * Async filters are supported but may impact performance.
+   *
+   * Note: This filter runs AFTER type determination, so entries
+   * already have their type available. For filtering before any
+   * syscalls, use `prunePatterns` instead.
+   *
+   * @example
+   * ```typescript
+   * filter: (entry) => entry.type === 'file' && entry.name.endsWith('.ts')
+   * ```
    */
   filter?: (entry: TraversalEntry) => boolean | Promise<boolean>
 
   /**
-   * Callback invoked periodically during traversal for progress updates.
-   * @param current - Number of entries processed so far
+   * Progress callback invoked periodically during traversal.
+   *
+   * Called every 100 entries by default. Useful for progress bars
+   * or logging on large traversals.
+   *
+   * @param current - Number of entries visited so far
    * @param currentPath - Path currently being processed
    */
   onProgress?: (current: number, currentPath: string) => void
 
   /**
-   * Whether to collect file stats (size, mtime, etc.) during traversal.
-   * Enabling this adds overhead but provides more metadata.
-   * Default: false
+   * Whether to collect file stats (size, mtime, ctime, atime).
+   *
+   * Performance impact:
+   * - `false` (default): No additional stat() calls for regular files
+   *   and directories. Type information comes from dirent.
+   * - `true`: Adds one stat() call per entry to collect metadata.
+   *
+   * Note: When `followSymlinks: true` and a symlink is encountered,
+   * the stat() result is cached and reused if `collectStats` is also
+   * true, avoiding a duplicate syscall.
+   *
+   * @default false
    */
   collectStats?: boolean
 
   /**
    * FsBackend to use for filesystem operations.
-   * Required for real filesystem traversal.
+   *
+   * The backend must implement:
+   * - `readdir(path, { withFileTypes: true })`
+   * - `stat(path)`
+   * - `exists(path)`
    */
   backend: FsBackend
 }
@@ -471,20 +614,35 @@ export async function traverse(options: TraversalOptions): Promise<TraversalResu
         continue
       }
 
-      // Determine entry type
+      // Determine entry type - optimized to avoid redundant stat calls
+      // We use dirent type information when available, only falling back to
+      // stat() for symlinks when followSymlinks is true.
       let entryType: TraversalEntryType
       let isDir = false
+      let cachedStats: { size: number; mtimeMs: number; ctimeMs: number; atimeMs: number } | undefined
+
       try {
         if (dirEntry.isSymbolicLink?.()) {
           if (!followSymlinks) {
+            // Don't follow symlink - report as symlink type
             entryType = 'symlink'
           } else {
-            // Follow symlink to determine actual type
+            // Follow symlink to determine actual type - cache result for reuse
             const stats = await backend.stat(entryPath)
             isDir = stats.isDirectory()
             entryType = isDir ? 'directory' : 'file'
+            // Cache stats to avoid second stat call when collectStats is true
+            if (collectStats) {
+              cachedStats = {
+                size: stats.size,
+                mtimeMs: stats.mtimeMs,
+                ctimeMs: stats.ctimeMs,
+                atimeMs: stats.atimeMs,
+              }
+            }
           }
         } else {
+          // Use dirent type directly - no stat call needed
           isDir = dirEntry.isDirectory()
           entryType = isDir ? 'directory' : 'file'
         }
@@ -502,16 +660,24 @@ export async function traverse(options: TraversalOptions): Promise<TraversalResu
         depth: currentDepth,
       }
 
-      // Collect stats if requested
+      // Collect stats if requested - use cached stats when available
       if (collectStats) {
-        try {
-          const stats = await backend.stat(entryPath)
-          entry.size = stats.size
-          entry.mtimeMs = stats.mtimeMs
-          entry.ctimeMs = stats.ctimeMs
-          entry.atimeMs = stats.atimeMs
-        } catch {
-          // Stats collection is optional, continue without
+        if (cachedStats) {
+          // Reuse stats from symlink resolution - avoid duplicate stat call
+          entry.size = cachedStats.size
+          entry.mtimeMs = cachedStats.mtimeMs
+          entry.ctimeMs = cachedStats.ctimeMs
+          entry.atimeMs = cachedStats.atimeMs
+        } else {
+          try {
+            const stats = await backend.stat(entryPath)
+            entry.size = stats.size
+            entry.mtimeMs = stats.mtimeMs
+            entry.ctimeMs = stats.ctimeMs
+            entry.atimeMs = stats.atimeMs
+          } catch {
+            // Stats collection is optional, continue without
+          }
         }
       }
 

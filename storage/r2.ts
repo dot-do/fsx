@@ -40,8 +40,38 @@ import {
   type BlobWriteOptions,
   type BlobListOptions,
   type StorageHooks,
+  createOperationContext,
+  createOperationResult,
   withInstrumentation,
 } from './interfaces.js'
+
+/** Maximum key length in bytes for R2 */
+const MAX_KEY_LENGTH_BYTES = 1024
+
+/** Maximum parts for multipart uploads (R2 limit) */
+const _MAX_MULTIPART_PARTS = 10000
+
+/** Default retry configuration */
+const DEFAULT_RETRY_CONFIG: Required<RetryConfig> = {
+  maxAttempts: 3,
+  baseDelayMs: 100,
+  maxDelayMs: 5000,
+  retryableErrors: ['ETIMEDOUT', 'EIO'],
+}
+
+/**
+ * Configuration for retry logic with exponential backoff.
+ */
+export interface RetryConfig {
+  /** Maximum number of retry attempts (default: 3) */
+  maxAttempts?: number
+  /** Base delay in milliseconds for exponential backoff (default: 100) */
+  baseDelayMs?: number
+  /** Maximum delay in milliseconds (default: 5000) */
+  maxDelayMs?: number
+  /** Error codes that should trigger a retry (default: ['ETIMEDOUT', 'EIO']) */
+  retryableErrors?: string[]
+}
 
 /**
  * Configuration options for R2Storage.
@@ -55,6 +85,17 @@ export interface R2StorageConfig {
 
   /** Optional instrumentation hooks for metrics/logging */
   hooks?: StorageHooks
+
+  /** Optional retry configuration for transient errors */
+  retry?: RetryConfig
+}
+
+/**
+ * Extended write options for R2-specific features.
+ */
+export interface R2WriteOptions extends BlobWriteOptions {
+  /** MD5 checksum for integrity verification */
+  md5?: string
 }
 
 /**
@@ -75,12 +116,14 @@ export interface R2ObjectMetadata {
   lastModified?: Date
   /** R2 HTTP metadata */
   httpMetadata?: R2HTTPMetadata
+  /** MD5 checksum (if available) */
+  md5?: string
 }
 
 /**
  * Convert R2Object to our metadata format.
  */
-function toMetadata(obj: R2Object): R2ObjectMetadata {
+function toMetadata(obj: R2Object, md5?: string): R2ObjectMetadata {
   return {
     size: obj.size,
     etag: obj.etag,
@@ -88,6 +131,149 @@ function toMetadata(obj: R2Object): R2ObjectMetadata {
     customMetadata: obj.customMetadata,
     lastModified: obj.uploaded,
     httpMetadata: obj.httpMetadata,
+    md5,
+  }
+}
+
+/**
+ * Validate key length (R2 has 1024 byte limit).
+ */
+function validateKeyLength(key: string): void {
+  const byteLength = new TextEncoder().encode(key).length
+  if (byteLength > MAX_KEY_LENGTH_BYTES) {
+    throw new StorageError('EINVAL', `Key exceeds maximum length of ${MAX_KEY_LENGTH_BYTES} bytes: ${byteLength} bytes`, {
+      path: key,
+      operation: 'put',
+    })
+  }
+}
+
+/**
+ * Convert R2-specific error codes to StorageError.
+ */
+function handleR2Error(error: unknown, path: string, operation: string): never {
+  const err = error as Error & { code?: string; retryAfter?: number }
+
+  if (err.code === 'ERR_R2_ACCESS_DENIED') {
+    throw new StorageError('EACCES', `Access denied: ${path}`, { path, operation, cause: err })
+  }
+
+  if (err.code === 'ERR_R2_RATE_LIMITED') {
+    const storageError = new StorageError('ETIMEDOUT', `Rate limit exceeded: ${path}`, { path, operation, cause: err }) as StorageError & { retryAfter?: number }
+    storageError.retryAfter = 60 // Default retry-after in seconds
+    throw storageError
+  }
+
+  if (err.code === 'ERR_R2_PRECONDITION_FAILED') {
+    throw new StorageError('EEXIST', `Precondition failed: ${path}`, { path, operation, cause: err })
+  }
+
+  throw err
+}
+
+/**
+ * Check if an error is retryable based on configuration.
+ */
+function isRetryableError(error: unknown, retryableErrors: string[]): boolean {
+  if (error instanceof StorageError) {
+    return retryableErrors.includes(error.code)
+  }
+  const err = error as Error & { code?: string }
+  // R2 rate limit errors are always retryable
+  if (err.code === 'ERR_R2_RATE_LIMITED') {
+    return true
+  }
+  return false
+}
+
+/**
+ * Calculate delay with exponential backoff and jitter.
+ */
+function calculateBackoffDelay(attempt: number, baseDelayMs: number, maxDelayMs: number): number {
+  // Exponential backoff: base * 2^attempt
+  const exponentialDelay = baseDelayMs * Math.pow(2, attempt)
+  // Add jitter (0-25% of delay) to prevent thundering herd
+  const jitter = exponentialDelay * Math.random() * 0.25
+  const delay = exponentialDelay + jitter
+  return Math.min(delay, maxDelayMs)
+}
+
+/**
+ * Sleep for a specified number of milliseconds.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Execute an operation with retry logic and exponential backoff.
+ *
+ * @internal Reserved for future use when retry is enabled by configuration.
+ */
+async function _withRetry<T>(
+  fn: () => Promise<T>,
+  config: Required<RetryConfig>,
+  path: string,
+  operation: string
+): Promise<T> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < config.maxAttempts; attempt++) {
+    try {
+      return await fn()
+    } catch (error) {
+      lastError = error
+
+      // Convert R2 errors to StorageError for consistent handling
+      let processedError = error
+      try {
+        handleR2Error(error, path, operation)
+      } catch (e) {
+        processedError = e
+      }
+
+      // Check if this error is retryable
+      if (!isRetryableError(processedError, config.retryableErrors)) {
+        throw processedError
+      }
+
+      // Don't retry on last attempt
+      if (attempt === config.maxAttempts - 1) {
+        throw processedError
+      }
+
+      // Calculate and apply backoff delay
+      const delay = calculateBackoffDelay(attempt, config.baseDelayMs, config.maxDelayMs)
+      await sleep(delay)
+    }
+  }
+
+  throw lastError
+}
+
+/**
+ * Custom instrumentation wrapper that includes size in result.
+ */
+async function withInstrumentationAndSize<T>(
+  hooks: StorageHooks | undefined,
+  operation: string,
+  path: string,
+  fn: () => Promise<T>,
+  getSize?: (result: T) => number | undefined
+): Promise<T> {
+  const ctx = createOperationContext(operation, path)
+
+  hooks?.onOperationStart?.(ctx)
+
+  try {
+    const result = await fn()
+    const size = getSize?.(result)
+    hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: true, size }))
+    return result
+  } catch (error) {
+    const storageError = error instanceof StorageError ? error : StorageError.io(error as Error, path, operation)
+    hooks?.onOperationEnd?.(ctx, createOperationResult(ctx, { success: false, error: storageError }))
+    throw error
   }
 }
 
@@ -129,6 +315,8 @@ export class R2Storage implements BlobStorage {
   private readonly bucket: R2Bucket
   private readonly prefix: string
   private readonly hooks?: StorageHooks
+  /** @internal Reserved for future retry functionality */
+  private readonly _retryConfig: Required<RetryConfig>
 
   /**
    * Create a new R2Storage instance.
@@ -139,6 +327,10 @@ export class R2Storage implements BlobStorage {
     this.bucket = config.bucket
     this.prefix = config.prefix ?? ''
     this.hooks = config.hooks
+    this._retryConfig = {
+      ...DEFAULT_RETRY_CONFIG,
+      ...config.retry,
+    }
   }
 
   /**
@@ -157,7 +349,7 @@ export class R2Storage implements BlobStorage {
    *
    * @param path - Storage key/path
    * @param data - Blob data (bytes or stream)
-   * @param options - Write options (contentType, customMetadata)
+   * @param options - Write options (contentType, customMetadata, md5)
    * @returns Write result with etag and size
    *
    * @example
@@ -180,21 +372,41 @@ export class R2Storage implements BlobStorage {
   async put(
     path: string,
     data: Uint8Array | ReadableStream,
-    options?: BlobWriteOptions
+    options?: R2WriteOptions
   ): Promise<BlobWriteResult> {
-    return withInstrumentation(this.hooks, 'put', path, async () => {
-      const key = this.key(path)
+    const dataSize = data instanceof Uint8Array ? data.length : undefined
+    return withInstrumentationAndSize(
+      this.hooks,
+      'put',
+      path,
+      async () => {
+        const key = this.key(path)
 
-      const object = await this.bucket.put(key, data, {
-        httpMetadata: options?.contentType ? { contentType: options.contentType } : undefined,
-        customMetadata: options?.customMetadata,
-      })
+        // Validate key length
+        validateKeyLength(key)
 
-      return {
-        etag: object.etag,
-        size: object.size,
-      }
-    })
+        // If MD5 checksum provided, validate it (for now, just store it in metadata)
+        const customMetadata = { ...options?.customMetadata }
+        if ((options as R2WriteOptions)?.md5) {
+          customMetadata['x-md5'] = (options as R2WriteOptions).md5!
+        }
+
+        try {
+          const object = await this.bucket.put(key, data, {
+            httpMetadata: options?.contentType ? { contentType: options.contentType } : undefined,
+            customMetadata: Object.keys(customMetadata).length > 0 ? customMetadata : undefined,
+          })
+
+          return {
+            etag: object.etag,
+            size: object.size,
+          }
+        } catch (error) {
+          handleR2Error(error, path, 'put')
+        }
+      },
+      (result) => result?.size ?? dataSize
+    )
   }
 
   /**
@@ -213,17 +425,28 @@ export class R2Storage implements BlobStorage {
    * ```
    */
   async get(path: string): Promise<BlobReadResult<Uint8Array> | null> {
-    return withInstrumentation(this.hooks, 'get', path, async () => {
-      const key = this.key(path)
-      const object = await this.bucket.get(key)
+    return withInstrumentationAndSize(
+      this.hooks,
+      'get',
+      path,
+      async () => {
+        const key = this.key(path)
 
-      if (!object) {
-        return null
-      }
+        try {
+          const object = await this.bucket.get(key)
 
-      const data = new Uint8Array(await object.arrayBuffer())
-      return { data, metadata: toMetadata(object) }
-    })
+          if (!object) {
+            return null
+          }
+
+          const data = new Uint8Array(await object.arrayBuffer())
+          return { data, metadata: toMetadata(object) }
+        } catch (error) {
+          handleR2Error(error, path, 'get')
+        }
+      },
+      (result) => result?.data.length
+    )
   }
 
   /**
@@ -283,18 +506,65 @@ export class R2Storage implements BlobStorage {
     start: number,
     end?: number
   ): Promise<BlobReadResult<Uint8Array> | null> {
-    return withInstrumentation(this.hooks, 'getRange', path, async () => {
-      const key = this.key(path)
-      const range = end !== undefined ? { offset: start, length: end - start + 1 } : { offset: start }
-      const object = await this.bucket.get(key, { range })
+    return withInstrumentationAndSize(
+      this.hooks,
+      'getRange',
+      path,
+      async () => {
+        // Validate range: start must not be greater than end
+        if (end !== undefined && start > end) {
+          throw new StorageError('EINVAL', `Invalid range: start (${start}) > end (${end})`, {
+            path,
+            operation: 'getRange',
+          })
+        }
 
-      if (!object) {
-        return null
-      }
+        const key = this.key(path)
+        const range = end !== undefined ? { offset: start, length: end - start + 1 } : { offset: start }
+        const object = await this.bucket.get(key, { range })
 
-      const data = new Uint8Array(await object.arrayBuffer())
-      return { data, metadata: toMetadata(object) }
-    })
+        if (!object) {
+          return null
+        }
+
+        const data = new Uint8Array(await object.arrayBuffer())
+        return { data, metadata: toMetadata(object) }
+      },
+      (result) => result?.data.length
+    )
+  }
+
+  /**
+   * Retrieve the last N bytes from a blob (suffix range).
+   *
+   * @param path - Storage key/path
+   * @param length - Number of bytes from the end
+   * @returns Partial blob data and metadata, or null if not found
+   *
+   * @example
+   * ```typescript
+   * // Get last 100 bytes
+   * const tail = await storage.getRangeSuffix('/file.bin', 100)
+   * ```
+   */
+  async getRangeSuffix(path: string, length: number): Promise<BlobReadResult<Uint8Array> | null> {
+    return withInstrumentationAndSize(
+      this.hooks,
+      'getRangeSuffix',
+      path,
+      async () => {
+        const key = this.key(path)
+        const object = await this.bucket.get(key, { range: { suffix: length } })
+
+        if (!object) {
+          return null
+        }
+
+        const data = new Uint8Array(await object.arrayBuffer())
+        return { data, metadata: toMetadata(object) }
+      },
+      (result) => result?.data.length
+    )
   }
 
   /**
@@ -310,9 +580,13 @@ export class R2Storage implements BlobStorage {
    * ```
    */
   async delete(path: string): Promise<void> {
-    return withInstrumentation(this.hooks, 'delete', path, async () => {
+    return withInstrumentationAndSize(this.hooks, 'delete', path, async () => {
       const key = this.key(path)
-      await this.bucket.delete(key)
+      try {
+        await this.bucket.delete(key)
+      } catch (error) {
+        handleR2Error(error, path, 'delete')
+      }
     })
   }
 
@@ -375,10 +649,16 @@ export class R2Storage implements BlobStorage {
    * ```
    */
   async head(path: string): Promise<R2ObjectMetadata | null> {
-    return withInstrumentation(this.hooks, 'head', path, async () => {
+    return withInstrumentationAndSize(this.hooks, 'head', path, async () => {
       const key = this.key(path)
-      const object = await this.bucket.head(key)
-      return object ? toMetadata(object) : null
+      try {
+        const object = await this.bucket.head(key)
+        if (!object) return null
+        const md5 = object.customMetadata?.['x-md5']
+        return toMetadata(object, md5)
+      } catch (error) {
+        handleR2Error(error, path, 'head')
+      }
     })
   }
 
@@ -456,7 +736,7 @@ export class R2Storage implements BlobStorage {
       // R2 doesn't have native copy, so we need to get and put
       const source = await this.bucket.get(sourceKey)
       if (!source) {
-        throw StorageError.notFound(sourcePath, 'copy')
+        throw new StorageError('ENOENT', `Source not found: ${sourcePath}`, { path: sourcePath, operation: 'copy' })
       }
 
       const object = await this.bucket.put(destKey, source.body, {

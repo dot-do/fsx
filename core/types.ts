@@ -309,37 +309,152 @@ export interface RemoveOptions {
 // =============================================================================
 
 /**
- * File mode (permissions)
+ * File mode representing POSIX permissions and file type bits.
+ *
+ * The mode is a bitmask containing:
+ * - File type bits (S_IFMT mask): identifies the type of file
+ * - Special bits (setuid, setgid, sticky): special permissions
+ * - Permission bits: owner, group, and other read/write/execute
+ *
+ * Common values:
+ * - `0o644` (rw-r--r--): Standard file permissions
+ * - `0o755` (rwxr-xr-x): Executable file or directory
+ * - `0o600` (rw-------): Private file
+ *
+ * @example
+ * ```typescript
+ * // Standard file permissions
+ * const regularFile: FileMode = 0o100644  // Type + permissions
+ *
+ * // Just permissions (used with chmod)
+ * const permissions: FileMode = 0o755
+ *
+ * // Check if writable by owner
+ * const isOwnerWritable = (mode & 0o200) !== 0
+ * ```
+ *
+ * @see {@link constants} for individual bit definitions
  */
 export type FileMode = number
 
 /**
- * File type
+ * Type of filesystem entry.
+ *
+ * Represents the different types of filesystem objects that can exist:
+ * - `'file'` - Regular file containing data
+ * - `'directory'` - Directory containing other entries
+ * - `'symlink'` - Symbolic link pointing to another path
+ * - `'block'` - Block device (e.g., disk)
+ * - `'character'` - Character device (e.g., terminal)
+ * - `'fifo'` - FIFO/named pipe for IPC
+ * - `'socket'` - Unix domain socket
+ *
+ * @example
+ * ```typescript
+ * function handleEntry(type: FileType): void {
+ *   switch (type) {
+ *     case 'file':
+ *       console.log('Processing file...')
+ *       break
+ *     case 'directory':
+ *       console.log('Processing directory...')
+ *       break
+ *     // ... other cases
+ *   }
+ * }
+ * ```
  */
 export type FileType = 'file' | 'directory' | 'symlink' | 'block' | 'character' | 'fifo' | 'socket'
 
 /**
- * Stats properties for constructor
+ * Initialization properties for creating a Stats instance.
+ *
+ * Contains all the raw numeric values needed to construct a Stats object.
+ * Timestamps are specified in milliseconds since Unix epoch to allow
+ * sub-second precision.
+ *
+ * @example
+ * ```typescript
+ * const init: StatsInit = {
+ *   dev: 2114,
+ *   ino: 48064969,
+ *   mode: 0o100644,  // Regular file with rw-r--r--
+ *   nlink: 1,
+ *   uid: 1000,
+ *   gid: 1000,
+ *   rdev: 0,
+ *   size: 1024,
+ *   blksize: 4096,
+ *   blocks: 8,
+ *   atimeMs: Date.now(),
+ *   mtimeMs: Date.now(),
+ *   ctimeMs: Date.now(),
+ *   birthtimeMs: Date.now(),
+ * }
+ * const stats = new Stats(init)
+ * ```
  */
 export interface StatsInit {
+  /** Device ID containing the file */
   dev: number
+  /** Inode number (unique identifier within filesystem) */
   ino: number
+  /** File mode (permissions and file type bits) */
   mode: number
+  /** Number of hard links to the file */
   nlink: number
+  /** User ID of the file owner */
   uid: number
+  /** Group ID of the file owner */
   gid: number
+  /** Device ID (for special files like block/character devices) */
   rdev: number
+  /** File size in bytes */
   size: number
+  /** Preferred block size for I/O operations */
   blksize: number
+  /** Number of 512-byte blocks allocated */
   blocks: number
+  /** Last access time in milliseconds since epoch */
   atimeMs: number
+  /** Last modification time in milliseconds since epoch */
   mtimeMs: number
+  /** Last status change time in milliseconds since epoch */
   ctimeMs: number
+  /** Creation (birth) time in milliseconds since epoch */
   birthtimeMs: number
 }
 
 /**
- * File statistics class
+ * POSIX-compatible file statistics class.
+ *
+ * Provides comprehensive metadata about a filesystem entry, including
+ * size, timestamps, permissions, and type information. Compatible with
+ * Node.js `fs.Stats` for easy migration.
+ *
+ * The type checking methods (`isFile()`, `isDirectory()`, etc.) use
+ * bitwise operations on the mode field to determine the file type
+ * according to POSIX standards.
+ *
+ * @example
+ * ```typescript
+ * const stats = await fs.stat('/path/to/file')
+ *
+ * // Check type
+ * if (stats.isFile()) {
+ *   console.log(`File size: ${stats.size} bytes`)
+ * }
+ *
+ * // Access timestamps
+ * console.log(`Last modified: ${stats.mtime}`)
+ * console.log(`Created: ${stats.birthtime}`)
+ *
+ * // Check permissions via mode
+ * const isReadable = (stats.mode & 0o444) !== 0
+ * ```
+ *
+ * @see {@link StatsInit} for constructor properties
+ * @see {@link constants} for mode bit definitions
  */
 export class Stats {
   /** Device ID */
@@ -445,22 +560,46 @@ export class Stats {
 }
 
 /**
- * Dirent type
+ * Dirent type (alias for FileType for backward compatibility).
+ * @deprecated Use FileType instead.
  */
-export type DirentType = 'file' | 'directory' | 'symlink' | 'block' | 'character' | 'fifo' | 'socket'
+export type DirentType = FileType
 
 /**
- * Directory entry class
+ * Directory entry class representing a filesystem entry in a directory listing.
+ *
+ * Similar to Node.js `fs.Dirent`, this class provides metadata about directory
+ * entries including name, parent path, and type information. Type checking
+ * methods allow runtime identification of entry types.
+ *
+ * @example
+ * ```typescript
+ * const entries = await fs.readdir('/home/user', { withFileTypes: true })
+ * for (const entry of entries) {
+ *   if (entry.isFile()) {
+ *     console.log(`File: ${entry.path}`)
+ *   } else if (entry.isDirectory()) {
+ *     console.log(`Directory: ${entry.path}`)
+ *   }
+ * }
+ * ```
  */
 export class Dirent {
-  /** Entry name */
+  /** Entry name (filename without path) */
   readonly name: string
-  /** Parent path */
+  /** Parent directory path */
   readonly parentPath: string
-  /** Entry type */
-  private readonly _type: DirentType
+  /** Entry type stored internally */
+  private readonly _type: FileType
 
-  constructor(name: string, parentPath: string, type: DirentType) {
+  /**
+   * Create a new directory entry.
+   *
+   * @param name - The entry name (filename only, no path)
+   * @param parentPath - The parent directory path
+   * @param type - The type of filesystem entry
+   */
+  constructor(name: string, parentPath: string, type: FileType) {
     this.name = name
     this.parentPath = parentPath
     this._type = type
@@ -511,44 +650,113 @@ export class Dirent {
 }
 
 /**
- * Stats-like interface for FileHandle
+ * Interface describing an object with Stats-like behavior.
+ *
+ * This interface is used internally by FileHandle to track file metadata
+ * without requiring a full Stats instance. It provides the same properties
+ * and type-checking methods as Stats.
+ *
+ * Objects implementing this interface can be used wherever stat information
+ * is needed, enabling duck-typing compatibility.
+ *
+ * @example
+ * ```typescript
+ * function processStats(stats: StatsLike): void {
+ *   if (stats.isFile() && stats.size > 0) {
+ *     console.log(`Processing ${stats.size} bytes`)
+ *   }
+ * }
+ * ```
  */
 export interface StatsLike {
+  /** Device ID containing the file */
   dev: number
+  /** Inode number */
   ino: number
+  /** File mode (permissions and type) */
   mode: number
+  /** Number of hard links */
   nlink: number
+  /** User ID of owner */
   uid: number
+  /** Group ID of owner */
   gid: number
+  /** Device ID (for special files) */
   rdev: number
+  /** File size in bytes */
   size: number
+  /** Preferred block size for I/O */
   blksize: number
+  /** Number of blocks allocated */
   blocks: number
+  /** Last access time */
   atime: Date
+  /** Last modification time */
   mtime: Date
+  /** Last status change time */
   ctime: Date
+  /** Creation time */
   birthtime: Date
+  /** Returns true if this is a regular file */
   isFile(): boolean
+  /** Returns true if this is a directory */
   isDirectory(): boolean
+  /** Returns true if this is a symbolic link */
   isSymbolicLink(): boolean
+  /** Returns true if this is a block device */
   isBlockDevice(): boolean
+  /** Returns true if this is a character device */
   isCharacterDevice(): boolean
+  /** Returns true if this is a FIFO (named pipe) */
   isFIFO(): boolean
+  /** Returns true if this is a Unix socket */
   isSocket(): boolean
 }
 
 /**
- * File handle for open files
+ * File handle for open files.
+ *
+ * Provides a low-level interface for file operations with proper tracking of
+ * dirty state and POSIX-compliant sync semantics. The handle supports both
+ * sequential and positioned I/O operations.
+ *
+ * Key features:
+ * - **Dirty tracking**: Efficiently tracks whether data needs syncing
+ * - **Sync vs datasync**: Supports both full sync (data + metadata) and datasync (data only)
+ * - **Position management**: Tracks current file position for sequential operations
+ * - **Access mode enforcement**: Respects read/write/append flags from open()
+ *
+ * @example
+ * ```typescript
+ * const handle = await fs.open('/file.txt', 'r+')
+ * await handle.write('data')
+ * await handle.sync()  // Flush data and metadata
+ * await handle.close()
+ * ```
  */
 export class FileHandle {
-  /** File descriptor */
+  /** File descriptor number (3+ for user files; 0-2 reserved for stdin/stdout/stderr) */
   readonly fd: number
-  /** Internal data buffer */
+  /** Internal data buffer containing file contents */
   private _data: Uint8Array
-  /** Internal stats */
+  /** Internal stats cache (includes size, timestamps, etc.) */
   private _stats: StatsLike
-  /** Whether the handle is closed */
+  /** Whether the handle has been closed */
   private _closed: boolean = false
+  /** Current file position for sequential read/write operations */
+  private _position: number = 0
+  /** Whether this handle is in append mode (O_APPEND) */
+  _appendMode: boolean = false
+  /** Whether this handle permits write operations */
+  _writable: boolean = true
+  /** Whether this handle permits read operations */
+  _readable: boolean = true
+  /**
+   * Dirty flag for efficient sync tracking.
+   * Set to true when data has been modified since last sync.
+   * Allows sync() to be a no-op when no changes have been made.
+   */
+  private _dirty: boolean = false
 
   constructor(fd: number, data: Uint8Array, stats: StatsLike) {
     this.fd = fd
@@ -556,98 +764,60 @@ export class FileHandle {
     this._stats = stats
   }
 
+  /**
+   * Ensure the file handle is still open.
+   * @throws {Error} EBADF if handle has been closed
+   */
   private _ensureOpen(): void {
     if (this._closed) {
-      throw new Error('File handle is closed')
+      const error = new Error('EBADF: bad file descriptor - handle is closed') as Error & { code: string }
+      error.code = 'EBADF'
+      throw error
     }
   }
 
-  /** Read from file */
-  async read(
-    buffer: Uint8Array,
-    offset: number = 0,
-    length?: number,
-    position: number = 0
-  ): Promise<{ bytesRead: number; buffer: Uint8Array }> {
-    this._ensureOpen()
-
-    const readLength = length ?? this._data.length - position
-    const actualLength = Math.min(readLength, this._data.length - position)
-    const bytesToRead = Math.min(actualLength, buffer.length - offset)
-
-    for (let i = 0; i < bytesToRead; i++) {
-      buffer[offset + i] = this._data[position + i]!
-    }
-
-    return { bytesRead: bytesToRead, buffer }
+  /**
+   * Create an Error with an errno code property.
+   * Centralizes error creation for consistent error handling across read/write operations.
+   *
+   * @param code - POSIX errno code (e.g., 'EBADF', 'EINVAL')
+   * @param message - Human-readable error message
+   * @returns Error object with code property set
+   */
+  private _createErrnoError(code: string, message: string): Error & { code: string } {
+    const error = new Error(`${code}: ${message}`) as Error & { code: string }
+    error.code = code
+    return error
   }
 
-  /** Write to file */
-  async write(
-    data: Uint8Array | string,
-    position?: number
-  ): Promise<{ bytesWritten: number }> {
-    this._ensureOpen()
-
-    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
-    const pos = position ?? this._data.length
-
-    // Expand data array if needed
-    if (pos + bytes.length > this._data.length) {
-      const newData = new Uint8Array(pos + bytes.length)
-      newData.set(this._data)
-      this._data = newData
+  /**
+   * Validate that a numeric parameter is non-negative.
+   * Throws EINVAL if the value is negative.
+   *
+   * @param value - The value to validate
+   * @param paramName - Name of the parameter for error messages
+   * @throws {Error} EINVAL if value is negative
+   */
+  private _validateNonNegative(value: number | undefined, paramName: string): void {
+    if (value !== undefined && value < 0) {
+      throw this._createErrnoError('EINVAL', `invalid argument, ${paramName} cannot be negative`)
     }
-
-    // Write the data
-    for (let i = 0; i < bytes.length; i++) {
-      this._data[pos + i] = bytes[i]!
-    }
-
-    // Note: stats size update will be reflected in stat() via this._data.length
-    // No need to update _stats here since stat() reads directly from _data.length
-
-    return { bytesWritten: bytes.length }
   }
 
-  /** Get file stats */
-  async stat(): Promise<Stats> {
-    this._ensureOpen()
-
-    // Return current stats with updated size
-    return new Stats({
-      dev: this._stats.dev,
-      ino: this._stats.ino,
-      mode: this._stats.mode,
-      nlink: this._stats.nlink,
-      uid: this._stats.uid,
-      gid: this._stats.gid,
-      rdev: this._stats.rdev,
-      size: this._data.length,
-      blksize: this._stats.blksize,
-      blocks: Math.ceil(this._data.length / this._stats.blksize),
-      atimeMs: this._stats.atime.getTime(),
-      mtimeMs: this._stats.mtime.getTime(),
-      ctimeMs: this._stats.ctime.getTime(),
-      birthtimeMs: this._stats.birthtime.getTime(),
-    })
-  }
-
-  /** Truncate file */
-  async truncate(length: number = 0): Promise<void> {
-    this._ensureOpen()
-
-    if (length < this._data.length) {
-      this._data = this._data.slice(0, length)
-    } else if (length > this._data.length) {
-      const newData = new Uint8Array(length)
-      newData.set(this._data)
-      this._data = newData
-    }
-
-    // Create a new stats object preserving the atime/mtime/ctime/birthtime getters
+  /**
+   * Build a new StatsLike object with updated size and timestamps.
+   * This helper promotes code reuse across stat(), truncate(), and write operations.
+   *
+   * @param options - Optional overrides for mtime and ctime
+   * @returns A new StatsLike object reflecting current file state
+   */
+  private _buildStatsLike(options?: { mtime?: Date; ctime?: Date }): StatsLike {
     const oldStats = this._stats
-    this._stats = {
+    const currentSize = this._data.length
+    const blockSize = oldStats.blksize
+    const blocks = blockSize > 0 ? Math.ceil(currentSize / blockSize) : 0
+
+    return {
       dev: oldStats.dev,
       ino: oldStats.ino,
       mode: oldStats.mode,
@@ -655,12 +825,12 @@ export class FileHandle {
       uid: oldStats.uid,
       gid: oldStats.gid,
       rdev: oldStats.rdev,
-      size: this._data.length,
-      blksize: oldStats.blksize,
-      blocks: Math.ceil(this._data.length / oldStats.blksize),
+      size: currentSize,
+      blksize: blockSize,
+      blocks: blocks,
       atime: oldStats.atime,
-      mtime: oldStats.mtime,
-      ctime: oldStats.ctime,
+      mtime: options?.mtime ?? oldStats.mtime,
+      ctime: options?.ctime ?? oldStats.ctime,
       birthtime: oldStats.birthtime,
       isFile: () => oldStats.isFile(),
       isDirectory: () => oldStats.isDirectory(),
@@ -672,15 +842,568 @@ export class FileHandle {
     }
   }
 
-  /** Sync to disk */
-  async sync(): Promise<void> {
+  /**
+   * Read from file into buffer.
+   *
+   * Reads data from the file starting at `position` (or current file position if not specified)
+   * into `buffer` starting at `offset`. The number of bytes read is the minimum of:
+   * - `length` (or available buffer space if not specified)
+   * - Available space in buffer after offset
+   * - Remaining bytes in file from read position
+   *
+   * @param buffer - Buffer to read data into (must be Uint8Array)
+   * @param offset - Offset in buffer to start writing at (default: 0)
+   * @param length - Maximum number of bytes to read (default: buffer.length - offset)
+   * @param position - File position to read from. If undefined, uses and advances internal position.
+   *                   If specified, does not modify internal position (absolute read).
+   * @returns Object with bytesRead count and the same buffer reference
+   *
+   * @throws {Error} EBADF if handle is closed or not readable
+   * @throws {TypeError} If buffer is not a Uint8Array
+   * @throws {Error} EINVAL if offset, length, or position is negative
+   * @throws {RangeError} If offset exceeds buffer length
+   */
+  async read(
+    buffer: Uint8Array,
+    offset: number = 0,
+    length?: number,
+    position?: number
+  ): Promise<{ bytesRead: number; buffer: Uint8Array }> {
+    // --- Precondition checks ---
     this._ensureOpen()
-    // No-op in memory implementation
+    this._ensureReadable()
+    this._validateBuffer(buffer)
+    this._validateReadParams(buffer, offset, length, position)
+
+    // --- Determine read position ---
+    // Absolute read (position specified): read from position, don't update internal position
+    // Sequential read (position undefined): read from internal position, advance it after
+    const isSequentialRead = position === undefined
+    const readPosition = isSequentialRead ? this._position : position
+
+    // --- Calculate bytes to read ---
+    const bytesToRead = this._calculateBytesToRead(buffer, offset, length, readPosition)
+
+    // Early return for EOF or zero-length reads
+    if (bytesToRead === 0) {
+      return { bytesRead: 0, buffer }
+    }
+
+    // --- Perform the read using efficient subarray copy ---
+    const sourceSlice = this._data.subarray(readPosition, readPosition + bytesToRead)
+    buffer.set(sourceSlice, offset)
+
+    // --- Update position for sequential reads ---
+    if (isSequentialRead) {
+      this._position += bytesToRead
+    }
+
+    return { bytesRead: bytesToRead, buffer }
   }
 
-  /** Close file */
+  /**
+   * Ensure the handle is readable.
+   * @throws {Error} EBADF if handle was opened write-only
+   */
+  private _ensureReadable(): void {
+    if (!this._readable) {
+      throw this._createErrnoError('EBADF', 'bad file descriptor, read - not readable')
+    }
+  }
+
+  /**
+   * Validate that buffer is a valid Uint8Array.
+   * @throws {TypeError} If buffer is null, undefined, or not a Uint8Array
+   */
+  private _validateBuffer(buffer: unknown): asserts buffer is Uint8Array {
+    if (buffer === null || buffer === undefined || !(buffer instanceof Uint8Array)) {
+      throw new TypeError('The "buffer" argument must be of type Uint8Array')
+    }
+  }
+
+  /**
+   * Validate read() parameters.
+   * @throws {Error} EINVAL for negative offset, length, or position
+   * @throws {RangeError} If offset exceeds buffer bounds
+   */
+  private _validateReadParams(
+    buffer: Uint8Array,
+    offset: number,
+    length: number | undefined,
+    position: number | undefined
+  ): void {
+    // Validate offset
+    this._validateNonNegative(offset, 'offset')
+    if (offset > buffer.length) {
+      throw new RangeError('The value of "offset" is out of range')
+    }
+
+    // Validate length and position
+    this._validateNonNegative(length, 'length')
+    this._validateNonNegative(position, 'position')
+  }
+
+  /**
+   * Calculate the actual number of bytes to read.
+   *
+   * Takes the minimum of:
+   * 1. Requested length (or available buffer space if not specified)
+   * 2. Remaining buffer capacity after offset
+   * 3. Remaining file bytes from read position
+   *
+   * @returns Number of bytes to read (0 if at/past EOF or no capacity)
+   */
+  private _calculateBytesToRead(
+    buffer: Uint8Array,
+    offset: number,
+    length: number | undefined,
+    readPosition: number
+  ): number {
+    // Check for EOF
+    const fileSize = this._data.length
+    if (readPosition >= fileSize) {
+      return 0
+    }
+
+    const bufferCapacity = buffer.length - offset
+    const remainingInFile = fileSize - readPosition
+    const requestedLength = length ?? bufferCapacity
+
+    // Return the minimum of all constraints, ensuring non-negative
+    return Math.max(0, Math.min(requestedLength, bufferCapacity, remainingInFile))
+  }
+
+  /**
+   * Write data to the file.
+   *
+   * Supports writing strings, Uint8Array buffers, or ArrayBuffers to the file.
+   * For buffer writes, optional offset and length parameters allow writing
+   * a portion of the source buffer.
+   *
+   * @param data - Data to write (string, Uint8Array, or ArrayBuffer)
+   * @param position - File position to write at. If null, uses current position.
+   *                   If undefined (for buffers), defaults to 0.
+   * @param length - For buffer writes: number of bytes to write from buffer
+   * @param offset - For buffer writes: offset in source buffer to start reading from
+   * @returns Object with bytesWritten count and the source buffer
+   *
+   * @throws {Error} If handle is closed (EBADF)
+   * @throws {Error} If handle is not writable (EBADF)
+   * @throws {Error} If position is negative (EINVAL)
+   * @throws {TypeError} If data is not a valid type
+   * @throws {RangeError} If offset or length exceeds buffer bounds
+   *
+   * @example
+   * ```typescript
+   * // Write a string
+   * await handle.write('Hello, World!')
+   *
+   * // Write at specific position
+   * await handle.write('data', 100)
+   *
+   * // Write portion of buffer
+   * const buffer = new Uint8Array([1, 2, 3, 4, 5])
+   * await handle.write(buffer, 0, 3, 1)  // Write bytes [2,3,4] at position 0
+   * ```
+   */
+  async write(
+    data: Uint8Array | ArrayBuffer | string,
+    position?: number | null,
+    length?: number,
+    offset?: number
+  ): Promise<{ bytesWritten: number; buffer: Uint8Array }> {
+    this._ensureOpen()
+    this._ensureWritable()
+
+    // Convert input to bytes and determine what portion to write
+    const { bytes, toWrite } = this._prepareWriteData(data, length, offset)
+
+    // Determine write position (handles append mode, null/undefined semantics)
+    const pos = this._getWritePosition(position)
+
+    // Perform the write and update state
+    this._writeBytes(toWrite, pos)
+    this._position = pos + toWrite.length
+    this._updateMtime()
+
+    return { bytesWritten: toWrite.length, buffer: bytes }
+  }
+
+  /**
+   * Validate that the handle is writable, throwing EBADF if not.
+   */
+  private _ensureWritable(): void {
+    if (!this._writable) {
+      const error = new Error('EBADF: bad file descriptor, write')
+      ;(error as Error & { code: string }).code = 'EBADF'
+      throw error
+    }
+  }
+
+  /**
+   * Convert write data to bytes and extract the portion to write.
+   * Handles strings, Uint8Arrays, and ArrayBuffers with optional offset/length.
+   *
+   * @param data - Input data (string, Uint8Array, or ArrayBuffer)
+   * @param length - Optional length for buffer writes
+   * @param offset - Optional offset for buffer writes
+   * @returns Object containing the full buffer and the portion to write
+   * @throws {TypeError} If data is an invalid type
+   * @throws {RangeError} If offset/length exceed buffer bounds
+   */
+  private _prepareWriteData(
+    data: Uint8Array | ArrayBuffer | string,
+    length?: number,
+    offset?: number
+  ): { bytes: Uint8Array; toWrite: Uint8Array } {
+    // Handle string input (always UTF-8 encoded)
+    if (typeof data === 'string') {
+      const bytes = new TextEncoder().encode(data)
+      return { bytes, toWrite: bytes }
+    }
+
+    // Validate data type for non-string inputs
+    this._validateWriteDataType(data)
+
+    // Convert ArrayBuffer to Uint8Array if needed
+    const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data
+
+    // Apply offset and length to extract the portion to write
+    const bufferOffset = offset ?? 0
+    const writeLength = length ?? bytes.length - bufferOffset
+
+    // Validate offset and length bounds
+    if (bufferOffset > bytes.length) {
+      throw new RangeError('The value of "offset" is out of range')
+    }
+    if (bufferOffset + writeLength > bytes.length) {
+      throw new RangeError('The value of "length" is out of range')
+    }
+
+    const toWrite = bytes.subarray(bufferOffset, bufferOffset + writeLength)
+    return { bytes, toWrite }
+  }
+
+  /**
+   * Validate that write data is a valid type.
+   * @throws {TypeError} If data is null, undefined, number, or invalid object
+   */
+  private _validateWriteDataType(data: unknown): void {
+    if (data === null || data === undefined) {
+      throw new TypeError('The "buffer" argument must be of type Uint8Array, ArrayBuffer, or string')
+    }
+    if (typeof data === 'number') {
+      throw new TypeError('The "buffer" argument must be of type Uint8Array, ArrayBuffer, or string')
+    }
+    if (typeof data === 'object' && !(data instanceof Uint8Array) && !(data instanceof ArrayBuffer)) {
+      throw new TypeError('The "buffer" argument must be of type Uint8Array, ArrayBuffer, or string')
+    }
+  }
+
+  /** Get the write position, handling append mode and defaults */
+  private _getWritePosition(position: number | null | undefined): number {
+    // Validate negative position
+    if (position !== null && position !== undefined && position < 0) {
+      const error = new Error('EINVAL: invalid argument, write')
+      ;(error as Error & { code: string }).code = 'EINVAL'
+      throw error
+    }
+
+    // In append mode, always write at end regardless of specified position
+    if (this._appendMode) {
+      return this._data.length
+    }
+
+    // null means use current position
+    if (position === null) {
+      return this._position
+    }
+
+    // undefined means position 0 (default)
+    if (position === undefined) {
+      return 0
+    }
+
+    return position
+  }
+
+  /**
+   * Write bytes at the specified position, extending the file if necessary.
+   *
+   * Uses Uint8Array.set() for efficient bulk copy operations instead of
+   * byte-by-byte iteration. When extending past EOF, gaps are filled with zeros.
+   *
+   * @param bytes - The bytes to write
+   * @param pos - Position in the file to write at
+   */
+  private _writeBytes(bytes: Uint8Array, pos: number): void {
+    const requiredSize = pos + bytes.length
+
+    // Extend file buffer if writing past current size
+    if (requiredSize > this._data.length) {
+      const newData = new Uint8Array(requiredSize)
+      // Copy existing data (gaps beyond old size are already zero-initialized)
+      newData.set(this._data)
+      this._data = newData
+    }
+
+    // Use set() for efficient bulk copy (much faster than byte-by-byte loop)
+    this._data.set(bytes, pos)
+  }
+
+  /**
+   * Update mtime and ctime after a write operation.
+   * Called internally by write() to maintain POSIX-compliant timestamp behavior.
+   * Also sets the dirty flag to indicate data needs syncing.
+   */
+  private _updateMtime(): void {
+    const now = new Date()
+    this._stats = this._buildStatsLike({ mtime: now, ctime: now })
+    this._dirty = true
+  }
+
+  /**
+   * Get statistics about the open file.
+   *
+   * Returns a Stats object reflecting the current state of the file,
+   * including any pending (unflushed) writes. This is equivalent to
+   * the POSIX fstat(2) system call.
+   *
+   * The returned Stats includes:
+   * - **size**: Current file size including pending writes (not yet synced)
+   * - **blocks**: Computed from current size (size / blksize, rounded up)
+   * - **mtime/ctime**: Updated if writes have occurred since opening
+   * - **atime**: Updated to reflect read operations
+   * - Other properties (dev, ino, mode, etc.) remain as originally opened
+   *
+   * @returns A Stats object with current file metadata
+   * @throws {Error} If the file handle has been closed
+   *
+   * @example
+   * ```typescript
+   * const handle = await fsx.open('/data.txt', 'r+')
+   * const stats = await handle.stat()
+   * console.log(`File size: ${stats.size} bytes`)
+   * console.log(`Is file: ${stats.isFile()}`)
+   * console.log(`Last modified: ${stats.mtime}`)
+   * await handle.close()
+   * ```
+   *
+   * @example
+   * ```typescript
+   * // Stats reflect pending writes
+   * const handle = await fsx.open('/new.txt', 'w')
+   * await handle.write('Hello, World!')
+   * const stats = await handle.stat()
+   * console.log(stats.size) // 13 (includes unflushed write)
+   * ```
+   *
+   * @see {@link Stats} for available properties and type-checking methods
+   * @see {@link FileHandle.sync} to flush pending writes to storage
+   */
+  async stat(): Promise<Stats> {
+    this._ensureOpen()
+
+    // Compute current size from internal buffer (reflects pending writes)
+    const currentSize = this._data.length
+
+    // Compute blocks based on current size
+    // Use ceiling division to match POSIX behavior (partial block counts as full)
+    const blockSize = this._stats.blksize
+    const blocks = blockSize > 0 ? Math.ceil(currentSize / blockSize) : 0
+
+    // Build Stats from current internal state
+    // Note: mtime/ctime are updated by _updateMtime() on writes
+    return new Stats({
+      dev: this._stats.dev,
+      ino: this._stats.ino,
+      mode: this._stats.mode,
+      nlink: this._stats.nlink,
+      uid: this._stats.uid,
+      gid: this._stats.gid,
+      rdev: this._stats.rdev,
+      size: currentSize,
+      blksize: blockSize,
+      blocks: blocks,
+      atimeMs: this._stats.atime.getTime(),
+      mtimeMs: this._stats.mtime.getTime(),
+      ctimeMs: this._stats.ctime.getTime(),
+      birthtimeMs: this._stats.birthtime.getTime(),
+    })
+  }
+
+  /**
+   * Truncate the file to a specified length.
+   *
+   * If the file was larger than the specified length, the extra bytes
+   * are discarded. If the file was smaller, it is extended with null bytes.
+   * Both operations mark the file as dirty and update timestamps.
+   *
+   * @param length - The new file length in bytes (default: 0)
+   * @throws {Error} EBADF if the file handle has been closed
+   *
+   * @example
+   * ```typescript
+   * const handle = await fsx.open('/data.txt', 'r+')
+   * await handle.truncate(100)  // Truncate or extend to 100 bytes
+   * await handle.truncate()     // Truncate to 0 bytes (empty file)
+   * ```
+   */
+  async truncate(length: number = 0): Promise<void> {
+    this._ensureOpen()
+
+    const oldLength = this._data.length
+    if (length < oldLength) {
+      this._data = this._data.slice(0, length)
+    } else if (length > oldLength) {
+      const newData = new Uint8Array(length)
+      newData.set(this._data)
+      this._data = newData
+    }
+
+    // Only mark dirty if size actually changed
+    if (length !== oldLength) {
+      this._dirty = true
+      const now = new Date()
+      this._stats = this._buildStatsLike({ mtime: now, ctime: now })
+    } else {
+      // Update internal stats to reflect size (preserves timestamps)
+      this._stats = this._buildStatsLike()
+    }
+  }
+
+  /**
+   * Synchronize the file's in-core state with the storage device.
+   *
+   * Equivalent to POSIX fsync(2). Ensures that all pending writes are
+   * flushed to persistent storage, including both file data and metadata
+   * (size, timestamps, permissions, etc.).
+   *
+   * **Dirty tracking**: This method uses internal dirty tracking to efficiently
+   * skip the sync operation when no writes have occurred since the last sync.
+   * This is an optimization - calling sync() multiple times is safe and idempotent.
+   *
+   * **sync vs datasync**: Use sync() when you need to ensure metadata updates
+   * (like mtime) are also persisted. Use datasync() when you only need to
+   * ensure the file data itself is persisted (which can be more efficient).
+   *
+   * In the in-memory implementation, this is effectively a no-op since all data
+   * is already in memory. The dirty flag is cleared to indicate sync completed.
+   *
+   * @throws {Error} EBADF if the file handle has been closed
+   *
+   * @example
+   * ```typescript
+   * const handle = await fsx.open('/data.txt', 'w')
+   * await handle.write('Important data')
+   * await handle.sync()  // Ensure data AND metadata are persisted
+   * await handle.close()
+   * ```
+   *
+   * @see {@link FileHandle.datasync} for data-only synchronization
+   */
+  async sync(): Promise<void> {
+    this._ensureOpen()
+    // In a real implementation, this would flush to the storage backend.
+    // In the in-memory implementation, data is always "synced" immediately.
+    // Clear dirty flag to indicate sync completed successfully.
+    this._dirty = false
+  }
+
+  /**
+   * Synchronize the file's data (but not metadata) with the storage device.
+   *
+   * Equivalent to POSIX fdatasync(2). Similar to sync(), but only flushes
+   * file data, not metadata like timestamps or permissions. This can be
+   * more efficient when you only care about data integrity.
+   *
+   * **When to use datasync vs sync**:
+   * - Use datasync() for performance-critical paths where you only need
+   *   to ensure the file content is persisted (e.g., write-ahead logs)
+   * - Use sync() when metadata updates (mtime, size) must also be durable
+   *   (e.g., before reporting success to users)
+   *
+   * **Dirty tracking**: Like sync(), this method respects dirty tracking
+   * and is idempotent - safe to call multiple times.
+   *
+   * In the in-memory implementation, this behaves identically to sync()
+   * since there's no distinction between data and metadata persistence.
+   *
+   * @throws {Error} EBADF if the file handle has been closed
+   *
+   * @example
+   * ```typescript
+   * const handle = await fsx.open('/wal.log', 'a')
+   * await handle.write(logEntry)
+   * await handle.datasync()  // Ensure log entry is persisted (fast path)
+   * await handle.close()
+   * ```
+   *
+   * @see {@link FileHandle.sync} for full synchronization including metadata
+   */
+  async datasync(): Promise<void> {
+    this._ensureOpen()
+    // In a real implementation, this would flush data without metadata.
+    // In the in-memory implementation, this is equivalent to sync().
+    // Clear dirty flag to indicate data sync completed successfully.
+    this._dirty = false
+  }
+
+  /**
+   * Close the file handle and release any resources.
+   *
+   * This method is idempotent - calling close() multiple times is safe.
+   * After closing, any further operations on this handle will throw an error.
+   * It is important to always close file handles when done to free resources.
+   *
+   * Close behavior:
+   * 1. Marks the handle as closed (prevents further operations)
+   * 2. Releases internal data buffer (sets to empty array to aid GC)
+   * 3. Clears the dirty flag
+   *
+   * Note: In the base FileHandle class, close() does not perform a flush.
+   * Subclasses with actual storage backends should override this to call
+   * sync() before closing if needed.
+   *
+   * @example
+   * ```typescript
+   * const handle = await fsx.open('/data.txt', 'r')
+   * try {
+   *   const buffer = new Uint8Array(100)
+   *   await handle.read(buffer)
+   * } finally {
+   *   await handle.close()  // Always close, even on error
+   * }
+   * ```
+   */
   async close(): Promise<void> {
+    // Idempotent - safe to call multiple times
+    if (this._closed) {
+      return
+    }
+
+    // Mark as closed first to prevent any operations during cleanup
     this._closed = true
+
+    // Release resources - use empty array instead of keeping reference
+    // to the original data buffer, allowing GC to collect it
+    this._data = new Uint8Array(0)
+    this._dirty = false
+  }
+
+  /**
+   * Async disposable support for 'await using' syntax.
+   *
+   * Enables automatic cleanup when used with 'await using':
+   * ```typescript
+   * await using handle = await fsx.open('/file.txt', 'r')
+   * // handle is automatically closed when scope exits
+   * ```
+   *
+   * This is the preferred pattern for resource management in modern TypeScript.
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    return this.close()
   }
 
   /** Create readable stream */
@@ -1491,4 +2214,139 @@ export interface FsCapability {
    * ```
    */
   getTier?(path: string): Promise<StorageTier>
+}
+
+// =============================================================================
+// Type Guards
+// =============================================================================
+
+/**
+ * Type guard to check if a value is a Stats instance.
+ *
+ * @param value - Value to check
+ * @returns true if value is a Stats instance
+ *
+ * @example
+ * ```typescript
+ * const result = await someOperation()
+ * if (isStats(result)) {
+ *   console.log(`File size: ${result.size}`)
+ * }
+ * ```
+ */
+export function isStats(value: unknown): value is Stats {
+  return value instanceof Stats
+}
+
+/**
+ * Type guard to check if a value is a Dirent instance.
+ *
+ * @param value - Value to check
+ * @returns true if value is a Dirent instance
+ *
+ * @example
+ * ```typescript
+ * const entry = await getEntry()
+ * if (isDirent(entry)) {
+ *   console.log(`Entry name: ${entry.name}`)
+ * }
+ * ```
+ */
+export function isDirent(value: unknown): value is Dirent {
+  return value instanceof Dirent
+}
+
+/**
+ * Type guard to check if a value is a FileHandle instance.
+ *
+ * @param value - Value to check
+ * @returns true if value is a FileHandle instance
+ *
+ * @example
+ * ```typescript
+ * const resource = await acquireResource()
+ * if (isFileHandle(resource)) {
+ *   await resource.close()
+ * }
+ * ```
+ */
+export function isFileHandle(value: unknown): value is FileHandle {
+  return value instanceof FileHandle
+}
+
+/**
+ * Type guard to check if a value is a valid FileType.
+ *
+ * @param value - Value to check
+ * @returns true if value is a valid FileType string
+ *
+ * @example
+ * ```typescript
+ * const type = getTypeFromInput(userInput)
+ * if (isFileType(type)) {
+ *   handleFileType(type)
+ * }
+ * ```
+ */
+export function isFileType(value: unknown): value is FileType {
+  return (
+    value === 'file' ||
+    value === 'directory' ||
+    value === 'symlink' ||
+    value === 'block' ||
+    value === 'character' ||
+    value === 'fifo' ||
+    value === 'socket'
+  )
+}
+
+/**
+ * Type guard to check if a value is a valid StorageTier.
+ *
+ * @param value - Value to check
+ * @returns true if value is a valid StorageTier string
+ *
+ * @example
+ * ```typescript
+ * const tier = parseTier(config.tier)
+ * if (isStorageTier(tier)) {
+ *   await fs.write('/file', data, { tier })
+ * }
+ * ```
+ */
+export function isStorageTier(value: unknown): value is StorageTier {
+  return value === 'hot' || value === 'warm' || value === 'cold'
+}
+
+/**
+ * Type guard to check if a value conforms to StatsLike interface.
+ *
+ * Performs runtime structural check to verify an object has all
+ * required Stats properties and methods.
+ *
+ * @param value - Value to check
+ * @returns true if value conforms to StatsLike interface
+ *
+ * @example
+ * ```typescript
+ * function processAnyStats(stats: unknown): void {
+ *   if (isStatsLike(stats)) {
+ *     console.log(`Size: ${stats.size}`)
+ *   }
+ * }
+ * ```
+ */
+export function isStatsLike(value: unknown): value is StatsLike {
+  if (value === null || typeof value !== 'object') {
+    return false
+  }
+  const obj = value as Record<string, unknown>
+  return (
+    typeof obj.dev === 'number' &&
+    typeof obj.ino === 'number' &&
+    typeof obj.mode === 'number' &&
+    typeof obj.size === 'number' &&
+    typeof obj.isFile === 'function' &&
+    typeof obj.isDirectory === 'function'
+  )
 }

@@ -1,223 +1,235 @@
 /**
- * lstat - get file/directory metadata without following symlinks
+ * lstat - Get file/directory metadata WITHOUT following symbolic links
  *
  * Unlike stat(), lstat() returns information about the symlink itself,
- * not the file it points to.
+ * not the file or directory it points to. This is the key difference:
+ *
+ * - stat('/link') where link->file: returns file's stats, isFile()=true
+ * - lstat('/link') where link->file: returns link's stats, isSymbolicLink()=true
+ *
+ * Key characteristics:
+ * - **Does NOT follow symlinks**: Returns symlink's own stats
+ * - **Works with broken symlinks**: Can stat a symlink even if target missing
+ * - **Normalizes paths**: Handles //, ./, ../, and trailing slashes
+ * - **POSIX compatible**: Matches Node.js fs.lstat() behavior
+ *
+ * This is useful for:
+ * - Detecting symbolic links without following them
+ * - Getting symlink metadata (size is target path length)
+ * - Working with potentially broken symlinks
+ * - Implementing file tree traversal that handles symlinks safely
+ *
+ * @example
+ * ```typescript
+ * import { lstat } from 'fsx.do/fs/lstat'
+ *
+ * // Check if path is a symlink
+ * const stats = await lstat('/path/to/possible/link')
+ * if (stats.isSymbolicLink()) {
+ *   console.log('Path is a symbolic link')
+ *   console.log('Target path length:', stats.size)
+ * }
+ *
+ * // Works on broken symlinks (unlike stat())
+ * const brokenStats = await lstat('/path/to/broken/link')
+ * console.log('Broken symlink exists:', brokenStats.isSymbolicLink())
+ * ```
+ *
+ * @see {@link stat} - Get stats following symbolic links
+ * @see {@link Stats} - The Stats class with type checking methods
+ *
+ * @module core/fs/lstat
  */
 
-import { Stats } from '../types'
+import { Stats, type FileEntry } from '../types'
 import { ENOENT } from '../errors'
 import { normalize } from '../path'
-import { constants } from '../constants'
+import { buildStats } from './stats-builder'
+
+// =============================================================================
+// Storage Interface
+// =============================================================================
 
 /**
- * Entry type in mock filesystem
- */
-type EntryType = 'file' | 'directory' | 'symlink'
-
-/**
- * Mock filesystem entry
- */
-interface FSEntry {
-  type: EntryType
-  /** Content for files (as Uint8Array) */
-  content?: Uint8Array
-  /** For symlinks, this is the target path */
-  target?: string
-  /** Inode number */
-  ino?: number
-  /** File mode (permissions) */
-  mode?: number
-  /** Number of hard links */
-  nlink?: number
-  /** User ID */
-  uid?: number
-  /** Group ID */
-  gid?: number
-  /** Access time in ms */
-  atime?: number
-  /** Modification time in ms */
-  mtime?: number
-  /** Change time in ms */
-  ctime?: number
-  /** Birth time in ms */
-  birthtime?: number
-}
-
-// Default timestamps (some time in the past)
-const DEFAULT_TIME = Date.now() - 86400000 // 24 hours ago
-
-// Inode counter for generating unique inodes
-let inodeCounter = 1000
-
-/**
- * Generate a unique inode number
- */
-function nextInode(): number {
-  return ++inodeCounter
-}
-
-/**
- * Mock filesystem for testing
- * Maps paths to their entries (type, content, symlink target, etc.)
- */
-const mockFS: Map<string, FSEntry> = new Map([
-  // Root directory
-  ['/', { type: 'directory', ino: 1, mode: 0o755, nlink: 2 }],
-
-  // Home directory structure
-  ['/home', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 3 }],
-  ['/home/user', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 4 }],
-  ['/home/user/file.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Hello, World!'), nlink: 1 }],
-  ['/home/user/document.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Document content'), nlink: 1 }],
-  ['/home/user/hello.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Hello'), nlink: 1 }],
-  ['/home/user/empty.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new Uint8Array(0), nlink: 1 }],
-  ['/home/user/documents', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/home/user/link', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/home/user/target.txt', nlink: 1 }],
-  ['/home/user/target.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Target content'), nlink: 1 }],
-  ['/home/user/my documents', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/home/user/my documents/file.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Spaced file'), nlink: 1 }],
-  ['/home/user/archivo.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Unicode content'), nlink: 1 }],
-  ['/home/user/regular-file.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Regular file'), nlink: 1 }],
-  ['/home/user/directory', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-
-  // Links directory with various symlink scenarios
-  ['/links', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/links/mylink', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/data/largefile.bin', nlink: 1 }],
-  ['/links/file-link', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/data/file.txt', nlink: 1 }],
-  ['/links/dir-link', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/data/directory', nlink: 1 }],
-  ['/links/link', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/path/to/target', nlink: 1 }],
-  ['/links/broken', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/nonexistent/target', nlink: 1 }],
-  ['/links/broken-symlink', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/does/not/exist', nlink: 1 }],
-  ['/links/long-target-link', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/very/long/path/that/goes/on/and/on/and/on/to/simulate/a/really/long/symlink/target/path/that/exceeds/one/hundred/characters', nlink: 1 }],
-  ['/links/dot', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '.', nlink: 1 }],
-  ['/links/dotdot', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '..', nlink: 1 }],
-
-  // Data directory with targets
-  ['/data', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 3 }],
-  ['/data/largefile.bin', { type: 'file', ino: nextInode(), mode: 0o644, content: new Uint8Array(1024 * 1024), nlink: 1 }], // 1MB file
-  ['/data/file.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Data file'), nlink: 1 }],
-  ['/data/directory', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/data/target', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Target'), nlink: 1 }],
-
-  // Symlink chain: /link -> /target
-  ['/link', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/target', nlink: 1 }],
-  ['/target', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Target file'), nlink: 1 }],
-
-  // Symlink to symlink: /link1 -> /link2 -> /target
-  ['/link1', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/link2', nlink: 1 }],
-  ['/link2', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/final-target', nlink: 1 }],
-  ['/final-target', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Final'), nlink: 1 }],
-
-  // Circular symlinks: /circular/a -> /circular/b and /circular/b -> /circular/a
-  ['/circular', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/circular/a', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/circular/b', nlink: 1 }],
-  ['/circular/b', { type: 'symlink', ino: nextInode(), mode: 0o777, target: '/circular/a', nlink: 1 }],
-
-  // Absolute path test
-  ['/absolute', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/absolute/path', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/absolute/path/to', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/absolute/path/to/file.txt', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Absolute'), nlink: 1 }],
-
-  // Path test
-  ['/path', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/path/to', { type: 'directory', ino: nextInode(), mode: 0o755, nlink: 2 }],
-  ['/path/to/target', { type: 'file', ino: nextInode(), mode: 0o644, content: new TextEncoder().encode('Path target'), nlink: 1 }],
-])
-
-/**
- * Build mode value from entry type and permissions
- */
-function buildMode(entry: FSEntry): number {
-  let typeFlag: number
-  switch (entry.type) {
-    case 'file':
-      typeFlag = constants.S_IFREG
-      break
-    case 'directory':
-      typeFlag = constants.S_IFDIR
-      break
-    case 'symlink':
-      typeFlag = constants.S_IFLNK
-      break
-    default:
-      typeFlag = constants.S_IFREG
-  }
-
-  // Combine type flag with permissions
-  const perms = entry.mode ?? 0o644
-  return typeFlag | (perms & 0o777)
-}
-
-/**
- * Get the size of an entry
- * For files: content length
- * For directories: 4096 (typical block size)
- * For symlinks: length of target path string
- */
-function getSize(entry: FSEntry): number {
-  switch (entry.type) {
-    case 'file':
-      return entry.content?.length ?? 0
-    case 'directory':
-      return 4096
-    case 'symlink':
-      return entry.target?.length ?? 0
-    default:
-      return 0
-  }
-}
-
-/**
- * Get file/directory statistics without following symbolic links.
+ * Storage interface for lstat operation.
  *
- * @param path - Path to the file, directory, or symlink
- * @returns Stats object with file metadata
- * @throws ENOENT if path does not exist
+ * This interface abstracts the underlying storage mechanism, allowing lstat
+ * to work with different storage backends (in-memory, SQLite, Durable Objects).
+ *
+ * Unlike stat's storage interface, lstat does NOT require symlink resolution
+ * since it explicitly does not follow symlinks.
+ *
+ * @example
+ * ```typescript
+ * const storage: LstatStorage = {
+ *   get: (path) => database.getEntry(path),
+ *   has: (path) => database.exists(path),
+ * }
+ * setStorage(storage)
+ * ```
+ */
+export interface LstatStorage {
+  /**
+   * Get entry by normalized path.
+   *
+   * This should return the raw entry at the path WITHOUT following symlinks.
+   * For symlinks, return the symlink entry itself, not its target.
+   *
+   * @param path - Normalized absolute path
+   * @returns FileEntry if exists, undefined otherwise
+   */
+  get(path: string): FileEntry | undefined
+
+  /**
+   * Check if path exists in storage.
+   *
+   * @param path - Normalized absolute path
+   * @returns true if path exists, false otherwise
+   */
+  has(path: string): boolean
+}
+
+// =============================================================================
+// Storage Management
+// =============================================================================
+
+/**
+ * Module-level storage instance.
+ * Set via setStorage() for testing or when initializing the filesystem.
+ */
+let storage: LstatStorage | null = null
+
+/**
+ * Set the storage backend for lstat operations.
+ *
+ * This should be called during filesystem initialization or in test setup.
+ * The storage implementation provides the actual file lookup mechanism.
+ *
+ * @param s - Storage implementation, or null to clear
+ *
+ * @example
+ * ```typescript
+ * // Set up storage for testing
+ * setStorage({
+ *   get: (path) => mockFileSystem.get(path),
+ *   has: (path) => mockFileSystem.has(path),
+ * })
+ *
+ * // Clear storage after tests
+ * setStorage(null)
+ * ```
+ */
+export function setStorage(s: LstatStorage | null): void {
+  storage = s
+}
+
+/**
+ * Get the current storage backend.
+ *
+ * @returns Current storage instance, or null if not configured
+ */
+export function getStorage(): LstatStorage | null {
+  return storage
+}
+
+// =============================================================================
+// Main lstat Function
+// =============================================================================
+
+/**
+ * Get file status without following symbolic links.
+ *
+ * Returns a Stats object containing metadata about the file, directory, or
+ * symlink at the specified path. Unlike stat(), this function does NOT follow
+ * symbolic links - if the path points to a symlink, the returned stats
+ * describe the symlink itself, not its target.
+ *
+ * This is particularly useful when you need to:
+ * - Detect whether a path is a symbolic link
+ * - Get metadata about the link itself (not the target)
+ * - Work with potentially broken symlinks (lstat succeeds even if target missing)
+ * - Implement safe directory traversal that doesn't follow symlinks
+ *
+ * The returned Stats object provides:
+ * - **Type checking**: isFile(), isDirectory(), isSymbolicLink(), etc.
+ * - **Size info**: For symlinks, this is the byte length of the target path
+ * - **Timestamps**: atime, mtime, ctime, birthtime (link's own timestamps)
+ * - **Ownership**: uid (user ID), gid (group ID)
+ * - **Permissions**: mode (includes file type and permission bits)
+ * - **Links**: nlink (hard link count), ino (inode number), dev (device ID)
+ *
+ * @param path - Path to file, directory, or symlink (does NOT follow symlinks)
+ * @returns Promise resolving to Stats object with file metadata
+ *
+ * @throws {ENOENT} If path does not exist (errno: -2)
+ *   - Note: Does NOT throw ENOENT for broken symlinks (can stat the link itself)
+ *
+ * @example
+ * ```typescript
+ * // Basic usage - get stats for any path
+ * const stats = await lstat('/home/user/file.txt')
+ * console.log('Size:', stats.size)
+ * console.log('Is file:', stats.isFile())
+ *
+ * // Check if path is a symlink
+ * const linkStats = await lstat('/home/user/link')
+ * if (linkStats.isSymbolicLink()) {
+ *   console.log('This is a symlink!')
+ *   console.log('Target path length:', linkStats.size)
+ * }
+ *
+ * // Works on broken symlinks (unlike stat())
+ * try {
+ *   const brokenLinkStats = await lstat('/path/to/broken/link')
+ *   console.log('Broken link exists:', brokenLinkStats.isSymbolicLink())
+ * } catch (e) {
+ *   // Only throws if the symlink itself doesn't exist
+ * }
+ *
+ * // Compare with stat() behavior:
+ * // - stat('/link')  -> follows link, returns target's stats
+ * // - lstat('/link') -> returns link's stats, isSymbolicLink()=true
+ * ```
+ *
+ * @see {@link stat} - To get stats following symbolic links
+ * @see {@link Stats} - The Stats class with type checking methods
  */
 export async function lstat(path: string): Promise<Stats> {
-  const syscall = 'lstat'
-
-  // Normalize the input path (removes trailing slashes, resolves . and ..)
+  // Normalize path (handle //, ./, ../, trailing slashes)
   const normalizedPath = normalize(path)
 
-  // Look up the entry in the mock filesystem (DO NOT follow symlinks)
-  const entry = mockFS.get(normalizedPath)
+  // Verify storage is configured
+  if (!storage) {
+    throw new ENOENT('lstat', normalizedPath)
+  }
+
+  // Look up entry WITHOUT following symlinks
+  // This is the key difference from stat()
+  const entry = storage.get(normalizedPath)
 
   // If path doesn't exist, throw ENOENT
   if (!entry) {
-    throw new ENOENT(syscall, normalizedPath)
+    throw new ENOENT('lstat', normalizedPath)
   }
 
-  // Build mode with file type and permissions
-  const mode = buildMode(entry)
-
-  // Get size based on entry type
-  const size = getSize(entry)
-
-  // Use stored timestamps or defaults
-  const now = DEFAULT_TIME
-  const atimeMs = entry.atime ?? now
-  const mtimeMs = entry.mtime ?? now
-  const ctimeMs = entry.ctime ?? now
-  const birthtimeMs = entry.birthtime ?? now
-
-  // Create and return Stats object
-  return new Stats({
-    dev: 1, // Device ID (constant for mock FS)
-    ino: entry.ino ?? nextInode(),
-    mode,
-    nlink: entry.nlink ?? 1,
-    uid: entry.uid ?? 0,
-    gid: entry.gid ?? 0,
-    rdev: 0, // Not a device
-    size,
-    blksize: 4096,
-    blocks: Math.ceil(size / 512),
-    atimeMs,
-    mtimeMs,
-    ctimeMs,
-    birthtimeMs,
-  })
+  // Build and return Stats object using shared utility
+  // Note: We do NOT resolve symlinks here - that's the whole point of lstat
+  return buildStats(entry)
 }
+
+// =============================================================================
+// Re-exports for convenience
+// =============================================================================
+
+// Re-export stats building utilities for consumers who need them
+export {
+  buildStats,
+  buildMode,
+  computeInode,
+  FILE_TYPE_FLAGS,
+  VIRTUAL_DEV_ID,
+  DEFAULT_BLOCK_SIZE,
+  calculateBlocks,
+  toBigIntTimestamps,
+} from './stats-builder'
+export type { BuildStatsOptions, BigIntTimestamps } from './stats-builder'

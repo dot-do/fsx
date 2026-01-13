@@ -34,8 +34,180 @@
 import type { Dirent, FileHandle, MkdirOptions, RmdirOptions, ReaddirOptions, ReadStreamOptions, WriteStreamOptions, WatchOptions, FSWatcher, BufferEncoding } from './types.js'
 import { Stats } from './types.js'
 import type { FsBackend } from './backend.js'
-// Note: constants is referenced in JSDoc examples only
+import { constants } from './constants.js'
 export { constants } from './constants.js'
+
+// =============================================================================
+// Flag Parsing Utilities
+// =============================================================================
+
+/**
+ * Access mode for file operations.
+ * Determines what operations are permitted on a file handle.
+ *
+ * @internal
+ */
+type AccessMode = 'read' | 'write' | 'readwrite'
+
+/**
+ * Parsed file open flags.
+ * Contains all the information needed to open a file correctly.
+ *
+ * @internal
+ */
+interface ParsedFlags {
+  /** Access mode: read, write, or readwrite */
+  accessMode: AccessMode
+  /** Create file if it doesn't exist */
+  create: boolean
+  /** Fail if file already exists (with create) */
+  exclusive: boolean
+  /** Truncate file to zero length on open */
+  truncate: boolean
+  /** Append all writes to end of file */
+  append: boolean
+  /** Synchronous I/O mode (not implemented, for compatibility) */
+  sync: boolean
+}
+
+/**
+ * Parses POSIX file open flags into a structured format.
+ *
+ * Supports both string flags ('r', 'w+', 'ax', etc.) and numeric flags
+ * (O_RDONLY, O_WRONLY | O_CREAT, etc.).
+ *
+ * @example String flags:
+ * - 'r'  : Read-only, file must exist (default)
+ * - 'r+' : Read/write, file must exist
+ * - 'w'  : Write-only, create/truncate
+ * - 'w+' : Read/write, create/truncate
+ * - 'a'  : Append-only, create if needed
+ * - 'a+' : Append/read, create if needed
+ * - 'x'  : Exclusive flag (combine with w/a)
+ * - 's'  : Synchronous flag (combine with any)
+ *
+ * @param flags - String or numeric flags
+ * @returns Parsed flag object
+ * @throws Error with EINVAL if flags are invalid
+ *
+ * @internal
+ */
+function parseFlags(flags: string | number | undefined): ParsedFlags {
+  // Default to read-only
+  if (flags === undefined || flags === 'r') {
+    return {
+      accessMode: 'read',
+      create: false,
+      exclusive: false,
+      truncate: false,
+      append: false,
+      sync: false,
+    }
+  }
+
+  // Handle numeric flags
+  if (typeof flags === 'number' || /^\d+$/.test(flags as string)) {
+    const numFlags = typeof flags === 'number' ? flags : parseInt(flags as string, 10)
+    return parseNumericFlags(numFlags)
+  }
+
+  // Handle string flags
+  return parseStringFlags(flags as string)
+}
+
+/**
+ * Parses numeric POSIX flags (O_RDONLY, O_WRONLY, etc.).
+ *
+ * @param flags - Numeric flags (can be combined with |)
+ * @returns Parsed flag object
+ *
+ * @internal
+ */
+function parseNumericFlags(flags: number): ParsedFlags {
+  const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND, O_SYNC } = constants
+
+  // Extract access mode from lowest 2 bits
+  const accessBits = flags & 3 // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+
+  let accessMode: AccessMode
+  switch (accessBits) {
+    case O_RDONLY:
+      accessMode = 'read'
+      break
+    case O_WRONLY:
+      accessMode = 'write'
+      break
+    case O_RDWR:
+      accessMode = 'readwrite'
+      break
+    default:
+      accessMode = 'read'
+  }
+
+  return {
+    accessMode,
+    create: (flags & O_CREAT) !== 0,
+    exclusive: (flags & O_EXCL) !== 0,
+    truncate: (flags & O_TRUNC) !== 0,
+    append: (flags & O_APPEND) !== 0,
+    sync: (flags & O_SYNC) !== 0,
+  }
+}
+
+/**
+ * Parses string flags ('r', 'w+', 'ax', etc.).
+ *
+ * Valid base flags:
+ * - 'r'  : Open for reading (file must exist)
+ * - 'r+' : Open for reading and writing (file must exist)
+ * - 'w'  : Open for writing (create/truncate)
+ * - 'w+' : Open for reading and writing (create/truncate)
+ * - 'a'  : Open for appending (create if needed)
+ * - 'a+' : Open for reading and appending (create if needed)
+ *
+ * Modifiers (can appear in any order):
+ * - 'x'  : Exclusive - fail if file exists
+ * - 's'  : Synchronous mode
+ *
+ * @param flags - String flags
+ * @returns Parsed flag object
+ * @throws Error with EINVAL if flags are invalid
+ *
+ * @internal
+ */
+function parseStringFlags(flags: string): ParsedFlags {
+  // Normalize: remove 's' (sync) and 'x' (exclusive), sort remaining
+  const hasSync = flags.includes('s')
+  const hasExclusive = flags.includes('x')
+  const baseFlags = flags.replace(/[sx]/g, '')
+
+  // Valid base flag patterns
+  const validPatterns: Record<string, Omit<ParsedFlags, 'sync' | 'exclusive'>> = {
+    r: { accessMode: 'read', create: false, truncate: false, append: false },
+    'r+': { accessMode: 'readwrite', create: false, truncate: false, append: false },
+    '+r': { accessMode: 'readwrite', create: false, truncate: false, append: false },
+    rs: { accessMode: 'read', create: false, truncate: false, append: false },
+    'rs+': { accessMode: 'readwrite', create: false, truncate: false, append: false },
+    'sr+': { accessMode: 'readwrite', create: false, truncate: false, append: false },
+    w: { accessMode: 'write', create: true, truncate: true, append: false },
+    'w+': { accessMode: 'readwrite', create: true, truncate: true, append: false },
+    '+w': { accessMode: 'readwrite', create: true, truncate: true, append: false },
+    a: { accessMode: 'write', create: true, truncate: false, append: true },
+    'a+': { accessMode: 'readwrite', create: true, truncate: false, append: true },
+    '+a': { accessMode: 'readwrite', create: true, truncate: false, append: true },
+  }
+
+  const pattern = validPatterns[baseFlags]
+  if (!pattern) {
+    throw new Error(`EINVAL: invalid flags: ${flags}`)
+  }
+
+  return {
+    ...pattern,
+    exclusive: hasExclusive,
+    sync: hasSync,
+  }
+}
 
 // =============================================================================
 // Watch Manager - Internal file watching implementation
@@ -107,9 +279,9 @@ class WatchManager {
   private watchersByPath: Map<string, Set<WatchEntry>> = new Map()
 
   // Reserved for future optimization - sorted watched paths for efficient prefix matching
-  // @ts-expect-error Reserved for future use
+  // @ts-expect-error Reserved for future optimization
   private _sortedPaths: string[] = []
-  // @ts-expect-error Reserved for future use
+  // @ts-expect-error Reserved for future optimization
   private _pathsNeedSort: boolean = false
 
   /**
@@ -630,6 +802,9 @@ export class FSx {
     src = this.normalizePath(src)
     dest = this.normalizePath(dest)
     await this.backend.copyFile(src, dest)
+
+    // Emit watch event - 'rename' for new file created by copy
+    this.watchManager.emit('rename', dest)
   }
 
   // ==================== Directory Operations ====================
@@ -1270,45 +1445,213 @@ export class FSx {
   }
 
   /**
-   * Create a FileHandle object for low-level file operations
+   * Create a FileHandle object for low-level file operations.
    *
-   * @param path - The file path
-   * @param flags - Open flags
+   * This internal method creates a file handle that wraps the backend with
+   * proper access mode enforcement and position tracking. The handle implements
+   * lazy loading - file data is only read when needed.
+   *
+   * Access mode enforcement:
+   * - 'read' mode: read() allowed, write() throws EBADF
+   * - 'write' mode: write() allowed, read() throws EBADF
+   * - 'readwrite' mode: both read() and write() allowed
+   *
+   * Append mode behavior:
+   * - All writes go to end of file regardless of position parameter
+   * - This is POSIX-mandated O_APPEND behavior
+   *
+   * @param path - The normalized file path
+   * @param flags - Open flags (string or numeric)
    * @returns A FileHandle with read, write, stat, sync, and close methods
+   *
+   * @internal
    */
-  private createFileHandle(path: string, _flags?: string | number): FileHandle {
+  private createFileHandle(path: string, flags?: string | number): FileHandle {
     const backend = this.backend
+
+    // Parse flags into structured format for access mode enforcement
+    const parsedFlags = parseFlags(flags)
+
+    // File handle state
     let fileData: Uint8Array | null = null
     let modified = false
+    let closed = false
+    let closePromise: Promise<void> | null = null
+    let currentPosition = 0
 
-    return {
+    /**
+     * Check if the handle permits read operations.
+     */
+    const canRead = (): boolean => {
+      return parsedFlags.accessMode === 'read' || parsedFlags.accessMode === 'readwrite'
+    }
+
+    /**
+     * Check if the handle permits write operations.
+     */
+    const canWrite = (): boolean => {
+      return parsedFlags.accessMode === 'write' || parsedFlags.accessMode === 'readwrite'
+    }
+
+    /**
+     * Ensure the handle is still open, throw if closed.
+     */
+    const ensureOpen = (): void => {
+      if (closed) {
+        throw new Error('EBADF: file handle is closed')
+      }
+    }
+
+    /**
+     * Flush pending modifications to storage if any exist.
+     * This is the shared implementation used by both sync() and close().
+     *
+     * @returns true if data was flushed, false if nothing to flush
+     * @throws Re-throws any error from the backend write operation
+     */
+    const flushIfModified = async (): Promise<boolean> => {
+      if (modified && fileData) {
+        await backend.writeFile(path, fileData)
+        modified = false
+        return true
+      }
+      return false
+    }
+
+    /**
+     * Internal close implementation - flushes modifications and cleans up.
+     *
+     * Resource cleanup happens in a finally block to ensure memory is released
+     * even if the flush operation fails. This follows the resource cleanup pattern
+     * recommended for AsyncDisposable implementations.
+     */
+    const doClose = async (): Promise<void> => {
+      try {
+        await flushIfModified()
+      } finally {
+        // Always release resources, even if flush fails
+        // This prevents memory leaks when close is called after errors
+        fileData = null
+        modified = false
+        closed = true
+      }
+    }
+
+    const handle = {
       fd: 0, // Placeholder - we use path-based operations
 
-      read: async (buffer: Uint8Array, offset: number | undefined, length: number | undefined, position: number | undefined) => {
+      /**
+       * Read data from the file into a buffer.
+       *
+       * @param buffer - Buffer to read data into
+       * @param offset - Offset in buffer to start writing at
+       * @param length - Number of bytes to read
+       * @param position - File position to read from (null uses current position)
+       * @returns Object with bytesRead and the buffer
+       * @throws EBADF if handle is closed or opened write-only
+       */
+      read: async (
+        buffer: Uint8Array,
+        offset: number | undefined,
+        length: number | undefined,
+        position: number | undefined
+      ): Promise<{ bytesRead: number; buffer: Uint8Array }> => {
+        ensureOpen()
+
+        // Enforce access mode
+        if (!canRead()) {
+          throw new Error('EBADF: bad file descriptor, read not permitted on write-only handle')
+        }
+
+        // Lazy load file data
         if (!fileData) {
           fileData = await backend.readFile(path)
         }
+
         const readLength = length ?? buffer.length
-        const readPosition = position ?? 0
+        const readPosition = position ?? currentPosition
         const targetOffset = offset ?? 0
         const bytesToRead = Math.min(readLength, fileData.length - readPosition)
 
+        // Copy data to buffer
         for (let i = 0; i < bytesToRead; i++) {
           buffer[targetOffset + i] = fileData[readPosition + i]!
         }
+
+        // Update position if not explicitly specified
+        if (position === undefined) {
+          currentPosition += bytesToRead
+        }
+
         return { bytesRead: bytesToRead, buffer }
       },
 
-      write: async (data: Uint8Array | string, _position?: number) => {
+      /**
+       * Write data to the file.
+       *
+       * In append mode, writes always go to end of file regardless of position.
+       *
+       * @param data - Data to write (string or bytes)
+       * @param position - File position to write at (ignored in append mode)
+       * @returns Object with bytesWritten
+       * @throws EBADF if handle is closed or opened read-only
+       */
+      write: async (data: Uint8Array | string, position?: number): Promise<{ bytesWritten: number }> => {
+        ensureOpen()
+
+        // Enforce access mode
+        if (!canWrite()) {
+          throw new Error('EBADF: bad file descriptor, write not permitted on read-only handle')
+        }
+
         const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
-        fileData = bytes
+
+        // Lazy load file data
+        if (!fileData) {
+          try {
+            fileData = await backend.readFile(path)
+          } catch {
+            // File doesn't exist yet, start with empty buffer
+            fileData = new Uint8Array(0)
+          }
+        }
+
+        // Determine write position:
+        // - Append mode: always write at end (POSIX O_APPEND behavior)
+        // - Explicit position: use the provided position
+        // - Default: use current file position
+        const writePos = parsedFlags.append
+          ? fileData.length
+          : (position ?? currentPosition)
+
+        // Expand buffer if needed
+        if (writePos + bytes.length > fileData.length) {
+          const newData = new Uint8Array(writePos + bytes.length)
+          newData.set(fileData)
+          fileData = newData
+        }
+
+        // Write the bytes
+        for (let i = 0; i < bytes.length; i++) {
+          fileData[writePos + i] = bytes[i]!
+        }
+
+        // Update position (not in append mode when position wasn't explicit)
+        if (!parsedFlags.append && position === undefined) {
+          currentPosition = writePos + bytes.length
+        }
+
         modified = true
         return { bytesWritten: bytes.length }
       },
 
-      stat: () => backend.stat(path),
+      stat: async () => {
+        ensureOpen()
+        return backend.stat(path)
+      },
 
       truncate: async (length?: number) => {
+        ensureOpen()
         if (!fileData) {
           fileData = await backend.readFile(path)
         }
@@ -1324,27 +1667,66 @@ export class FSx {
       },
 
       sync: async () => {
-        if (modified && fileData) {
-          await backend.writeFile(path, fileData)
-          modified = false
-        }
+        ensureOpen()
+        await flushIfModified()
       },
 
+      /**
+       * Close the file handle and release resources.
+       *
+       * This method is idempotent - calling close() multiple times is safe and
+       * will return the same promise. Concurrent close calls are also safe due
+       * to promise deduplication.
+       *
+       * Close behavior:
+       * 1. Flushes any pending writes to storage
+       * 2. Releases internal buffers (even if flush fails)
+       * 3. Marks the handle as closed
+       *
+       * @returns Promise that resolves when close is complete
+       * @throws Re-throws any error from the flush operation (data may be lost)
+       */
       close: async () => {
-        if (modified && fileData) {
-          await backend.writeFile(path, fileData)
+        // Idempotent - return the same promise if already closing
+        // This handles concurrent close calls safely
+        if (closePromise) {
+          return closePromise
         }
-        fileData = null
-        modified = false
+        // Already closed - no-op
+        if (closed) {
+          return
+        }
+        // Start closing - cache the promise for deduplication
+        closePromise = doClose()
+        return closePromise
       },
 
       createReadStream: (_options?: ReadStreamOptions) => {
+        ensureOpen()
         throw new Error('FileHandle.createReadStream is not implemented')
       },
 
       createWriteStream: (_options?: WriteStreamOptions) => {
+        ensureOpen()
         throw new Error('FileHandle.createWriteStream is not implemented')
       },
-    } as unknown as FileHandle
+
+      /**
+       * Async disposable support for 'await using' syntax.
+       *
+       * Enables automatic cleanup when used with 'await using':
+       * ```typescript
+       * await using handle = await fsx.open('/file.txt', 'r')
+       * // handle is automatically closed when scope exits
+       * ```
+       *
+       * This is the preferred pattern for resource management in modern TypeScript.
+       */
+      [Symbol.asyncDispose]: async () => {
+        return handle.close()
+      },
+    }
+
+    return handle as unknown as FileHandle
   }
 }

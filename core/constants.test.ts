@@ -361,3 +361,186 @@ describe('Permission Checking Helpers (RED - will fail)', () => {
     expect(hasExecutePermission(noExecOther, 'other')).toBe(false)
   })
 })
+
+describe('Mode String Conversion Utilities', () => {
+  it('should convert mode to symbolic string with modeToString()', async () => {
+    const { modeToString } = await import('./constants')
+
+    expect(modeToString(0o755)).toBe('rwxr-xr-x')
+    expect(modeToString(0o644)).toBe('rw-r--r--')
+    expect(modeToString(0o700)).toBe('rwx------')
+    expect(modeToString(0o777)).toBe('rwxrwxrwx')
+    expect(modeToString(0o000)).toBe('---------')
+    expect(modeToString(0o444)).toBe('r--r--r--')
+    expect(modeToString(0o222)).toBe('-w--w--w-')
+    expect(modeToString(0o111)).toBe('--x--x--x')
+  })
+
+  it('should handle special bits in modeToString()', async () => {
+    const { modeToString, S_ISUID, S_ISGID, S_ISVTX } = await import('./constants')
+
+    // Setuid with execute
+    expect(modeToString(S_ISUID | 0o755)).toBe('rwsr-xr-x')
+    // Setuid without execute
+    expect(modeToString(S_ISUID | 0o655)).toBe('rwSr-xr-x')
+
+    // Setgid with execute
+    expect(modeToString(S_ISGID | 0o755)).toBe('rwxr-sr-x')
+    // Setgid without execute
+    expect(modeToString(S_ISGID | 0o745)).toBe('rwxr-Sr-x')
+
+    // Sticky with execute
+    expect(modeToString(S_ISVTX | 0o755)).toBe('rwxr-xr-t')
+    // Sticky without execute
+    expect(modeToString(S_ISVTX | 0o754)).toBe('rwxr-xr-T')
+  })
+
+  it('should get file type character with getFileTypeChar()', async () => {
+    const { getFileTypeChar, S_IFREG, S_IFDIR, S_IFLNK, S_IFBLK, S_IFCHR, S_IFIFO, S_IFSOCK } = await import('./constants')
+
+    expect(getFileTypeChar(S_IFREG | 0o644)).toBe('-')
+    expect(getFileTypeChar(S_IFDIR | 0o755)).toBe('d')
+    expect(getFileTypeChar(S_IFLNK | 0o777)).toBe('l')
+    expect(getFileTypeChar(S_IFBLK | 0o660)).toBe('b')
+    expect(getFileTypeChar(S_IFCHR | 0o660)).toBe('c')
+    expect(getFileTypeChar(S_IFIFO | 0o644)).toBe('p')
+    expect(getFileTypeChar(S_IFSOCK | 0o755)).toBe('s')
+    expect(getFileTypeChar(0)).toBe('?') // Unknown type
+  })
+
+  it('should get full mode string with getFullModeString()', async () => {
+    const { getFullModeString, S_IFREG, S_IFDIR, S_IFLNK } = await import('./constants')
+
+    expect(getFullModeString(S_IFREG | 0o755)).toBe('-rwxr-xr-x')
+    expect(getFullModeString(S_IFREG | 0o644)).toBe('-rw-r--r--')
+    expect(getFullModeString(S_IFDIR | 0o755)).toBe('drwxr-xr-x')
+    expect(getFullModeString(S_IFDIR | 0o700)).toBe('drwx------')
+    expect(getFullModeString(S_IFLNK | 0o777)).toBe('lrwxrwxrwx')
+  })
+})
+
+describe('Grouped Exports', () => {
+  it('should export AccessModes group', async () => {
+    const { AccessModes } = await import('./constants')
+
+    expect(AccessModes.F_OK).toBe(0)
+    expect(AccessModes.R_OK).toBe(4)
+    expect(AccessModes.W_OK).toBe(2)
+    expect(AccessModes.X_OK).toBe(1)
+  })
+
+  it('should export OpenFlags group', async () => {
+    const { OpenFlags } = await import('./constants')
+
+    expect(OpenFlags.O_RDONLY).toBe(0)
+    expect(OpenFlags.O_WRONLY).toBe(1)
+    expect(OpenFlags.O_RDWR).toBe(2)
+    expect(OpenFlags.O_CREAT).toBe(64)
+    expect(OpenFlags.O_EXCL).toBe(128)
+  })
+
+  it('should export FileTypes group', async () => {
+    const { FileTypes } = await import('./constants')
+
+    expect(FileTypes.S_IFMT).toBe(0o170000)
+    expect(FileTypes.S_IFREG).toBe(0o100000)
+    expect(FileTypes.S_IFDIR).toBe(0o040000)
+    expect(FileTypes.S_IFLNK).toBe(0o120000)
+  })
+
+  it('should export Permissions group', async () => {
+    const { Permissions } = await import('./constants')
+
+    expect(Permissions.S_IRWXU).toBe(0o700)
+    expect(Permissions.S_IRWXG).toBe(0o070)
+    expect(Permissions.S_IRWXO).toBe(0o007)
+    expect(Permissions.S_ISUID).toBe(0o4000)
+  })
+
+  it('should export CopyFlags group', async () => {
+    const { CopyFlags } = await import('./constants')
+
+    expect(CopyFlags.COPYFILE_EXCL).toBe(1)
+    expect(CopyFlags.COPYFILE_FICLONE).toBe(2)
+    expect(CopyFlags.COPYFILE_FICLONE_FORCE).toBe(4)
+  })
+
+  it('should export SeekWhence group', async () => {
+    const { SeekWhence } = await import('./constants')
+
+    expect(SeekWhence.SEEK_SET).toBe(0)
+    expect(SeekWhence.SEEK_CUR).toBe(1)
+    expect(SeekWhence.SEEK_END).toBe(2)
+  })
+
+  it('should export CommonModes presets', async () => {
+    const { CommonModes } = await import('./constants')
+
+    expect(CommonModes.FILE_644).toBe(0o644)
+    expect(CommonModes.FILE_600).toBe(0o600)
+    expect(CommonModes.DIR_755).toBe(0o755)
+    expect(CommonModes.DIR_700).toBe(0o700)
+    expect(CommonModes.EXECUTABLE_755).toBe(0o755)
+  })
+})
+
+describe('Individual Constant Exports (Tree-shaking)', () => {
+  it('should export individual access mode constants', async () => {
+    const { F_OK, R_OK, W_OK, X_OK } = await import('./constants')
+
+    expect(F_OK).toBe(0)
+    expect(R_OK).toBe(4)
+    expect(W_OK).toBe(2)
+    expect(X_OK).toBe(1)
+  })
+
+  it('should export individual open flag constants', async () => {
+    const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND } = await import('./constants')
+
+    expect(O_RDONLY).toBe(0)
+    expect(O_WRONLY).toBe(1)
+    expect(O_RDWR).toBe(2)
+    expect(O_CREAT).toBe(64)
+    expect(O_EXCL).toBe(128)
+    expect(O_TRUNC).toBe(512)
+    expect(O_APPEND).toBe(1024)
+  })
+
+  it('should export individual file type constants', async () => {
+    const { S_IFMT, S_IFREG, S_IFDIR, S_IFLNK, S_IFBLK, S_IFCHR, S_IFIFO, S_IFSOCK } = await import('./constants')
+
+    expect(S_IFMT).toBe(0o170000)
+    expect(S_IFREG).toBe(0o100000)
+    expect(S_IFDIR).toBe(0o040000)
+    expect(S_IFLNK).toBe(0o120000)
+    expect(S_IFBLK).toBe(0o060000)
+    expect(S_IFCHR).toBe(0o020000)
+    expect(S_IFIFO).toBe(0o010000)
+    expect(S_IFSOCK).toBe(0o140000)
+  })
+
+  it('should export individual permission constants', async () => {
+    const {
+      S_IRWXU, S_IRUSR, S_IWUSR, S_IXUSR,
+      S_IRWXG, S_IRGRP, S_IWGRP, S_IXGRP,
+      S_IRWXO, S_IROTH, S_IWOTH, S_IXOTH,
+      S_ISUID, S_ISGID, S_ISVTX
+    } = await import('./constants')
+
+    expect(S_IRWXU).toBe(0o700)
+    expect(S_IRUSR).toBe(0o400)
+    expect(S_IWUSR).toBe(0o200)
+    expect(S_IXUSR).toBe(0o100)
+    expect(S_IRWXG).toBe(0o070)
+    expect(S_IRGRP).toBe(0o040)
+    expect(S_IWGRP).toBe(0o020)
+    expect(S_IXGRP).toBe(0o010)
+    expect(S_IRWXO).toBe(0o007)
+    expect(S_IROTH).toBe(0o004)
+    expect(S_IWOTH).toBe(0o002)
+    expect(S_IXOTH).toBe(0o001)
+    expect(S_ISUID).toBe(0o4000)
+    expect(S_ISGID).toBe(0o2000)
+    expect(S_ISVTX).toBe(0o1000)
+  })
+})

@@ -1,36 +1,76 @@
 /**
- * readlink - Read the target of a symbolic link
+ * readlink - Read the target of a symbolic link (POSIX readlink syscall)
  *
- * Reads the contents of a symbolic link (the target path it points to).
- * Unlike realpath, this returns the raw target string without resolution.
+ * Reads the contents of a symbolic link, returning the target path exactly
+ * as stored. Unlike `realpath`, this function does NOT resolve or follow
+ * the target - it returns the raw string value.
  *
  * POSIX behavior:
  * - Returns the contents of the symbolic link (the target path)
- * - Does not resolve or follow the target
+ * - Does NOT resolve or follow the target
+ * - Preserves the target exactly as stored (relative paths, dots, etc.)
  * - Returns ENOENT if path doesn't exist
- * - Returns EINVAL if path is not a symbolic link (file or directory)
+ * - Returns EINVAL if path exists but is not a symbolic link
+ *
+ * @module fs/readlink
+ *
+ * @example
+ * ```typescript
+ * // Read a symlink with relative target
+ * // Given: /home/user/link -> ../other/file.txt
+ * const target = await readlink('/home/user/link')
+ * console.log(target) // '../other/file.txt'
+ *
+ * // Read a symlink with absolute target
+ * // Given: /link -> /var/data/config.json
+ * const target = await readlink('/link')
+ * console.log(target) // '/var/data/config.json'
+ * ```
+ *
+ * @see symlink - To create a symbolic link
+ * @see lstat - To get symlink metadata without following
+ * @see realpath - To resolve a path following all symlinks
  */
 
 import { ENOENT, EINVAL } from '../errors'
 import { normalize } from '../path'
 
+// =============================================================================
+// Constants
+// =============================================================================
+
+/** Syscall name for error reporting */
+const SYSCALL = 'readlink'
+
+// =============================================================================
+// Types
+// =============================================================================
+
 /**
- * Entry type in mock filesystem
+ * Filesystem entry types supported by the mock backend.
  */
 type EntryType = 'file' | 'directory' | 'symlink'
 
 /**
- * Mock filesystem entry
+ * Filesystem entry representation in the mock backend.
  */
 interface FSEntry {
+  /** Type of the filesystem entry */
   type: EntryType
-  /** For symlinks, this is the target path */
+  /** For symlinks, the target path (stored as-is, not resolved) */
   target?: string
 }
 
+// =============================================================================
+// Mock Filesystem
+// =============================================================================
+
 /**
- * Mock filesystem for testing
- * Maps paths to their entries (type and optional symlink target)
+ * Internal mock filesystem state.
+ * Maps normalized paths to their entries (files, directories, symlinks).
+ *
+ * Note: In production, this would be backed by a Durable Object with SQLite storage.
+ * The mock implementation allows unit testing without infrastructure dependencies.
  */
 const mockFS: Map<string, FSEntry> = new Map([
   // Symlinks for basic tests
@@ -51,7 +91,7 @@ const mockFS: Map<string, FSEntry> = new Map([
   // Symlink pointing to root
   ['/myroot', { type: 'symlink', target: '/' }],
 
-  // Symlink with empty target
+  // Symlink with empty target (edge case)
   ['/empty-link', { type: 'symlink', target: '' }],
 
   // Symlink with trailing slashes in target
@@ -66,7 +106,7 @@ const mockFS: Map<string, FSEntry> = new Map([
   ['/path with spaces/my link', { type: 'symlink', target: 'target with spaces' }],
   ['/unicode/link', { type: 'symlink', target: '/unicode/target' }],
 
-  // Trailing slash and path normalization tests (use unique paths)
+  // Trailing slash and path normalization tests
   ['/trailing-test/link', { type: 'symlink', target: '/target' }],
   ['/normalize/test/link', { type: 'symlink', target: 'target.txt' }],
 
@@ -87,33 +127,84 @@ const mockFS: Map<string, FSEntry> = new Map([
   ['/unicode', { type: 'directory' }],
 ])
 
+// =============================================================================
+// Validation Helpers
+// =============================================================================
+
 /**
- * Reads the target of a symbolic link.
+ * Look up an entry in the filesystem and validate it exists.
  *
- * @param path - Path to the symbolic link
- * @returns The target of the symbolic link (the path it points to)
- * @throws ENOENT if the path doesn't exist
- * @throws EINVAL if the path is not a symbolic link
+ * @param normalizedPath - The normalized path to look up
+ * @returns The filesystem entry at the path
+ * @throws {ENOENT} If the path does not exist in the filesystem
+ */
+function getEntry(normalizedPath: string): FSEntry {
+  const entry = mockFS.get(normalizedPath)
+  if (!entry) {
+    throw new ENOENT(SYSCALL, normalizedPath)
+  }
+  return entry
+}
+
+/**
+ * Validate that an entry is a symbolic link.
+ *
+ * @param entry - The filesystem entry to validate
+ * @param normalizedPath - The path (for error reporting)
+ * @throws {EINVAL} If the entry is not a symbolic link
+ */
+function ensureSymlink(entry: FSEntry, normalizedPath: string): void {
+  if (entry.type !== 'symlink') {
+    throw new EINVAL(SYSCALL, normalizedPath)
+  }
+}
+
+// =============================================================================
+// Main Function
+// =============================================================================
+
+/**
+ * Read the target of a symbolic link.
+ *
+ * Returns the exact target string stored in the symlink without any
+ * resolution or normalization. The target may be relative or absolute,
+ * and may contain `.` or `..` segments.
+ *
+ * @param path - Path to the symbolic link to read
+ * @returns Promise resolving to the symlink's target path (as stored)
+ *
+ * @throws {ENOENT} If `path` does not exist
+ * @throws {EINVAL} If `path` exists but is not a symbolic link
+ *
+ * @example
+ * ```typescript
+ * // Read symlink with relative target
+ * const target = await readlink('/home/user/link')
+ * // Returns '../other/file.txt' (not resolved)
+ *
+ * // Read symlink with absolute target
+ * const target = await readlink('/home/user/absolute-link')
+ * // Returns '/var/data/config.json'
+ *
+ * // Error: path is a regular file
+ * await readlink('/home/user/regular-file.txt')
+ * // Throws EINVAL: invalid argument, readlink '/home/user/regular-file.txt'
+ *
+ * // Error: path doesn't exist
+ * await readlink('/nonexistent')
+ * // Throws ENOENT: no such file or directory, readlink '/nonexistent'
+ * ```
  */
 export async function readlink(path: string): Promise<string> {
-  const syscall = 'readlink'
-
-  // Normalize the input path (removes trailing slashes, resolves . and ..)
+  // Step 1: Normalize the input path (removes trailing slashes, resolves . and ..)
   const normalizedPath = normalize(path)
 
-  // Look up the entry in the mock filesystem
-  const entry = mockFS.get(normalizedPath)
+  // Step 2: Look up the entry (throws ENOENT if not found)
+  const entry = getEntry(normalizedPath)
 
-  // If path doesn't exist, throw ENOENT
-  if (!entry) {
-    throw new ENOENT(syscall, normalizedPath)
-  }
+  // Step 3: Validate it's a symlink (throws EINVAL if not)
+  ensureSymlink(entry, normalizedPath)
 
-  // If path is not a symlink, throw EINVAL
-  if (entry.type !== 'symlink') {
-    throw new EINVAL(syscall, normalizedPath)
-  }
-
-  // Return the raw target string (don't resolve or normalize it)
+  // Step 4: Return the raw target string (preserve exactly as stored)
   return entry.target ?? ''
 }
