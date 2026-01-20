@@ -121,3 +121,28 @@ export {
   calculateDedupRatio,
   type BlobStats,
 } from './blob-utils.js'
+
+// Page Storage (2MB BLOB chunking for DO cost optimization)
+export {
+  // Factory function
+  createPageStorage,
+  // Constants
+  CHUNK_SIZE,
+  PAGE_KEY_PREFIX,
+  PAGE_META_PREFIX,
+  // Types
+  type PageStorage,
+  type PageStorageConfig,
+  type PageMetadata,
+} from './page-storage.js'
+
+// Chunked Blob Storage (PageStorage + SQLite metadata integration)
+export {
+  // Factory function
+  createChunkedBlobStorage,
+  // Types
+  type ChunkedBlobStorage,
+  type ChunkedBlobStorageConfig,
+  type ChunkedBlobMetadata,
+  type ChunkedWriteResult,
+} from './chunked-blob-storage.js'
