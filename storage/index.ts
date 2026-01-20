@@ -146,3 +146,44 @@ export {
   type ChunkedBlobMetadata,
   type ChunkedWriteResult,
 } from './chunked-blob-storage.js'
+
+// Page Metadata Store (SQLite-based page tracking for VFS)
+export {
+  // Class
+  PageMetadataStore,
+  // Types
+  type PageMetadata as SQLitePageMetadata,
+  type CreatePageOptions,
+  type UpdatePageOptions,
+  type TierStats,
+} from './page-metadata.js'
+
+// LRU Eviction Manager (DO to R2 cold page eviction)
+export {
+  // Factory function
+  createLRUEvictionManager,
+  // Implementation class
+  LRUEvictionManagerImpl,
+  // Types
+  type LRUEvictionManager,
+  type EvictionConfig,
+  type EvictionResult,
+  type PageMeta as LRUPageMeta,
+  type DOStorageInterface,
+  type R2BucketInterface,
+} from './lru-eviction.js'
+
+// R2 Cold Storage Compression (optional compression for R2 pages)
+export {
+  // Factory function
+  createR2ColdStorageCompressor,
+  // Constants
+  DEFAULT_SKIP_MIME_TYPES,
+  // Types
+  type R2ColdStorageCompressor,
+  type CompressionCodec,
+  type CompressedPageMetadata,
+  type CompressionConfig,
+  type CompressionResult,
+  type CompressionStats,
+} from './compression.js'

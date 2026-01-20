@@ -322,6 +322,19 @@ export function createPageStorage(config: PageStorageConfig): PageStorage {
     offset: number,
     length: number
   ): Promise<Uint8Array> {
+    // Validate inputs
+    if (offset < 0) {
+      throw new Error(`Invalid offset: ${offset} must be non-negative`)
+    }
+    if (length < 0) {
+      throw new Error(`Invalid length: ${length} must be non-negative`)
+    }
+
+    // Handle zero-length read
+    if (length === 0) {
+      return new Uint8Array(0)
+    }
+
     if (pageKeys.length === 0) {
       if (offset > 0 || length > 0) {
         throw new Error(`Range out of bounds: offset=${offset}, length=${length} for empty data`)
