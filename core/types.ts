@@ -128,7 +128,7 @@ export interface ReadOptions {
    * Character encoding for string output.
    * If specified, returns a string. If null or undefined, returns Uint8Array.
    */
-  encoding?: BufferEncoding | null
+  encoding?: BufferEncoding | null | undefined
 
   /** File open flag (default: 'r' for read) */
   flag?: string

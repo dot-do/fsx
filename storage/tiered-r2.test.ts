@@ -5,7 +5,7 @@ import {
   type TieredR2StorageConfig,
   type TieredFileMetadata,
 } from './tiered-r2'
-import type { StorageTier } from '../core/types'
+import type { StorageTier, SqlStorageValue } from '../core/types'
 
 /**
  * Mock R2Object implementation
@@ -195,7 +195,7 @@ class MockSqlStorage implements SqlStorage {
   private tables = new Map<string, Map<string, unknown>>()
   private lastInsertId = 0
 
-  exec<T = unknown>(query: string, ...params: unknown[]): SqlStorageCursor<T> {
+  exec<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(query: string, ...params: unknown[]): SqlStorageCursor<T> {
     const results: T[] = []
 
     // Simple query parsing for our test cases
@@ -326,7 +326,7 @@ class MockSqlStorage implements SqlStorage {
     return this.createCursor(results)
   }
 
-  private createCursor<T>(results: T[]): SqlStorageCursor<T> {
+  private createCursor<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(results: T[]): SqlStorageCursor<T> {
     let index = 0
     return {
       next: () => {
