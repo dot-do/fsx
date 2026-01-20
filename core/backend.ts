@@ -5,6 +5,7 @@
  * Implement this interface to create custom storage backends
  * (SQLite, R2, Memory, Node.js fs, etc.)
  *
+ * @category Framework
  * @module backend
  */
 
@@ -879,12 +880,86 @@ export class MemoryBackend implements FsBackend {
     return this.files.has(normalized) || this.directories.has(normalized)
   }
 
-  async access(path: string, _mode?: number): Promise<void> {
+  async access(path: string, mode?: number): Promise<void> {
     const normalized = this.normalizePath(path)
-    if (!this.files.has(normalized) && !this.directories.has(normalized)) {
+
+    // Check if path exists
+    const file = this.files.get(normalized)
+    const isDir = this.directories.has(normalized)
+
+    if (!file && !isDir) {
       throw new Error(`ENOENT: no such file or directory: ${path}`)
     }
-    // In a full implementation, we'd check mode against file permissions
+
+    // F_OK (0) only checks existence - we're done
+    const F_OK = 0
+    const R_OK = 4
+    const W_OK = 2
+    const X_OK = 1
+
+    const checkMode = mode ?? F_OK
+    if (checkMode === F_OK) {
+      return
+    }
+
+    // Get the file mode for permission checking
+    // For files, use the stored mode; for directories, default to 0o755
+    const fileMode = file ? (file.stats.mode & 0o777) : 0o755
+
+    // Default user context (uid=0, gid=0 means root, has all permissions)
+    // In a real implementation, this would come from the process context
+    const uid = 0
+    const gid = 0
+    const fileUid = file?.stats.uid ?? 0
+    const fileGid = file?.stats.gid ?? 0
+
+    // Permission bit positions
+    const OWNER_SHIFT = 6
+    const GROUP_SHIFT = 3
+    // OTHER_SHIFT = 0 (no shift needed)
+
+    /**
+     * Check if a specific permission is granted.
+     * Follows POSIX semantics: check owner, then group, then other.
+     */
+    const hasPermission = (permBit: number): boolean => {
+      // Root (uid=0) has all permissions
+      if (uid === 0) return true
+
+      // Check owner permissions if uid matches
+      if (fileUid === uid) {
+        return (fileMode & (permBit << OWNER_SHIFT)) !== 0
+      }
+
+      // Check group permissions if gid matches
+      if (fileGid === gid) {
+        return (fileMode & (permBit << GROUP_SHIFT)) !== 0
+      }
+
+      // Check other permissions
+      return (fileMode & permBit) !== 0
+    }
+
+    // Check read permission
+    if ((checkMode & R_OK) !== 0) {
+      if (!hasPermission(R_OK)) {
+        throw new Error(`EACCES: permission denied: ${path}`)
+      }
+    }
+
+    // Check write permission
+    if ((checkMode & W_OK) !== 0) {
+      if (!hasPermission(W_OK)) {
+        throw new Error(`EACCES: permission denied: ${path}`)
+      }
+    }
+
+    // Check execute permission
+    if ((checkMode & X_OK) !== 0) {
+      if (!hasPermission(X_OK)) {
+        throw new Error(`EACCES: permission denied: ${path}`)
+      }
+    }
   }
 
   async chmod(path: string, mode: number): Promise<void> {

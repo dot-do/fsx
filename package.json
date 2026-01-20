@@ -1,12 +1,12 @@
 {
-  "name": "fsx.do",
+  "name": "@dotdo/fsx",
   "version": "0.1.0",
   "description": "Filesystem on Cloudflare Durable Objects - A virtual filesystem for the edge",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "fsx": "./dist/cli/index.js"
+    "fsx": "./dist/cli/bin.js"
   },
   "exports": {
     ".": {
@@ -24,6 +24,10 @@
     "./storage": {
       "types": "./dist/storage/index.d.ts",
       "import": "./dist/storage/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
     }
   },
   "files": [
@@ -33,13 +37,16 @@
   ],
   "scripts": {
     "build": "tsc",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean",
     "test": "node scripts/run-tests.js",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "lint": "eslint src test --ext .ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run typecheck"
   },
   "keywords": [
     "filesystem",
@@ -67,7 +74,7 @@
     "node": ">=18.0.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.12.1",
+    "@cloudflare/vitest-pool-workers": "^0.12.4",
     "@cloudflare/workers-types": "^4.20241218.0",
     "@types/node": "^22.10.2",
     "@types/pako": "^2.0.4",

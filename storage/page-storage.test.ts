@@ -435,6 +435,177 @@ describe('PageStorage', () => {
 
       expect(totalSize).toBe(size)
     })
+
+    it('should use cached size after writePages', async () => {
+      const blobId = 'test-size-cached'
+      const size = 5 * 1024 * 1024
+      const data = new Uint8Array(size)
+      data.fill(0x42)
+
+      const pageKeys = await pageStorage.writePages(blobId, data)
+
+      // Clear storage to prove cache is used
+      storage.clear()
+
+      // Should still return correct size from cache
+      const totalSize = await pageStorage.getTotalSize(blobId, pageKeys)
+      expect(totalSize).toBe(size)
+    })
+
+    it('should return zero for empty page keys', async () => {
+      const totalSize = await pageStorage.getTotalSize('empty-blob', [])
+      expect(totalSize).toBe(0)
+    })
+  })
+
+  describe('getTotalSize performance', () => {
+    it('should read chunks in parallel, not sequentially', async () => {
+      // Create a tracking mock that records when gets start and complete
+      const getStartTimes: number[] = []
+      const getEndTimes: number[] = []
+      let getCallCount = 0
+
+      const trackingStorage = {
+        data: new Map<string, Uint8Array>(),
+        async get<T>(key: string): Promise<T | undefined> {
+          const callIndex = getCallCount++
+          getStartTimes[callIndex] = Date.now()
+          // Small delay to make timing measurable
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          getEndTimes[callIndex] = Date.now()
+          return this.data.get(key) as T | undefined
+        },
+        async put(key: string, value: Uint8Array): Promise<void> {
+          this.data.set(key, value)
+        },
+        async delete(key: string): Promise<boolean> {
+          return this.data.delete(key)
+        },
+      }
+
+      const trackingPageStorage = createPageStorage({
+        storage: trackingStorage as unknown as DurableObjectStorage,
+      })
+
+      // Write data to create multiple chunks
+      const blobId = 'parallel-test'
+      const data = new Uint8Array(5 * 1024 * 1024) // 5MB = 3 chunks
+      data.fill(0x42)
+
+      const pageKeys = await trackingPageStorage.writePages(blobId, data)
+      expect(pageKeys).toHaveLength(3)
+
+      // Reset tracking for getTotalSize measurement
+      getCallCount = 0
+      getStartTimes.length = 0
+      getEndTimes.length = 0
+
+      // Clear cache to force recalculation
+      const newPageStorage = createPageStorage({
+        storage: trackingStorage as unknown as DurableObjectStorage,
+      })
+
+      await newPageStorage.getTotalSize(blobId, pageKeys)
+
+      // Verify 3 chunks were read
+      expect(getCallCount).toBe(3)
+
+      // For parallel execution: all reads should start before any completes
+      // Check that the second read started before the first completed
+      // (this would be impossible with sequential reads)
+      const firstEndTime = Math.min(...getEndTimes)
+      const lastStartTime = Math.max(...getStartTimes)
+
+      // If parallel: lastStartTime < firstEndTime (all started before any finished)
+      // If sequential: lastStartTime > firstEndTime (each starts after previous finishes)
+      expect(lastStartTime).toBeLessThan(firstEndTime)
+    })
+
+    it('should cache computed size for subsequent calls', async () => {
+      let getCallCount = 0
+
+      const countingStorage = {
+        data: new Map<string, Uint8Array>(),
+        async get<T>(key: string): Promise<T | undefined> {
+          getCallCount++
+          return this.data.get(key) as T | undefined
+        },
+        async put(key: string, value: Uint8Array): Promise<void> {
+          this.data.set(key, value)
+        },
+        async delete(key: string): Promise<boolean> {
+          return this.data.delete(key)
+        },
+      }
+
+      const countingPageStorage = createPageStorage({
+        storage: countingStorage as unknown as DurableObjectStorage,
+      })
+
+      // Write data
+      const blobId = 'cache-test'
+      const data = new Uint8Array(5 * 1024 * 1024) // 5MB = 3 chunks
+      data.fill(0x42)
+
+      const pageKeys = await countingPageStorage.writePages(blobId, data)
+
+      // First call after write should use in-memory cache from write
+      getCallCount = 0
+      const size1 = await countingPageStorage.getTotalSize(blobId, pageKeys)
+      expect(size1).toBe(5 * 1024 * 1024)
+      expect(getCallCount).toBe(0) // No reads needed, used cache from write
+
+      // Second call should also use cache
+      const size2 = await countingPageStorage.getTotalSize(blobId, pageKeys)
+      expect(size2).toBe(5 * 1024 * 1024)
+      expect(getCallCount).toBe(0) // Still no reads needed
+    })
+
+    it('should cache size after computing from chunks', async () => {
+      let getCallCount = 0
+
+      const countingStorage = {
+        data: new Map<string, Uint8Array>(),
+        async get<T>(key: string): Promise<T | undefined> {
+          getCallCount++
+          return this.data.get(key) as T | undefined
+        },
+        async put(key: string, value: Uint8Array): Promise<void> {
+          this.data.set(key, value)
+        },
+        async delete(key: string): Promise<boolean> {
+          return this.data.delete(key)
+        },
+      }
+
+      // First instance writes data
+      const writerStorage = createPageStorage({
+        storage: countingStorage as unknown as DurableObjectStorage,
+      })
+
+      const blobId = 'cross-instance-cache-test'
+      const data = new Uint8Array(5 * 1024 * 1024) // 5MB = 3 chunks
+      data.fill(0x42)
+
+      const pageKeys = await writerStorage.writePages(blobId, data)
+
+      // New instance without cached size (simulates server restart)
+      const readerStorage = createPageStorage({
+        storage: countingStorage as unknown as DurableObjectStorage,
+      })
+
+      getCallCount = 0
+
+      // First getTotalSize should read chunks (no cache)
+      const size1 = await readerStorage.getTotalSize(blobId, pageKeys)
+      expect(size1).toBe(5 * 1024 * 1024)
+      expect(getCallCount).toBe(3) // Read all 3 chunks
+
+      // Second call should use the now-cached value
+      const size2 = await readerStorage.getTotalSize(blobId, pageKeys)
+      expect(size2).toBe(5 * 1024 * 1024)
+      expect(getCallCount).toBe(3) // No additional reads
+    })
   })
 
   describe('metadata', () => {

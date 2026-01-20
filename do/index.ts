@@ -46,7 +46,7 @@ import { DurableObject } from 'cloudflare:workers'
 import { Hono } from 'hono'
 import { FsModule } from './module.js'
 import type { Dirent, BufferEncoding } from '../core/index.js'
-import { SubscriptionManager, BatchEmitter, createWatchEvent, type WatchEvent } from '../core/watch/index.js'
+import { SubscriptionManager, BatchEmitter, createWatchEvent, RateLimiter, RateLimiterDefaults, type WatchEvent } from '../core/watch/index.js'
 
 // ===========================================================================
 // Stream Read Utilities
@@ -301,40 +301,9 @@ interface WatchConnectionMetadata {
   clientId?: string
 }
 
-/**
- * Watch event sent to WebSocket clients when file system changes occur
- *
- * Events follow a consistent structure with type, path, and timestamp.
- * Rename events include the previous path via `oldPath`.
- *
- * @example
- * ```typescript
- * // File modification event
- * const modifyEvent: WatchEvent = {
- *   type: 'modify',
- *   path: '/home/user/document.txt',
- *   timestamp: Date.now(),
- * }
- *
- * // File rename event
- * const renameEvent: WatchEvent = {
- *   type: 'rename',
- *   path: '/home/user/new-name.txt',
- *   oldPath: '/home/user/old-name.txt',
- *   timestamp: Date.now(),
- * }
- * ```
- */
-interface WatchEvent {
-  /** Event type indicating the kind of file system change */
-  type: 'create' | 'modify' | 'delete' | 'rename'
-  /** Affected path (new path for renames) */
-  path: string
-  /** Previous path (only present for rename events) */
-  oldPath?: string
-  /** Event timestamp in milliseconds since epoch */
-  timestamp: number
-}
+// WatchEvent is imported from ../core/watch/index.js
+// It includes: type, path, timestamp, oldPath?, size?, mtime?, isDirectory?
+// See core/watch/events.ts for the canonical definition
 
 /**
  * Server-to-client heartbeat ping message
@@ -415,6 +384,25 @@ interface ErrorMessage {
 }
 
 /**
+ * Server-to-client rate limit exceeded message
+ *
+ * Sent when a client exceeds the message rate limit.
+ * Client should wait for retryAfterMs before sending more messages.
+ */
+interface RateLimitedMessage {
+  /** Message type identifier */
+  type: 'rate_limited'
+  /** Milliseconds until the client can send messages again */
+  retryAfterMs: number
+  /** Number of messages remaining in current window (always 0 when rate limited) */
+  remaining: number
+  /** Maximum messages allowed per window */
+  limit: number
+  /** Whether this was a burst limit violation */
+  burstLimitExceeded?: boolean
+}
+
+/**
  * Server-to-client welcome message sent on connection establishment
  *
  * Contains connection metadata and server configuration.
@@ -443,6 +431,7 @@ type WebSocketMessage =
   | UnsubscribeMessage
   | UnsubscribedMessage
   | ErrorMessage
+  | RateLimitedMessage
   | WelcomeMessage
   | WatchEvent
 
@@ -528,6 +517,16 @@ const WatchConfig = {
   BATCH_WINDOW_MS: 10,
   /** Maximum events in a single batch before forced flush */
   MAX_BATCH_SIZE: 50,
+  /** Rate limiting: maximum messages per time window */
+  RATE_LIMIT_MAX_MESSAGES: 100,
+  /** Rate limiting: time window in milliseconds (1 second) */
+  RATE_LIMIT_WINDOW_MS: 1000,
+  /** Rate limiting: enable burst protection */
+  RATE_LIMIT_ENABLE_BURST: true,
+  /** Rate limiting: maximum messages in burst window */
+  RATE_LIMIT_BURST_MAX: 20,
+  /** Rate limiting: burst window in milliseconds (100ms) */
+  RATE_LIMIT_BURST_WINDOW_MS: 100,
 } as const
 
 export class FileSystemDO extends DurableObject<Env> {

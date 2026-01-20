@@ -22,6 +22,7 @@
  * - **Unicode Security Issues**: Detects bidirectional override characters
  *   (U+202E) used to disguise file extensions, and other dangerous Unicode.
  *
+ * @category Application
  * @example
  * ```typescript
  * import { PathValidator, pathValidator, SecurityConstants } from './security'

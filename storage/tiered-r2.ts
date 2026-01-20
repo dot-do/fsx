@@ -15,6 +15,7 @@
  */
 
 import type { StorageTier } from '../core/index.js'
+import { StorageError } from './interfaces.js'
 
 /**
  * Time duration constants in milliseconds
@@ -677,7 +678,7 @@ export class TieredR2Storage {
       }
     }
 
-    throw new Error(`File not found: ${path}`)
+    throw StorageError.notFound(path, 'promote')
   }
 
   /**
@@ -726,7 +727,7 @@ export class TieredR2Storage {
       }
     }
 
-    throw new Error(`File not found: ${path}`)
+    throw StorageError.notFound(path, 'demote')
   }
 
   /**

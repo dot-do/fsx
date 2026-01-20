@@ -4,6 +4,7 @@
  * Provides lazy-loaded filesystem operations that integrate with the
  * WorkflowContext ($) proxy. Uses SQLite for metadata and R2 for tiered blob storage.
  *
+ * @category Application
  * @example
  * ```typescript
  * // Using with withFs mixin

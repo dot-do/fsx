@@ -507,8 +507,8 @@ export class FSWatcherClient {
             break
         }
       }
-    } catch {
-      // Ignore malformed messages
+    } catch (_error) {
+      // Expected: Ignore malformed JSON messages from server
     }
   }
 
@@ -522,8 +522,8 @@ export class FSWatcherClient {
         entry.callbacks.forEach((callback) => {
           try {
             callback(event)
-          } catch {
-            // Swallow callback errors
+          } catch (_error) {
+            // Intentional: Swallow callback errors to prevent breaking other subscribers
           }
         })
       }
@@ -606,8 +606,8 @@ export class FSWatcherClient {
     for (const op of operations) {
       try {
         await op()
-      } catch {
-        // Ignore errors in pending operations
+      } catch (_error) {
+        // Expected: Ignore errors in pending operations - they may have been invalidated
       }
     }
   }

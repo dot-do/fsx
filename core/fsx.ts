@@ -7,6 +7,7 @@
  * The core FSx class is runtime-agnostic and has zero Cloudflare dependencies.
  * For Durable Object integration, use the DOBackend from fsx/do.
  *
+ * @category Framework
  * @example
  * ```typescript
  * import { FSx, MemoryBackend } from '@dotdo/fsx'
@@ -452,8 +453,9 @@ class WatchManager {
         if (!watcher.closed) {
           try {
             watcher.listener(eventType, filename)
-          } catch {
-            // Swallow listener errors to prevent breaking other watchers
+          } catch (_error) {
+            // Intentional: Swallow listener errors to prevent breaking other watchers
+            // User-provided callbacks should handle their own errors
           }
         }
       })
@@ -1026,10 +1028,10 @@ export class FSx {
    * await fsx.access('/myfile.txt', constants.R_OK | constants.W_OK)
    * ```
    */
-  async access(path: string, _mode?: number): Promise<void> {
+  async access(path: string, mode?: number): Promise<void> {
     path = this.normalizePath(path)
-    // Check existence via stat - full permission checks would need backend support
-    await this.backend.stat(path)
+    // Delegate to backend for proper permission checking
+    await this.backend.access(path, mode)
   }
 
   /**
@@ -1202,6 +1204,7 @@ export class FSx {
    * @param path - Path to resolve
    * @returns The resolved absolute path
    * @throws {ENOENT} If the path does not exist
+   * @throws {ELOOP} If too many symbolic links are encountered
    *
    * @example
    * ```typescript
@@ -1212,9 +1215,7 @@ export class FSx {
    */
   async realpath(path: string): Promise<string> {
     path = this.normalizePath(path)
-    // Realpath resolves symlinks - for now just return the normalized path
-    // as full symlink resolution would need backend support
-    return path
+    return this.backend.realpath(path)
   }
 
   // ==================== Streams ====================
@@ -1624,8 +1625,8 @@ export class FSx {
         if (!fileData) {
           try {
             fileData = await backend.readFile(path)
-          } catch {
-            // File doesn't exist yet, start with empty buffer
+          } catch (_error) {
+            // Expected: File doesn't exist yet - start with empty buffer for new file writes
             fileData = new Uint8Array(0)
           }
         }

@@ -1756,8 +1756,8 @@ export class Transaction {
                   previousContent = await storage.readFile(op.path)
                   logger.debug(`[${transactionId}] Captured ${previousContent.length} bytes from existing file: ${op.path}`)
                 }
-              } catch {
-                // File doesn't exist or can't be read - that's fine
+              } catch (_error) {
+                // Expected: File doesn't exist or can't be read - continue without previous content
                 logger.debug(`[${transactionId}] Could not capture previous content for: ${op.path}`)
               }
             }
@@ -1784,8 +1784,8 @@ export class Transaction {
               try {
                 previousContent = await storage.readFile(op.path)
                 logger.debug(`[${transactionId}] Captured ${previousContent.length} bytes before delete: ${op.path}`)
-              } catch {
-                // File might not exist or can't be read
+              } catch (_error) {
+                // Expected: File might not exist or can't be read - continue without previous content
                 logger.debug(`[${transactionId}] Could not capture content before delete: ${op.path}`)
               }
             }
@@ -1817,8 +1817,8 @@ export class Transaction {
               try {
                 previousContent = await storage.readFile(op.path)
                 logger.debug(`[${transactionId}] Captured ${previousContent.length} bytes before rm: ${op.path}`)
-              } catch {
-                // File might not exist, be a directory, or can't be read
+              } catch (_error) {
+                // Expected: File might not exist, be a directory, or can't be read - continue without previous content
                 logger.debug(`[${transactionId}] Could not capture content before rm: ${op.path}`)
               }
             }

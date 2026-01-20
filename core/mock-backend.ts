@@ -904,26 +904,81 @@ export class MockBackend implements FsBackend {
   // ===========================================================================
 
   async realpath(path: string): Promise<string> {
+    const MAX_SYMLINK_DEPTH = 40 // POSIX-like limit
     const normalized = this.normalizePath(path)
-    let current = normalized
-    const seen = new Set<string>()
 
-    while (this.symlinks.has(current)) {
-      if (seen.has(current)) {
-        throw new Error(`ELOOP: too many levels of symbolic links: ${path}`)
+    // Split into components, filtering empty strings
+    const components = normalized.split('/').filter(Boolean)
+
+    // Track resolved path and symlink depth
+    let resolved = ''
+    let symlinkDepth = 0
+
+    for (let i = 0; i < components.length; i++) {
+      const component = components[i]!
+      const currentPath = resolved + '/' + component
+
+      // Check if current path component is a symlink
+      if (this.symlinks.has(currentPath)) {
+        symlinkDepth++
+        if (symlinkDepth > MAX_SYMLINK_DEPTH) {
+          throw new Error(`ELOOP: too many levels of symbolic links: ${path}`)
+        }
+
+        let target = this.symlinks.get(currentPath)!
+
+        // Resolve the symlink target
+        if (target.startsWith('/')) {
+          // Absolute symlink - replace entire resolved path
+          resolved = this.normalizePath(target)
+        } else {
+          // Relative symlink - resolve relative to parent of symlink
+          resolved = this.normalizePath(resolved + '/' + target)
+        }
+
+        // After resolving a symlink, we need to re-resolve the result in case
+        // it points to another symlink
+        const resolvedComponents = resolved.split('/').filter(Boolean)
+        resolved = ''
+
+        // Prepend remaining original components to resolved components
+        const remaining = components.slice(i + 1)
+        components.splice(i + 1, components.length - i - 1, ...resolvedComponents, ...remaining)
+
+        // Reset i to continue from the start of resolved path
+        i = -1
+        resolved = ''
+      } else {
+        // Not a symlink - verify it exists (either as dir or file)
+        const isLastComponent = i === components.length - 1
+
+        if (isLastComponent) {
+          // Last component - can be file, directory, or symlink
+          resolved = currentPath
+        } else {
+          // Intermediate component - must be a directory
+          if (!this.directories.has(currentPath)) {
+            if (this.files.has(currentPath)) {
+              throw new Error(`ENOTDIR: not a directory: ${currentPath}`)
+            }
+            throw new Error(`ENOENT: no such file or directory: ${path}`)
+          }
+          resolved = currentPath
+        }
       }
-      seen.add(current)
-      const target = this.symlinks.get(current)!
-      current = target.startsWith('/')
-        ? this.normalizePath(target)
-        : this.normalizePath(this.getParentDir(current) + '/' + target)
     }
 
-    if (!this.files.has(current) && !this.directories.has(current)) {
+    // Handle root path case
+    if (resolved === '') {
+      resolved = '/'
+    }
+
+    // Verify final path exists
+    if (!this.files.has(resolved) && !this.directories.has(resolved)) {
       throw new Error(`ENOENT: no such file or directory: ${path}`)
     }
 
-    return current
+    return resolved
   }
 
   async mkdtemp(prefix: string): Promise<string> {

@@ -54,7 +54,7 @@ interface CLIContext {
 /**
  * Create and return the CLI instance with all commands registered
  */
-export function createCLI() {
+export function createCLI(): { name: string; parse: typeof cac.prototype.parse; commands: string[]; cli: ReturnType<typeof cac> } {
   const cli = cac('fsx')
 
   cli.version(VERSION)
@@ -115,7 +115,7 @@ export async function runCLI(args: string[], context: CLIContext): Promise<Comma
   }
 
   // Parse command
-  const command = args[0]
+  const command = args[0] ?? ''
   const restArgs = args.slice(1)
 
   // Handle command-specific help
@@ -340,8 +340,8 @@ async function executeCp(
     return { exitCode: 1, error: 'missing destination argument' }
   }
 
-  const src = normalizeCLIPath(paths[0])
-  const dest = normalizeCLIPath(paths[1])
+  const src = normalizeCLIPath(paths[0]!)
+  const dest = normalizeCLIPath(paths[1]!)
 
   try {
     await fs.cp(src, dest, { recursive: options.recursive })

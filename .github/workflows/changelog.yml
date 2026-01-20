@@ -1,0 +1,106 @@
+name: Generate Changelog
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_tag:
+        description: 'Starting tag (leave empty for previous release)'
+        required: false
+        default: ''
+        type: string
+      to_ref:
+        description: 'Ending ref (leave empty for HEAD)'
+        required: false
+        default: 'HEAD'
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generate-changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Determine version range
+        id: range
+        run: |
+          if [ -n "${{ inputs.from_tag }}" ]; then
+            FROM_TAG="${{ inputs.from_tag }}"
+          else
+            FROM_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          fi
+          TO_REF="${{ inputs.to_ref }}"
+          echo "FROM_TAG=${FROM_TAG}" >> $GITHUB_OUTPUT
+          echo "TO_REF=${TO_REF}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog entries
+        id: changelog
+        run: |
+          FROM_TAG="${{ steps.range.outputs.FROM_TAG }}"
+          TO_REF="${{ steps.range.outputs.TO_REF }}"
+
+          if [ -z "$FROM_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" $TO_REF)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" ${FROM_TAG}..${TO_REF})
+          fi
+
+          # Categorize commits
+          FEATURES=$(echo "$COMMITS" | grep -E "^- (feat|feature)" || true)
+          FIXES=$(echo "$COMMITS" | grep -E "^- fix" || true)
+          DOCS=$(echo "$COMMITS" | grep -E "^- docs" || true)
+          CHORES=$(echo "$COMMITS" | grep -E "^- (chore|build|ci)" || true)
+          REFACTOR=$(echo "$COMMITS" | grep -E "^- refactor" || true)
+          TESTS=$(echo "$COMMITS" | grep -E "^- test" || true)
+          OTHER=$(echo "$COMMITS" | grep -vE "^- (feat|feature|fix|docs|chore|build|ci|refactor|test)" || true)
+
+          # Build changelog content
+          CHANGELOG=""
+
+          if [ -n "$FEATURES" ]; then
+            CHANGELOG="${CHANGELOG}### Added\n\n${FEATURES}\n\n"
+          fi
+
+          if [ -n "$FIXES" ]; then
+            CHANGELOG="${CHANGELOG}### Fixed\n\n${FIXES}\n\n"
+          fi
+
+          if [ -n "$REFACTOR" ]; then
+            CHANGELOG="${CHANGELOG}### Changed\n\n${REFACTOR}\n\n"
+          fi
+
+          if [ -n "$DOCS" ]; then
+            CHANGELOG="${CHANGELOG}### Documentation\n\n${DOCS}\n\n"
+          fi
+
+          if [ -n "$OTHER" ]; then
+            CHANGELOG="${CHANGELOG}### Other\n\n${OTHER}\n\n"
+          fi
+
+          # Save to file for later use
+          echo -e "$CHANGELOG" > /tmp/changelog_entries.md
+
+          # Output for GitHub
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Display changelog
+        run: |
+          echo "Generated changelog entries:"
+          echo "=========================="
+          cat /tmp/changelog_entries.md
+          echo "=========================="
+          echo ""
+          echo "To update CHANGELOG.md, copy these entries into the appropriate version section."

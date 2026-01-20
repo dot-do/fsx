@@ -4,6 +4,27 @@
  * A virtual filesystem backed by Cloudflare Durable Objects with tiered storage.
  * This is the managed service layer built on @dotdo/fsx.
  *
+ * ## Framework vs Application Code
+ *
+ * This package exports both **framework code** (core FSx primitives) and
+ * **application code** (Durable Object integration, security utilities).
+ *
+ * See `docs/FRAMEWORK.md` for detailed boundary documentation.
+ *
+ * ### Framework Exports (Runtime-agnostic)
+ * - `FSx`, `FsBackend`, `MemoryBackend` - Core filesystem API
+ * - `Stats`, `Dirent`, `FileHandle` - Core data types
+ * - `ENOENT`, `EEXIST`, etc. - Error classes
+ * - `glob`, `find`, `grep` - Unix-like utilities
+ * - `ContentAddressableFS` - CAS storage
+ * - `TieredFS`, `R2Storage` - Storage backends
+ *
+ * ### Application Exports (Cloudflare-specific)
+ * - `FileSystemDO`, `FsModule` - Durable Object integration
+ * - `withFs`, `hasFs`, `getFs` - DO mixins
+ * - `PathValidator`, `pathValidator` - Security utilities
+ * - `CloudflareContainerExecutor` - Container execution
+ *
  * @example
  * ```typescript
  * import { fs } from 'fsx.do'
@@ -22,10 +43,16 @@
  */
 
 // =============================================================================
-// Re-export core @dotdo/fsx
+// FRAMEWORK LAYER - Core FSx Library
+// =============================================================================
+// These exports are runtime-agnostic and can be used in any JavaScript environment.
+// They form the stable API surface of the filesystem library.
 // =============================================================================
 
-// Core types and classes from core/
+/**
+ * @category Framework
+ * @description Core types and classes from core/
+ */
 export {
   // Backend interface
   type FsBackend,
@@ -83,7 +110,10 @@ export type {
   BlobRef,
 } from './core/index.js'
 
-// Errors from core/errors.js
+/**
+ * Framework error classes - POSIX-compatible filesystem errors.
+ * @category Framework
+ */
 export {
   FSError,
   ENOENT,
@@ -105,14 +135,20 @@ export {
   EXDEV,
 } from './core/errors.js'
 
-// Path utilities, glob, find, grep
+/**
+ * Framework path utilities and Unix-like file operations.
+ * @category Framework
+ */
 export * from './core/path.js'
 export { match, createMatcher, type MatchOptions } from './core/glob/match.js'
 export { glob, GlobTimeoutError, GlobAbortedError, type GlobOptions } from './core/glob/glob.js'
 export { find, type FindOptions, type FindResult } from './core/find/find.js'
 export { grep, type GrepOptions, type GrepMatch, type GrepResult } from './core/grep/grep.js'
 
-// Content-Addressable Storage
+/**
+ * Framework Content-Addressable Storage (CAS) implementation.
+ * @category Framework
+ */
 export {
   ContentAddressableFS,
   type CASObject,
@@ -122,10 +158,16 @@ export {
 export { sha1, sha256, bytesToHex, hexToBytes } from './core/cas/hash.js'
 export { hashToPath, pathToHash } from './core/cas/path-mapping.js'
 
-// Sparse checkout
+/**
+ * Framework sparse checkout pattern parsing.
+ * @category Framework
+ */
 export { parsePattern, type ParsedPattern } from './core/sparse/patterns.js'
 
-// Config
+/**
+ * Framework configuration utilities.
+ * @category Framework
+ */
 export {
   createConfig,
   isReadOnly,
@@ -135,9 +177,17 @@ export {
 } from './core/config.js'
 
 // =============================================================================
-// Durable Object exports
+// APPLICATION LAYER - Cloudflare Durable Object Integration
+// =============================================================================
+// These exports are Cloudflare-specific and provide higher-level integrations.
+// They depend on Cloudflare Workers types and runtime features.
 // =============================================================================
 
+/**
+ * Application Durable Object integration - FileSystemDO and mixins.
+ * These components integrate FSx with Cloudflare Durable Objects.
+ * @category Application
+ */
 export {
   FileSystemDO,
   FsModule,
@@ -165,9 +215,17 @@ export {
 } from './do/index.js'
 
 // =============================================================================
-// Storage backends
+// FRAMEWORK LAYER - Storage Backends
+// =============================================================================
+// These storage implementations are part of the framework layer but may have
+// Cloudflare-specific implementations (R2Backend) alongside generic ones.
 // =============================================================================
 
+/**
+ * Framework storage backend implementations.
+ * TieredFS and R2Storage provide tiered storage capabilities.
+ * @category Framework
+ */
 export {
   TieredFS,
   R2Storage,
@@ -177,7 +235,7 @@ export {
 } from './storage/index.js'
 
 // =============================================================================
-// Service Definition (for dotdo integration)
+// APPLICATION LAYER - Service Definition (for dotdo integration)
 // =============================================================================
 
 // import { createService } from 'dotdo'
@@ -193,12 +251,16 @@ export {
 //   docs: import.meta.glob('./docs/*.mdx'),
 // })
 
-// For now, export the DO as default for wrangler
+/**
+ * Default export for wrangler deployment.
+ * @category Application
+ */
 export { FileSystemDO as default } from './do/index.js'
 
 // =============================================================================
-// fs singleton and factory for SDK usage
+// APPLICATION LAYER - Convenience Exports
 // =============================================================================
+// These are application-level convenience functions for SDK usage.
 
 import { FSx, type FSxOptions } from './core/fsx.js'
 import { MemoryBackend, type FsBackend } from './core/backend.js'
@@ -206,6 +268,7 @@ import { MemoryBackend, type FsBackend } from './core/backend.js'
 /**
  * Configuration options for creating an FSx instance via the factory function.
  *
+ * @category Application
  * @see {@link createFs} for usage examples
  */
 export interface CreateFsOptions extends FSxOptions {
@@ -226,6 +289,7 @@ export interface CreateFsOptions extends FSxOptions {
  * - Custom tier thresholds or file size limits
  * - Connection to a specific Durable Object binding
  *
+ * @category Application
  * @param options - Configuration options for the filesystem instance
  * @returns A configured FSx instance
  *
@@ -275,6 +339,7 @@ export function createFs(options: CreateFsOptions = {}): FSx {
  * when the process ends. For persistent storage in production, use {@link createFs}
  * with a Durable Object binding.
  *
+ * @category Application
  * @example Basic file operations
  * ```typescript
  * import { fs } from 'fsx.do'

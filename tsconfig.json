@@ -28,7 +28,8 @@
     "index.ts",
     "core/**/*",
     "storage/**/*",
-    "do/**/*"
+    "do/**/*",
+    "cli/**/*"
   ],
   "exclude": ["node_modules", "dist", "tests", "**/*.test.ts"]
 }

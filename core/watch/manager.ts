@@ -602,8 +602,9 @@ export class WatchManager {
         if (!watcher.closed) {
           try {
             watcher.listener(eventType, filename)
-          } catch {
-            // Swallow listener errors to prevent breaking other watchers
+          } catch (_error) {
+            // Intentional: Swallow listener errors to prevent breaking other watchers
+            // User-provided callbacks should handle their own errors
           }
         }
       })

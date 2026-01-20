@@ -566,24 +566,82 @@ describe('FSx', () => {
   // =============================================================================
 
   describe('access', () => {
-    it('should succeed for existing file', async () => {
+    it('should succeed for existing file with default mode (F_OK)', async () => {
       await fs.access('/home/user/hello.txt')
       // No throw means success
       expect(true).toBe(true)
     })
 
-    it('should succeed with F_OK for existing file', async () => {
+    it('should succeed with explicit F_OK for existing file', async () => {
       await fs.access('/home/user/hello.txt', constants.F_OK)
       expect(true).toBe(true)
     })
 
-    it('should throw ENOENT for nonexistent file', async () => {
-      await expect(fs.access('/nonexistent.txt')).rejects.toThrow()
+    it('should succeed for existing directory', async () => {
+      await fs.access('/home/user', constants.F_OK)
+      expect(true).toBe(true)
     })
 
-    it('should check with different permission modes', async () => {
+    it('should throw ENOENT for nonexistent file', async () => {
+      await expect(fs.access('/nonexistent.txt')).rejects.toThrow(/ENOENT/)
+    })
+
+    it('should throw ENOENT for nonexistent directory', async () => {
+      await expect(fs.access('/nonexistent/path')).rejects.toThrow(/ENOENT/)
+    })
+
+    // R_OK - read permission tests
+    it('should succeed with R_OK for readable file', async () => {
       await fs.access('/home/user/hello.txt', constants.R_OK)
+      expect(true).toBe(true)
+    })
+
+    // W_OK - write permission tests
+    it('should succeed with W_OK for writable file', async () => {
       await fs.access('/home/user/hello.txt', constants.W_OK)
+      expect(true).toBe(true)
+    })
+
+    // X_OK - execute permission tests
+    it('should succeed with X_OK for file with execute permission', async () => {
+      await fs.writeFile('/executable.sh', '#!/bin/bash', { mode: 0o755 })
+      await fs.access('/executable.sh', constants.X_OK)
+      expect(true).toBe(true)
+    })
+
+    // Combined mode tests
+    it('should succeed with R_OK | W_OK for readable and writable file', async () => {
+      await fs.access('/home/user/hello.txt', constants.R_OK | constants.W_OK)
+      expect(true).toBe(true)
+    })
+
+    it('should succeed with R_OK | X_OK for readable and executable file', async () => {
+      await fs.writeFile('/script.sh', '#!/bin/bash', { mode: 0o755 })
+      await fs.access('/script.sh', constants.R_OK | constants.X_OK)
+      expect(true).toBe(true)
+    })
+
+    it('should succeed with R_OK | W_OK | X_OK for fully accessible file', async () => {
+      await fs.writeFile('/fullaccess.sh', '#!/bin/bash', { mode: 0o777 })
+      await fs.access('/fullaccess.sh', constants.R_OK | constants.W_OK | constants.X_OK)
+      expect(true).toBe(true)
+    })
+
+    // Directory permission tests
+    it('should succeed with X_OK for directory (traverse permission)', async () => {
+      await fs.access('/home', constants.X_OK)
+      expect(true).toBe(true)
+    })
+
+    it('should succeed with R_OK | X_OK for directory', async () => {
+      await fs.access('/home', constants.R_OK | constants.X_OK)
+      expect(true).toBe(true)
+    })
+
+    // Mode value 0 should be treated as F_OK
+    it('should treat mode 0 as F_OK (existence check only)', async () => {
+      await fs.access('/home/user/hello.txt', 0)
+      expect(true).toBe(true)
     })
   })
 

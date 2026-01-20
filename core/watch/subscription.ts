@@ -491,7 +491,8 @@ export class SubscriptionManager {
     let parsed: unknown
     try {
       parsed = JSON.parse(message)
-    } catch {
+    } catch (_error) {
+      // Expected: Return error for malformed JSON messages
       return { success: false, error: 'invalid_json' }
     }
 

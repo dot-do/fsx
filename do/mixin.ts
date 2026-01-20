@@ -4,6 +4,7 @@
  * This mixin adds the $.fs capability to a Durable Object class,
  * providing lazy-loaded filesystem operations backed by SQLite and R2.
  *
+ * @category Application
  * @example
  * ```typescript
  * import { withFs } from 'fsx/do'

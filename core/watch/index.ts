@@ -94,3 +94,15 @@ export type {
 } from './client.js'
 
 export { FSWatcherClient } from './client.js'
+
+// Rate limiting for WebSocket messages
+export type {
+  RateLimiterOptions,
+  RateLimitResult,
+} from './rate-limiter.js'
+
+export {
+  RateLimiter,
+  RateLimiterDefaults,
+  createRateLimiter,
+} from './rate-limiter.js'

@@ -1,0 +1,80 @@
+name: Version Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - prepatch
+          - preminor
+          - premajor
+          - prerelease
+      preid:
+        description: 'Prerelease identifier (alpha, beta, rc)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: bump
+        run: |
+          if [ -n "${{ inputs.preid }}" ]; then
+            NEW_VERSION=$(npm version ${{ inputs.version_type }} --preid=${{ inputs.preid }} --no-git-tag-version)
+          else
+            NEW_VERSION=$(npm version ${{ inputs.version_type }} --no-git-tag-version)
+          fi
+          echo "NEW_VERSION=${NEW_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Update CHANGELOG.md
+        run: |
+          VERSION="${{ steps.bump.outputs.NEW_VERSION }}"
+          VERSION="${VERSION#v}"
+          DATE=$(date +%Y-%m-%d)
+
+          # Create new changelog entry
+          ENTRY="## [$VERSION] - $DATE\n\n### Changed\n\n- Version bump to $VERSION\n"
+
+          # Insert after the header
+          sed -i "/^## \[/i\\
+          $ENTRY" CHANGELOG.md || true
+
+      - name: Commit and push
+        run: |
+          git add package.json package-lock.json CHANGELOG.md
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.NEW_VERSION }}"
+          git push
+
+      - name: Create and push tag
+        run: |
+          git tag ${{ steps.bump.outputs.NEW_VERSION }}
+          git push origin ${{ steps.bump.outputs.NEW_VERSION }}

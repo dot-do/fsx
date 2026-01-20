@@ -479,13 +479,17 @@ export function createPageStorage(config: PageStorageConfig): PageStorage {
       return 0
     }
 
-    let totalSize = 0
-    for (const key of pageKeys) {
+    // Read all chunks in parallel for better performance
+    const chunkPromises = pageKeys.map(async (key) => {
       const chunk = await storage.get<Uint8Array>(key)
-      if (chunk) {
-        totalSize += chunk.length
-      }
-    }
+      return chunk ? chunk.length : 0
+    })
+
+    const sizes = await Promise.all(chunkPromises)
+    const totalSize = sizes.reduce((sum, size) => sum + size, 0)
+
+    // Cache the computed size for future calls
+    sizeMap.set(blobId, totalSize)
 
     return totalSize
   }

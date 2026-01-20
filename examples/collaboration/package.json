@@ -1,0 +1,19 @@
+{
+  "name": "collaboration-example",
+  "version": "1.0.0",
+  "description": "Real-time collaborative editing using fsx",
+  "type": "module",
+  "main": "server.ts",
+  "scripts": {
+    "start": "npx tsx server.ts",
+    "dev": "npx tsx --watch server.ts"
+  },
+  "dependencies": {
+    "fsx.do": "^0.1.0",
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

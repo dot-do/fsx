@@ -247,7 +247,8 @@ function previewBytes(data: Uint8Array, maxBytes: number): string {
         .join(' ')
     }
     return text
-  } catch {
+  } catch (_error) {
+    // Expected: decode may fail for binary data - fall back to hex representation
     return Array.from(slice)
       .map(b => b.toString(16).padStart(2, '0'))
       .join(' ')

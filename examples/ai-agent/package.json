@@ -1,0 +1,18 @@
+{
+  "name": "ai-agent-example",
+  "version": "1.0.0",
+  "description": "Example AI agent using fsx for file storage",
+  "type": "module",
+  "main": "agent.ts",
+  "scripts": {
+    "start": "npx tsx agent.ts",
+    "dev": "npx tsx --watch agent.ts"
+  },
+  "dependencies": {
+    "fsx.do": "^0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

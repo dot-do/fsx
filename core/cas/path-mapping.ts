@@ -83,7 +83,8 @@ export function isValidPath(path: string, options?: PathMappingOptions): boolean
   try {
     pathToHash(path, options)
     return true
-  } catch {
+  } catch (_error) {
+    // Expected: pathToHash throws for invalid paths - return false is the intended behavior
     return false
   }
 }

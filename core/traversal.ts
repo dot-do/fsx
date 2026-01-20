@@ -646,8 +646,8 @@ export async function traverse(options: TraversalOptions): Promise<TraversalResu
           isDir = dirEntry.isDirectory()
           entryType = isDir ? 'directory' : 'file'
         }
-      } catch {
-        // If stat fails (e.g., broken symlink), treat as file
+      } catch (_error) {
+        // Expected: stat may fail (e.g., broken symlink, race condition) - treat as file
         entryType = 'file'
         isDir = false
       }
@@ -675,8 +675,8 @@ export async function traverse(options: TraversalOptions): Promise<TraversalResu
             entry.mtimeMs = stats.mtimeMs
             entry.ctimeMs = stats.ctimeMs
             entry.atimeMs = stats.atimeMs
-          } catch {
-            // Stats collection is optional, continue without
+          } catch (_error) {
+            // Expected: Stats collection is optional - continue without stats on failure
           }
         }
       }
@@ -688,7 +688,8 @@ export async function traverse(options: TraversalOptions): Promise<TraversalResu
         if (filter) {
           try {
             include = await filter(entry)
-          } catch {
+          } catch (_error) {
+            // Expected: User filter threw - treat as exclude for safety
             include = false
           }
         }

@@ -15,7 +15,7 @@ export interface CLIError {
 /**
  * Extract error code from error object if available
  */
-function getErrorCode(err: unknown): string | undefined {
+export function getErrorCode(err: unknown): string | undefined {
   if (err && typeof err === 'object' && 'code' in err) {
     return String((err as { code: unknown }).code)
   }

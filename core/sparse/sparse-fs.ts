@@ -806,7 +806,8 @@ export class SparseFS {
       } else {
         return this.shouldInclude(normalizedPath)
       }
-    } catch {
+    } catch (_error) {
+      // Expected: Path doesn't exist or can't be accessed - return false
       return false
     }
   }
@@ -855,8 +856,8 @@ export class SparseFS {
     let entries: Dirent[]
     try {
       entries = (await this.fs.readdir(dirPath, { withFileTypes: true })) as Dirent[]
-    } catch {
-      // Directory doesn't exist or can't be read
+    } catch (_error) {
+      // Expected: Directory doesn't exist or can't be read - skip silently
       return
     }
 

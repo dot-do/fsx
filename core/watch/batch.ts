@@ -288,8 +288,8 @@ export class BatchEmitter {
     for (const callback of this.callbacks) {
       try {
         callback(events)
-      } catch {
-        // Swallow callback errors
+      } catch (_error) {
+        // Intentional: Swallow callback errors to prevent breaking other callbacks
       }
     }
   }

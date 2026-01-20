@@ -53,51 +53,112 @@ class SubscriptionManager {
   private subscriptions = new Map<MockWebSocket, Map<string, Subscription>>()
 
   /**
+   * Normalize a path by removing trailing slashes (except for root)
+   */
+  private normalizePath(path: string): string {
+    if (path === '/' || path === '') return '/'
+    return path.endsWith('/') ? path.slice(0, -1) : path
+  }
+
+  /**
+   * Validate a path - must be absolute (start with /)
+   */
+  private validatePath(path: string): { valid: boolean; error?: string } {
+    if (!path || path === '') {
+      return { valid: false, error: 'Path cannot be empty' }
+    }
+    if (!path.startsWith('/')) {
+      return { valid: false, error: 'Path must be absolute (start with /)' }
+    }
+    return { valid: true }
+  }
+
+  /**
    * Subscribe a connection to a path
    */
   subscribe(ws: MockWebSocket, path: string, recursive = false): { success: boolean; error?: string } {
-    // TODO: Implement in GREEN phase
-    throw new Error('Not implemented')
+    const validation = this.validatePath(path)
+    if (!validation.valid) {
+      return { success: false, error: validation.error }
+    }
+
+    const normalizedPath = this.normalizePath(path)
+    let wsSubscriptions = this.subscriptions.get(ws)
+
+    if (!wsSubscriptions) {
+      wsSubscriptions = new Map<string, Subscription>()
+      this.subscriptions.set(ws, wsSubscriptions)
+    }
+
+    // Update existing subscription or add new one
+    const existingSub = wsSubscriptions.get(normalizedPath)
+    if (existingSub) {
+      // Update the recursive flag if subscription already exists
+      existingSub.recursive = recursive
+      existingSub.subscribedAt = Date.now()
+    } else {
+      wsSubscriptions.set(normalizedPath, {
+        path: normalizedPath,
+        recursive,
+        subscribedAt: Date.now(),
+      })
+    }
+
+    return { success: true }
   }
 
   /**
    * Unsubscribe a connection from a path
    */
   unsubscribe(ws: MockWebSocket, path: string): { success: boolean; error?: string } {
-    // TODO: Implement in GREEN phase
-    throw new Error('Not implemented')
+    const normalizedPath = this.normalizePath(path)
+    const wsSubscriptions = this.subscriptions.get(ws)
+
+    if (wsSubscriptions) {
+      wsSubscriptions.delete(normalizedPath)
+      // Clean up empty subscription maps
+      if (wsSubscriptions.size === 0) {
+        this.subscriptions.delete(ws)
+      }
+    }
+
+    // Always return success for unsubscribe (graceful handling)
+    return { success: true }
   }
 
   /**
    * Get all subscriptions for a connection
    */
   getSubscriptions(ws: MockWebSocket): Subscription[] {
-    // TODO: Implement in GREEN phase
-    throw new Error('Not implemented')
+    const wsSubscriptions = this.subscriptions.get(ws)
+    if (!wsSubscriptions) {
+      return []
+    }
+    return Array.from(wsSubscriptions.values())
   }
 
   /**
    * Check if a connection is subscribed to a path
    */
   isSubscribed(ws: MockWebSocket, path: string): boolean {
-    // TODO: Implement in GREEN phase
-    throw new Error('Not implemented')
+    const normalizedPath = this.normalizePath(path)
+    const wsSubscriptions = this.subscriptions.get(ws)
+    return wsSubscriptions?.has(normalizedPath) ?? false
   }
 
   /**
    * Remove all subscriptions for a connection (on close)
    */
   removeConnection(ws: MockWebSocket): void {
-    // TODO: Implement in GREEN phase
-    throw new Error('Not implemented')
+    this.subscriptions.delete(ws)
   }
 
   /**
    * Get count of subscriptions for a connection
    */
   getSubscriptionCount(ws: MockWebSocket): number {
-    // TODO: Implement in GREEN phase
-    throw new Error('Not implemented')
+    const wsSubscriptions = this.subscriptions.get(ws)
+    return wsSubscriptions?.size ?? 0
   }
 }
 
@@ -112,16 +173,100 @@ function handleMessage(
   message: string,
   manager: SubscriptionManager
 ): { type: string; [key: string]: unknown } {
-  // TODO: Implement in GREEN phase
-  throw new Error('Not implemented')
+  // Parse and validate the message
+  const parsed = parseMessage(message)
+  if (!parsed.valid) {
+    return {
+      type: 'error',
+      code: 'INVALID_MESSAGE',
+      message: parsed.error || 'Invalid message format',
+    }
+  }
+
+  const msg = parsed.message as { type: string; path: string; recursive?: boolean }
+
+  // Handle subscribe message
+  if (msg.type === 'subscribe') {
+    const result = manager.subscribe(ws, msg.path, msg.recursive ?? false)
+    if (result.success) {
+      return {
+        type: 'subscribed',
+        path: msg.path,
+        recursive: msg.recursive ?? false,
+      }
+    } else {
+      return {
+        type: 'error',
+        code: 'SUBSCRIBE_FAILED',
+        message: result.error || 'Failed to subscribe',
+      }
+    }
+  }
+
+  // Handle unsubscribe message
+  if (msg.type === 'unsubscribe') {
+    manager.unsubscribe(ws, msg.path)
+    return {
+      type: 'unsubscribed',
+      path: msg.path,
+    }
+  }
+
+  // Unknown message type
+  return {
+    type: 'error',
+    code: 'UNKNOWN_TYPE',
+    message: `Unknown message type: ${msg.type}`,
+  }
 }
 
 /**
  * Parse and validate an incoming message
  */
 function parseMessage(data: string): { valid: boolean; message?: unknown; error?: string } {
-  // TODO: Implement in GREEN phase
-  throw new Error('Not implemented')
+  // Handle empty or undefined data
+  if (!data || data === '') {
+    return { valid: false, error: 'Empty message' }
+  }
+
+  // Try to parse JSON
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(data)
+  } catch {
+    return { valid: false, error: 'Invalid JSON' }
+  }
+
+  // Validate it's an object
+  if (typeof parsed !== 'object' || parsed === null) {
+    return { valid: false, error: 'Message must be an object' }
+  }
+
+  const msg = parsed as Record<string, unknown>
+
+  // Check for type field
+  if (!('type' in msg) || typeof msg.type !== 'string') {
+    return { valid: false, error: 'Missing or invalid type field' }
+  }
+
+  // For subscribe/unsubscribe, validate path field
+  if (msg.type === 'subscribe' || msg.type === 'unsubscribe') {
+    if (!('path' in msg)) {
+      return { valid: false, error: 'Missing path field' }
+    }
+    if (typeof msg.path !== 'string') {
+      return { valid: false, error: 'Path must be a string' }
+    }
+  }
+
+  // For subscribe, validate optional recursive field
+  if (msg.type === 'subscribe' && 'recursive' in msg) {
+    if (typeof msg.recursive !== 'boolean') {
+      return { valid: false, error: 'Recursive must be a boolean' }
+    }
+  }
+
+  return { valid: true, message: parsed }
 }
 
 /**

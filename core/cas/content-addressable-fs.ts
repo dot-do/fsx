@@ -442,7 +442,7 @@ export class ContentAddressableFS {
     }
 
     try {
-      const result = await getObjectFn(hash, this.storage as any)
+      const result = await getObjectFn(hash, this.storage)
 
       // Store in cache if enabled
       if (this.cache) {

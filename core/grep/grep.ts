@@ -1366,8 +1366,9 @@ export async function grep(options: GrepOptions): Promise<GrepResult> {
         }
 
         content = new TextDecoder().decode(rawData)
-      } catch {
-        continue // Skip files that can't be read
+      } catch (_error) {
+        // Expected: Skip files that can't be read (permissions, deleted, etc.)
+        continue
       }
     } else {
       content = mockFileContents.get(file)
