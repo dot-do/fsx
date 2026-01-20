@@ -458,7 +458,6 @@ describe('PageMetadata Schema', () => {
 
   beforeEach(() => {
     sql = new MockSqlStorage()
-    // @ts-expect-error - Implementation does not exist yet
     pageStore = new PageMetadataStore(sql as unknown as SqlStorage)
   })
 
@@ -548,7 +547,6 @@ describe('PageMetadata CRUD Operations', () => {
 
   beforeEach(async () => {
     sql = new MockSqlStorage()
-    // @ts-expect-error - Implementation does not exist yet
     pageStore = new PageMetadataStore(sql as unknown as SqlStorage)
     await pageStore.init()
   })
@@ -836,7 +834,6 @@ describe('PageMetadata LRU Queries', () => {
 
   beforeEach(async () => {
     sql = new MockSqlStorage()
-    // @ts-expect-error - Implementation does not exist yet
     pageStore = new PageMetadataStore(sql as unknown as SqlStorage)
     await pageStore.init()
   })
@@ -1011,7 +1008,6 @@ describe('PageMetadata Tier Queries', () => {
 
   beforeEach(async () => {
     sql = new MockSqlStorage()
-    // @ts-expect-error - Implementation does not exist yet
     pageStore = new PageMetadataStore(sql as unknown as SqlStorage)
     await pageStore.init()
   })
@@ -1143,7 +1139,6 @@ describe('PageMetadata Access Tracking', () => {
 
   beforeEach(async () => {
     sql = new MockSqlStorage()
-    // @ts-expect-error - Implementation does not exist yet
     pageStore = new PageMetadataStore(sql as unknown as SqlStorage)
     await pageStore.init()
   })
@@ -1273,7 +1268,6 @@ describe('PageMetadata Foreign Key Constraints', () => {
 
   beforeEach(async () => {
     sql = new MockSqlStorage()
-    // @ts-expect-error - Implementation does not exist yet
     pageStore = new PageMetadataStore(sql as unknown as SqlStorage)
     await pageStore.init()
   })
@@ -1344,7 +1338,6 @@ describe('PageMetadata Edge Cases', () => {
 
   beforeEach(async () => {
     sql = new MockSqlStorage()
-    // @ts-expect-error - Implementation does not exist yet
     pageStore = new PageMetadataStore(sql as unknown as SqlStorage)
     await pageStore.init()
   })
@@ -1521,7 +1514,6 @@ describe('PageMetadata Integration', () => {
 
   beforeEach(async () => {
     sql = new MockSqlStorage()
-    // @ts-expect-error - Implementation does not exist yet
     pageStore = new PageMetadataStore(sql as unknown as SqlStorage)
     await pageStore.init()
   })

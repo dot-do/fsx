@@ -107,7 +107,6 @@ describe('glob() backend integration', () => {
       // This test verifies glob() uses the backend instead of mock FS
       // It will FAIL until glob() is refactored to accept a backend parameter
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await glob('**/*.ts', { cwd: '/src', backend })
 
       // Verify the backend was actually used
@@ -121,7 +120,6 @@ describe('glob() backend integration', () => {
       const encoder = new TextEncoder()
       await backend.writeFile('/src/custom-file.ts', encoder.encode('// custom'))
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await glob('*.ts', { cwd: '/src', backend })
 
       // This should include our custom file
@@ -134,7 +132,6 @@ describe('glob() backend integration', () => {
       const emptyBackend = new SpyBackend()
       await emptyBackend.mkdir('/src')
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await glob('**/*.ts', { cwd: '/src', backend: emptyBackend })
 
       // Should return empty since our backend has no files
@@ -144,7 +141,6 @@ describe('glob() backend integration', () => {
 
   describe('uses FsBackend.stat for file type detection', () => {
     it('should call backend.stat to determine file types', async () => {
-      // @ts-expect-error - backend parameter doesn't exist yet
       await glob('*', { cwd: '/src', onlyFiles: true, backend })
 
       // stat should be called to determine if entries are files or directories
@@ -153,10 +149,8 @@ describe('glob() backend integration', () => {
     })
 
     it('should correctly distinguish files from directories using backend', async () => {
-      // @ts-expect-error - backend parameter doesn't exist yet
       const filesOnly = await glob('*', { cwd: '/src', onlyFiles: true, backend })
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const dirsOnly = await glob('*', { cwd: '/src', onlyDirectories: true, backend })
 
       expect(filesOnly).toContain('index.ts')
@@ -184,7 +178,6 @@ describe('grep() backend integration', () => {
 
   describe('uses FsBackend.readFile for content search', () => {
     it('should call backend.readFile when searching file contents', async () => {
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await grep({ pattern: 'TODO', path: '/src', recursive: true, backend })
 
       const readFileCalls = backend.getCallsTo('readFile')
@@ -196,7 +189,6 @@ describe('grep() backend integration', () => {
       const encoder = new TextEncoder()
       await backend.writeFile('/src/unique.ts', encoder.encode('UNIQUE_MARKER_12345'))
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await grep({ pattern: 'UNIQUE_MARKER_12345', path: '/src', recursive: true, backend })
 
       expect(result.matchCount).toBe(1)
@@ -210,7 +202,6 @@ describe('grep() backend integration', () => {
       const encoder = new TextEncoder()
       await cleanBackend.writeFile('/src/clean.ts', encoder.encode('// No todos here'))
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await grep({ pattern: 'TODO', path: '/src', recursive: true, backend: cleanBackend })
 
       // Should find nothing since our backend has no TODOs
@@ -220,7 +211,6 @@ describe('grep() backend integration', () => {
 
   describe('uses FsBackend.readdir for file discovery', () => {
     it('should call backend.readdir when recursively searching', async () => {
-      // @ts-expect-error - backend parameter doesn't exist yet
       await grep({ pattern: 'export', path: '/src', recursive: true, backend })
 
       const readdirCalls = backend.getCallsTo('readdir')
@@ -234,7 +224,6 @@ describe('grep() backend integration', () => {
       const encoder = new TextEncoder()
       await minimalBackend.writeFile('/src/only-file.ts', encoder.encode('searchable content here'))
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await grep({ pattern: 'searchable', path: '/src', recursive: true, backend: minimalBackend })
 
       expect(result.fileCount).toBe(1)
@@ -258,7 +247,6 @@ describe('find() backend integration', () => {
 
   describe('uses FsBackend.readdir for directory traversal', () => {
     it('should call backend.readdir when traversing filesystem', async () => {
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await find({ path: '/src', backend })
 
       const readdirCalls = backend.getCallsTo('readdir')
@@ -270,7 +258,6 @@ describe('find() backend integration', () => {
       const encoder = new TextEncoder()
       await backend.writeFile('/src/unique-find-test.ts', encoder.encode('content'))
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await find({ path: '/src', name: 'unique-find-test.ts', backend })
 
       expect(result.length).toBe(1)
@@ -284,7 +271,6 @@ describe('find() backend integration', () => {
       const encoder = new TextEncoder()
       await differentBackend.writeFile('/custom/file.txt', encoder.encode('different'))
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const result = await find({ path: '/', name: '*.ts', backend: differentBackend })
 
       // Should find no .ts files since our backend has none
@@ -294,7 +280,6 @@ describe('find() backend integration', () => {
 
   describe('uses FsBackend.stat for metadata', () => {
     it('should call backend.stat to get file metadata', async () => {
-      // @ts-expect-error - backend parameter doesn't exist yet
       await find({ path: '/src', type: 'f', backend })
 
       const statCalls = backend.getCallsTo('stat')
@@ -308,10 +293,8 @@ describe('find() backend integration', () => {
       await smallBackend.writeFile('/data/small.txt', new Uint8Array(100))
       await smallBackend.writeFile('/data/large.txt', new Uint8Array(10000))
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const smallFiles = await find({ path: '/data', size: '-1K', backend: smallBackend })
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const largeFiles = await find({ path: '/data', size: '+5K', backend: smallBackend })
 
       expect(smallFiles.some(f => f.path === '/data/small.txt')).toBe(true)
@@ -322,10 +305,8 @@ describe('find() backend integration', () => {
     })
 
     it('should use backend stats for type filtering', async () => {
-      // @ts-expect-error - backend parameter doesn't exist yet
       const files = await find({ path: '/src', type: 'f', backend })
 
-      // @ts-expect-error - backend parameter doesn't exist yet
       const dirs = await find({ path: '/src', type: 'd', backend })
 
       // Files should include .ts files
@@ -356,12 +337,10 @@ describe('backend consistency across utilities', () => {
     // Use find to get files, then grep their contents
     // Both should use the same backend
 
-    // @ts-expect-error - backend parameter doesn't exist yet
     const foundFiles = await find({ path: '/src', name: '*.ts', backend })
 
     expect(foundFiles.some(f => f.path === '/src/marker.ts')).toBe(true)
 
-    // @ts-expect-error - backend parameter doesn't exist yet
     const grepResult = await grep({ pattern: 'CONSISTENCY_TEST_MARKER', path: '/src', recursive: true, backend })
 
     expect(grepResult.matchCount).toBe(1)
@@ -374,13 +353,10 @@ describe('backend consistency across utilities', () => {
     const encoder = new TextEncoder()
     await memBackend.writeFile('/test/file.ts', encoder.encode('test content'))
 
-    // @ts-expect-error - backend parameter doesn't exist yet
     const globResult = await glob('*.ts', { cwd: '/test', backend: memBackend })
 
-    // @ts-expect-error - backend parameter doesn't exist yet
     const findResult = await find({ path: '/test', name: '*.ts', backend: memBackend })
 
-    // @ts-expect-error - backend parameter doesn't exist yet
     const grepResult = await grep({ pattern: 'test', path: '/test', backend: memBackend })
 
     expect(globResult).toContain('file.ts')
@@ -398,7 +374,6 @@ describe('error handling with custom backend', () => {
     const errorBackend = new MemoryBackend()
     // Don't create /nonexistent - it doesn't exist
 
-    // @ts-expect-error - backend parameter doesn't exist yet
     await expect(glob('*.ts', { cwd: '/nonexistent', backend: errorBackend }))
       .rejects.toThrow(/ENOENT|no such/)
   })
@@ -406,7 +381,6 @@ describe('error handling with custom backend', () => {
   it('grep should propagate backend errors', async () => {
     const errorBackend = new MemoryBackend()
 
-    // @ts-expect-error - backend parameter doesn't exist yet
     await expect(grep({ pattern: 'test', path: '/nonexistent', backend: errorBackend }))
       .rejects.toThrow(/ENOENT|no such/)
   })
@@ -414,7 +388,6 @@ describe('error handling with custom backend', () => {
   it('find should handle non-existent paths gracefully', async () => {
     const errorBackend = new MemoryBackend()
 
-    // @ts-expect-error - backend parameter doesn't exist yet
     const result = await find({ path: '/nonexistent', backend: errorBackend })
 
     // find() typically returns empty array for non-existent paths

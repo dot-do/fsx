@@ -765,7 +765,6 @@ export class TieredFS {
    * @internal
    */
   // Reserved for future tier promotion implementation
-  // @ts-expect-error Reserved for future tier promotion
   private async _promote(path: string, data: Uint8Array, _fromTier: string, toTier: 'hot' | 'warm'): Promise<void> {
     if (toTier === 'hot') {
       await this.hotStub.fetch('http://fsx.do/rpc', {

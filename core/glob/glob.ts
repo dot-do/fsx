@@ -288,7 +288,6 @@ function getRelativePath(path: string, base: string): string {
  * @internal
  */
 // Legacy function - preserved for potential external use
-// @ts-expect-error Legacy function preserved for backward compatibility
 async function _traverse(
   dir: string,
   options: {

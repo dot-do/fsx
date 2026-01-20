@@ -255,7 +255,6 @@ describe('TieredFS - Hot Tier Operations', () => {
       await tieredFs.writeFile('/sized.bin', data)
 
       // This test expects a getMetadata method that may not exist yet
-      // @ts-expect-error getMetadata may not be implemented
       const metadata = await tieredFs.getMetadata?.('/sized.bin')
       if (metadata) {
         expect(metadata.size).toBe(500)
@@ -268,7 +267,6 @@ describe('TieredFS - Hot Tier Operations', () => {
       await tieredFs.writeFile('/timestamped.txt', 'content')
       const after = Date.now()
 
-      // @ts-expect-error getMetadata may not be implemented
       const metadata = await tieredFs.getMetadata?.('/timestamped.txt')
       if (metadata?.createdAt) {
         expect(metadata.createdAt).toBeGreaterThanOrEqual(before)
@@ -347,7 +345,6 @@ describe('TieredFS - Warm Tier Operations', () => {
       await tieredFs.writeFile('/warm-sync.bin', data)
 
       // Metadata should exist in hot tier even though data is in warm
-      // @ts-expect-error getMetadata may not be implemented
       const metadata = await tieredFs.getMetadata?.('/warm-sync.bin')
       if (metadata) {
         expect(metadata.tier).toBe('warm')
@@ -422,7 +419,6 @@ describe('TieredFS - Cold Tier Operations', () => {
       await tieredFs.writeFile('/cold-sync.bin', data)
 
       // Metadata should exist in hot tier
-      // @ts-expect-error getMetadata may not be implemented
       const metadata = await tieredFs.getMetadata?.('/cold-sync.bin')
       if (metadata) {
         expect(metadata.tier).toBe('cold')
@@ -447,7 +443,6 @@ describe('TieredFS - Tier Promotion', () => {
 
       // Manually demote first to ensure it's in cold
       // Then test promotion
-      // @ts-expect-error promote may take different parameters
       await tieredFs.promote?.('/cold-to-warm.bin', 'warm')
 
       const result = await tieredFs.readFile('/cold-to-warm.bin')
@@ -462,7 +457,6 @@ describe('TieredFS - Tier Promotion', () => {
       const data = createRandomBytes(100) // Small file
       await warmBucket.put('/warm-to-hot.bin', data)
 
-      // @ts-expect-error promote may not be implemented
       await tieredFs.promote?.('/warm-to-hot.bin', 'hot')
 
       const result = await tieredFs.readFile('/warm-to-hot.bin')
@@ -475,7 +469,6 @@ describe('TieredFS - Tier Promotion', () => {
       const data = createRandomBytes(100)
       await coldBucket.put('/cold-to-hot.bin', data)
 
-      // @ts-expect-error promote may not be implemented
       await tieredFs.promote?.('/cold-to-hot.bin', 'hot')
 
       const result = await tieredFs.readFile('/cold-to-hot.bin')
@@ -487,7 +480,6 @@ describe('TieredFS - Tier Promotion', () => {
       const data = createRandomBytes(100)
       await coldBucket.put('/promote-cleanup.bin', data)
 
-      // @ts-expect-error promote may not be implemented
       await tieredFs.promote?.('/promote-cleanup.bin', 'hot')
 
       // Data should no longer be in cold tier
@@ -654,7 +646,6 @@ describe('TieredFS - Tier Demotion', () => {
       await tieredFs.demote('/meta-demote.bin', 'warm')
 
       // Metadata should reflect new tier
-      // @ts-expect-error getMetadata may not be implemented
       const metadata = await tieredFs.getMetadata?.('/meta-demote.bin')
       if (metadata) {
         expect(metadata.tier).toBe('warm')
@@ -875,7 +866,6 @@ describe('TieredFS - Cross-Tier Operations', () => {
       const data = createRandomBytes(100)
       await tieredFs.writeFile('/move/source.txt', data)
 
-      // @ts-expect-error move may not be implemented
       await tieredFs.move?.('/move/source.txt', '/move/dest.txt')
 
       await expect(tieredFs.readFile('/move/source.txt')).rejects.toThrow()
@@ -891,7 +881,6 @@ describe('TieredFS - Cross-Tier Operations', () => {
       await tieredFs.writeFile('/cross-move/cold.bin', data)
 
       // Move to new location
-      // @ts-expect-error move may not be implemented
       await tieredFs.move?.('/cross-move/cold.bin', '/cross-move/renamed.bin')
 
       const result = await tieredFs.readFile('/cross-move/renamed.bin')
@@ -907,7 +896,6 @@ describe('TieredFS - Cross-Tier Operations', () => {
       const data = createRandomBytes(100)
       await tieredFs.writeFile('/copy/source.txt', data)
 
-      // @ts-expect-error copy may not be implemented
       await tieredFs.copy?.('/copy/source.txt', '/copy/dest.txt')
 
       const source = await tieredFs.readFile('/copy/source.txt')
@@ -923,7 +911,6 @@ describe('TieredFS - Cross-Tier Operations', () => {
       await tieredFs.writeFile('/copy-tier/source.txt', data)
 
       // Copy and change tier
-      // @ts-expect-error copy may not be implemented with tier option
       await tieredFs.copy?.('/copy-tier/source.txt', '/copy-tier/cold-copy.txt', { tier: 'cold' })
 
       const dest = await tieredFs.readFile('/copy-tier/cold-copy.txt')
@@ -937,7 +924,6 @@ describe('TieredFS - Cross-Tier Operations', () => {
 
       await tieredFs.writeFile('/delete/hot.txt', createRandomBytes(100))
 
-      // @ts-expect-error deleteFile may not be implemented
       await tieredFs.deleteFile?.('/delete/hot.txt')
 
       await expect(tieredFs.readFile('/delete/hot.txt')).rejects.toThrow()
@@ -948,7 +934,6 @@ describe('TieredFS - Cross-Tier Operations', () => {
 
       await tieredFs.writeFile('/delete/warm.bin', createRandomBytes(5 * 1024))
 
-      // @ts-expect-error deleteFile may not be implemented
       await tieredFs.deleteFile?.('/delete/warm.bin')
 
       expect(warmBucket.has('/delete/warm.bin')).toBe(false)
@@ -959,7 +944,6 @@ describe('TieredFS - Cross-Tier Operations', () => {
 
       await tieredFs.writeFile('/delete/cold.bin', createRandomBytes(15 * 1024))
 
-      // @ts-expect-error deleteFile may not be implemented
       await tieredFs.deleteFile?.('/delete/cold.bin')
 
       expect(coldBucket.has('/delete/cold.bin')).toBe(false)
@@ -970,11 +954,9 @@ describe('TieredFS - Cross-Tier Operations', () => {
 
       await tieredFs.writeFile('/delete-meta/file.txt', 'content')
 
-      // @ts-expect-error deleteFile may not be implemented
       await tieredFs.deleteFile?.('/delete-meta/file.txt')
 
       // Metadata should be removed
-      // @ts-expect-error getMetadata may not be implemented
       const metadata = await tieredFs.getMetadata?.('/delete-meta/file.txt')
       expect(metadata).toBeUndefined()
     })
@@ -1115,7 +1097,6 @@ describe('TieredFS - Consistency', () => {
       // During promotion, file should always be readable
       const readPromise = tieredFs.readFile('/atomic-promote.bin')
 
-      // @ts-expect-error promote may not be implemented
       const promotePromise = tieredFs.promote?.('/atomic-promote.bin', 'hot')
 
       // Both should succeed
@@ -1194,7 +1175,6 @@ describe('TieredFS - Consistency', () => {
       await tieredFs.demote('/sync-test.bin', 'warm')
 
       // Metadata should say warm
-      // @ts-expect-error getMetadata may not be implemented
       const metadata = await tieredFs.getMetadata?.('/sync-test.bin')
       if (metadata) {
         expect(metadata.tier).toBe('warm')
