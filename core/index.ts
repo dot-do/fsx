@@ -173,6 +173,25 @@ export { sha1, sha256, bytesToHex, hexToBytes } from './cas/hash.js'
 export { hashToPath, pathToHash } from './cas/path-mapping.js'
 
 // =============================================================================
+// Copy-on-Write (COW) Handler for Branching
+// =============================================================================
+
+export {
+  COWHandler,
+  createCOWHandler,
+  CASCOWHandler,
+  InMemoryBranchMetadataStorage,
+  type BlockInfo,
+  type BranchState,
+  type WriteInterceptResult,
+  type COWHandlerOptions,
+  type CommitResult,
+  type DirtyPathInfo,
+  type BranchMetadataStorage,
+  type CASCOWHandlerOptions,
+} from './cow-handler.js'
+
+// =============================================================================
 // Sparse Checkout
 // =============================================================================
 

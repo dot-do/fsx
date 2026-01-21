@@ -240,3 +240,12 @@ export {
   type ExtentHeader,
   type BuildExtentOptions,
 } from './extent-format.js'
+
+// Backend Implementations
+export {
+  // Cache API Backend (FREE, ephemeral storage)
+  CacheBlobStorage,
+  createCacheBackend,
+  type CacheBackendConfig,
+  type CachePutOptions,
+} from './backends/cache-backend.js'
