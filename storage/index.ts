@@ -187,3 +187,56 @@ export {
   type CompressionResult,
   type CompressionStats,
 } from './compression.js'
+
+// Extent Storage (VFS core layer for database page management)
+export {
+  // Factory function
+  createExtentStorage,
+  // Class
+  ExtentStorage,
+  // Constants
+  DEFAULT_PAGE_SIZE,
+  DEFAULT_EXTENT_SIZE,
+  // Types
+  type ExtentStorageConfig,
+  type ExtentCompression,
+  type ExtentFileMetadata,
+  type ExtentMetadata,
+  type DirtyPage,
+  type SqlStorageAdapter,
+  type SqlResultSet,
+  type SqlRow,
+} from './extent-storage.js'
+
+// Extent Format Utilities (binary format for extent blobs)
+export {
+  // Building/parsing
+  buildExtent,
+  parseExtentHeader,
+  extractPage,
+  validateExtent,
+  // Bitmap utilities
+  calculateBitmapSize,
+  setPagePresent,
+  clearPagePresent,
+  isPagePresent,
+  isPagePresentInBitmap,
+  countPresentPagesInBitmap,
+  // Extent info
+  getPageBitmap,
+  getPresentPageCount,
+  getPresentPageIndices,
+  isExtentCompressed,
+  calculateExtentSize,
+  calculatePagesPerExtent,
+  // Checksum
+  computeChecksum as computeExtentChecksum,
+  // Constants
+  EXTENT_MAGIC,
+  EXTENT_VERSION,
+  EXTENT_HEADER_SIZE,
+  EXTENT_FLAG_COMPRESSED,
+  // Types
+  type ExtentHeader,
+  type BuildExtentOptions,
+} from './extent-format.js'
