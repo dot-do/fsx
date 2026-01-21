@@ -590,6 +590,7 @@ export class FsServiceClient {
 
       await this.call('streamReadEnd', { sessionId })
     } catch (error) {
+      // Best-effort abort: already throwing the original error, can't handle abort failure
       await this.call('streamAbort', { sessionId }).catch(() => {})
       throw error
     }
@@ -665,6 +666,7 @@ export class FsServiceClient {
 
       return await this.call('streamWriteEnd', { sessionId })
     } catch (error) {
+      // Best-effort abort: already throwing the original error, can't handle abort failure
       await this.call('streamAbort', { sessionId }).catch(() => {})
       throw error
     }
@@ -876,13 +878,13 @@ export class FsServiceClient {
 interface StreamSession {
   type: 'read' | 'write'
   path: string
-  data?: Uint8Array
-  chunks?: Uint8Array[]
+  data?: Uint8Array | undefined
+  chunks?: Uint8Array[] | undefined
   totalSize: number
   chunkSize: number
   position: number
   createdAt: number
-  options?: StreamReadOptions | StreamWriteOptions
+  options?: StreamReadOptions | StreamWriteOptions | undefined
 }
 
 /**
@@ -1138,7 +1140,10 @@ export class FsServiceHandler {
 
     for (const path of paths) {
       try {
-        await this.fs.rm(path, { recursive: options?.recursive, force: options?.force })
+        await this.fs.rm(path, {
+          ...(options?.recursive !== undefined && { recursive: options.recursive }),
+          ...(options?.force !== undefined && { force: options.force }),
+        })
         succeeded++
         results.push({ path, success: true })
       } catch (error) {
@@ -1410,7 +1415,9 @@ export class FsServiceHandler {
         succeeded++
       } else {
         try {
-          await this.fs.copyFile(srcPath, destPath, { overwrite: options?.overwrite })
+          await this.fs.copyFile(srcPath, destPath, {
+            ...(options?.overwrite !== undefined && { overwrite: options.overwrite }),
+          })
           results.push({ path: destPath, success: true })
           succeeded++
         } catch (error) {
@@ -1440,7 +1447,9 @@ export class FsServiceHandler {
     const startTime = Date.now()
 
     try {
-      await this.fs.rename(src, dest, { overwrite: options?.overwrite })
+      await this.fs.rename(src, dest, {
+        ...(options?.overwrite !== undefined && { overwrite: options.overwrite }),
+      })
       return {
         total: 1,
         succeeded: 1,
@@ -1502,7 +1511,7 @@ export class FsServiceHandler {
 
     let hashBuffer: ArrayBuffer
     if (alg === 'sha256') {
-      hashBuffer = await crypto.subtle.digest('SHA-256', data)
+      hashBuffer = await crypto.subtle.digest('SHA-256', data as BufferSource)
     } else {
       // MD5 is not available in Web Crypto - would need a polyfill
       throw Object.assign(new Error('MD5 not supported'), { code: 'UNSUPPORTED_ALGORITHM' })
@@ -1519,7 +1528,10 @@ export class FsServiceHandler {
     expectedChecksum,
     algorithm,
   }: FsServiceMethods['verify']['params']): Promise<FsServiceMethods['verify']['result']> {
-    const result = await this.handleChecksum({ path, algorithm })
+    const result = await this.handleChecksum({
+      path,
+      ...(algorithm !== undefined && { algorithm }),
+    })
     return {
       valid: result.checksum === expectedChecksum.toLowerCase(),
       actualChecksum: result.checksum,

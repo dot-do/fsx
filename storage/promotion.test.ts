@@ -1080,6 +1080,7 @@ describe('R2 Promotion Manager', () => {
         return originalPut(key, value)
       }
 
+      // Expected to fail due to mocked KV error - testing failure tracking
       await promotionManager.promotePage('cold-page-1').catch(() => {})
 
       const metrics = promotionManager.getMetrics()
