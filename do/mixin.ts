@@ -29,11 +29,20 @@ import { FsModule, type FsModuleConfig } from './module.js'
 
 /**
  * Constructor type for class mixins.
- * Using `unknown[]` instead of `any[]` would break mixin patterns,
- * so `any[]` is the standard TypeScript pattern here.
+ *
+ * TypeScript mixins require `any[]` for the constructor rest parameter (TS2545).
+ * Using `unknown[]` would break mixin patterns. The generic constraint
+ * `T extends object = object` ensures the constructor returns an object type,
+ * providing basic type safety.
+ *
+ * Note: This is defined locally rather than imported from @dotdo/utils because
+ * fsx is a semi-independent package excluded from the monorepo's path aliases.
+ *
+ * @template T - The instance type returned by the constructor (constrained to object)
  */
+// TypeScript mixin pattern requires `any` for constructor type parameters (TS2545)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Constructor<T = object> = new (...args: any[]) => T
+type Constructor<T extends object = object> = new (...args: any[]) => T
 
 /**
  * Base interface for classes that have a WorkflowContext ($)
@@ -128,11 +137,21 @@ const fsCapabilityCache = new WeakMap<object, FsModule>()
  * }
  * ```
  */
+/**
+ * Interface for classes that have fs capabilities
+ */
+export interface HasFs {
+  /** Check if this DO has a specific capability */
+  hasCapability(name: string): boolean
+  /** Internal fs module accessor */
+  readonly _fsCapability: FsModule
+}
+
 export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurableObjectContext>>(
   Base: TBase,
   options: WithFsOptions = {}
-) {
-  return class WithFs extends Base {
+): Constructor<HasFs> & TBase {
+  return class WithFs extends Base implements HasFs {
     /**
      * Static capabilities array for introspection
      */
@@ -178,6 +197,7 @@ export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurable
       return false
     }
 
+    // Mixin constructors must use `any[]` to accept arbitrary base class constructor args
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     constructor(...args: any[]) {
       super(...args)
@@ -219,7 +239,7 @@ export function withFs<TBase extends Constructor<HasWorkflowContext & HasDurable
         },
       })
     }
-  }
+  } as Constructor<HasFs> & TBase
 }
 
 // ============================================================================

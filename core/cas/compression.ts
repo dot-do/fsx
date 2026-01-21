@@ -10,10 +10,7 @@
  * This format is compatible with git's object storage.
  */
 
-// @ts-expect-error - pako types (@types/pako) not included in tsconfig.json 'types' array.
-// The fsx package uses a restricted types array for Cloudflare Workers compatibility.
-// Installing @types/pako or adding to types array would fix this, but is low priority.
-import pako from 'pako'
+import * as pako from 'pako'
 
 /**
  * Compression level from 0-9
