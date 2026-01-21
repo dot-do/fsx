@@ -35,6 +35,9 @@
  */
 
 import type { ExtentStorage } from '../storage/extent-storage.js'
+import { createLogger } from '../../utils/logger'
+
+const logger = createLogger('[ExtentSQLiteVFS]')
 
 // =============================================================================
 // SQLite Constants
@@ -340,7 +343,7 @@ export class ExtentSQLiteVFS implements SQLiteVFS {
    */
   private log(method: string, ...args: unknown[]): void {
     if (this.debug) {
-      console.log(`[ExtentSQLiteVFS.${method}]`, ...args)
+      logger.debug(`[${method}]`, ...args)
     }
   }
 

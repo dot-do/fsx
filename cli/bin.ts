@@ -16,6 +16,9 @@ import { runCLI } from './index.js'
 import { FSx } from '../core/fsx.js'
 import { MemoryBackend } from '../core/backend.js'
 import type { Dirent } from '../core/types.js'
+import { createLogger } from '../../utils/logger'
+
+const logger = createLogger('[fsx-cli]')
 
 // Create a shared filesystem instance
 const backend = new MemoryBackend()
@@ -58,10 +61,13 @@ const cliFs = {
   mkdir: async (path: string, options?: { recursive?: boolean }): Promise<void> => {
     await fs.mkdir(path, options)
   },
-  rm: async (path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void> => {
-    await fs.rm(path, options)
+  rm: async (path: string, options?: { recursive?: boolean | undefined; force?: boolean | undefined }): Promise<void> => {
+    await fs.rm(path, {
+      ...(options?.recursive !== undefined && { recursive: options.recursive }),
+      ...(options?.force !== undefined && { force: options.force }),
+    })
   },
-  cp: async (src: string, dest: string, _options?: { recursive?: boolean }): Promise<void> => {
+  cp: async (src: string, dest: string, _options?: { recursive?: boolean | undefined }): Promise<void> => {
     await fs.copyFile(src, dest)
   },
   exists: async (path: string): Promise<boolean> => {
@@ -84,6 +90,6 @@ runCLI(args, context)
     process.exit(result.exitCode)
   })
   .catch(err => {
-    console.error('Fatal error:', err)
+    logger.error('Fatal error:', err)
     process.exit(1)
   })
