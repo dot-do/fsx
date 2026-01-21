@@ -194,7 +194,6 @@ export class CloudflareContainerExecutor {
   private defaultEnv: Record<string, string>
   private defaultCwd: string
   // Reserved for future logging implementation
-  // @ts-expect-error Reserved for future logging implementation
   private _enableLogging: boolean
   private instance: ContainerInstance | null = null
 

@@ -247,7 +247,6 @@ describe('Mode Detection Helpers (RED - will fail)', () => {
   // This is expected in RED phase
 
   it('should detect regular files with isFile()', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { isFile } = await import('./constants')
 
     const regularFile = constants.S_IFREG | 0o644
@@ -258,7 +257,6 @@ describe('Mode Detection Helpers (RED - will fail)', () => {
   })
 
   it('should detect directories with isDirectory()', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { isDirectory } = await import('./constants')
 
     const directory = constants.S_IFDIR | 0o755
@@ -269,7 +267,6 @@ describe('Mode Detection Helpers (RED - will fail)', () => {
   })
 
   it('should detect symbolic links with isSymlink()', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { isSymlink } = await import('./constants')
 
     const symlink = constants.S_IFLNK | 0o777
@@ -280,7 +277,6 @@ describe('Mode Detection Helpers (RED - will fail)', () => {
   })
 
   it('should detect block devices with isBlockDevice()', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { isBlockDevice } = await import('./constants')
 
     const blockDevice = constants.S_IFBLK | 0o660
@@ -291,7 +287,6 @@ describe('Mode Detection Helpers (RED - will fail)', () => {
   })
 
   it('should detect character devices with isCharacterDevice()', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { isCharacterDevice } = await import('./constants')
 
     const charDevice = constants.S_IFCHR | 0o660
@@ -302,7 +297,6 @@ describe('Mode Detection Helpers (RED - will fail)', () => {
   })
 
   it('should detect FIFOs with isFIFO()', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { isFIFO } = await import('./constants')
 
     const fifo = constants.S_IFIFO | 0o644
@@ -313,7 +307,6 @@ describe('Mode Detection Helpers (RED - will fail)', () => {
   })
 
   it('should detect sockets with isSocket()', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { isSocket } = await import('./constants')
 
     const socket = constants.S_IFSOCK | 0o755
@@ -326,7 +319,6 @@ describe('Mode Detection Helpers (RED - will fail)', () => {
 
 describe('Permission Checking Helpers (RED - will fail)', () => {
   it('should check if mode has read permission', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { hasReadPermission } = await import('./constants')
 
     const readableFile = 0o644
@@ -339,7 +331,6 @@ describe('Permission Checking Helpers (RED - will fail)', () => {
   })
 
   it('should check if mode has write permission', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { hasWritePermission } = await import('./constants')
 
     const writableFile = 0o644
@@ -349,7 +340,6 @@ describe('Permission Checking Helpers (RED - will fail)', () => {
   })
 
   it('should check if mode has execute permission', async () => {
-    // @ts-expect-error - Function doesn't exist yet (RED phase)
     const { hasExecutePermission } = await import('./constants')
 
     const executableFile = 0o755

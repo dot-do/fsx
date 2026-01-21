@@ -579,7 +579,6 @@ describe('R2Storage Edge Cases (RED Phase)', () => {
       await storage.put('/suffix-range.txt', data)
 
       // Get last 5 bytes using suffix range
-      // @ts-expect-error - Method signature needs to support suffix
       const result = await storage.getRangeSuffix('/suffix-range.txt', 5)
 
       expect(result).not.toBeNull()
@@ -787,7 +786,6 @@ describe('R2Storage Edge Cases (RED Phase)', () => {
       const partData = new Uint8Array(5 * 1024 * 1024) // 5MB part
 
       // Try to upload more than 10000 parts
-      // @ts-expect-error - Testing constraint
       await expect(upload.uploadPart(10001, partData)).rejects.toThrow()
     })
 
@@ -934,20 +932,17 @@ describe('R2Storage Edge Cases (RED Phase)', () => {
       // Calculate expected MD5 (in real impl, would use crypto)
       const expectedMd5 = 'expected-md5-hash'
 
-      // @ts-expect-error - Checksum options not implemented
       await storage.put('/checksummed.txt', data, {
         md5: expectedMd5,
       })
 
       const head = await storage.head('/checksummed.txt')
-      // @ts-expect-error - Checksum not in metadata type
       expect(head!.md5).toBe(expectedMd5)
     })
 
     it('should reject upload with mismatched checksum', async () => {
       const data = new TextEncoder().encode('checksum test data')
 
-      // @ts-expect-error - Checksum options not implemented
       await expect(
         storage.put('/bad-checksum.txt', data, {
           md5: 'wrong-md5-hash',

@@ -703,7 +703,6 @@ describe('SparseFS', () => {
 
       it('should throw on unknown preset name', () => {
         expect(() => {
-          // @ts-expect-error - Testing runtime error
           SparseFS.fromPreset(fs, 'unknown-preset')
         }).toThrow(/Unknown preset.*unknown-preset/)
       })

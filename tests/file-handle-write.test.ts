@@ -280,7 +280,6 @@ describe('FileHandle.write()', () => {
       const handle = createFileHandle(initialData, appendStats)
 
       // Mark handle as append mode (implementation detail)
-      // @ts-expect-error Accessing private for testing
       handle._appendMode = true
 
       // Even when specifying position 0, append mode should write at end
@@ -297,7 +296,6 @@ describe('FileHandle.write()', () => {
     it('should ignore position parameter in append mode', async () => {
       const initialData = new TextEncoder().encode('AB')
       const handle = createFileHandle(initialData)
-      // @ts-expect-error Accessing private for testing
       handle._appendMode = true
 
       // Try to write at position 0, but append mode should write at end
@@ -344,7 +342,6 @@ describe('FileHandle.write()', () => {
       const handle = createFileHandle(new Uint8Array(10), readOnlyStats)
 
       // Mark handle as read-only (implementation detail)
-      // @ts-expect-error Accessing private for testing
       handle._writable = false
 
       await expect(handle.write(new Uint8Array([1, 2, 3]))).rejects.toThrow()
@@ -352,7 +349,6 @@ describe('FileHandle.write()', () => {
 
     it('should throw EBADF error for read-only handle write attempt', async () => {
       const handle = createFileHandle()
-      // @ts-expect-error Accessing private for testing
       handle._writable = false
 
       try {
@@ -626,7 +622,6 @@ describe('FileHandle.write()', () => {
       const view = new Uint8Array(buffer)
       view.set([1, 2, 3, 4, 5])
 
-      // @ts-expect-error Testing ArrayBuffer support
       const result = await handle.write(buffer)
 
       expect(result.bytesWritten).toBe(5)

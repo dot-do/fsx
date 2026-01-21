@@ -235,7 +235,6 @@ export class TieredR2Storage {
    * @internal Reserved for automatic tier migration based on access patterns
    */
   // Reserved for future tier migration implementation
-  // @ts-expect-error Reserved for future tier migration
   private _determineTierByAge(lastAccess: number, now: number = Date.now()): StorageTier {
     const ageMs = now - lastAccess
     const ageDays = ageMs / MS_PER_DAY
@@ -320,7 +319,6 @@ export class TieredR2Storage {
    * @internal Reserved for future tier migration based on access patterns
    */
   // Reserved for future tier migration implementation
-  // @ts-expect-error Reserved for future tier migration
   private async _getAccessMetadata(key: string): Promise<AccessMetadataRow | null> {
     if (!this.sql) return null
 

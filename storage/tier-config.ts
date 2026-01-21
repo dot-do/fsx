@@ -97,8 +97,29 @@ export interface FileMetadata {
 
 export interface ConfigChangeEvent {
   field: string
-  oldValue: any
-  newValue: any
+  oldValue: unknown
+  newValue: unknown
+}
+
+/**
+ * Configuration output for TieredFS
+ */
+export interface TieredFSConfig {
+  thresholds: TierThresholds
+  warmEnabled: boolean
+  coldEnabled: boolean
+  promotionPolicy: PromotionPolicy
+  demotionPolicy: DemotionPolicy
+}
+
+/**
+ * Configuration output for TieredR2Storage
+ */
+export interface TieredR2Config {
+  policy: {
+    hotMaxAgeDays: number
+    warmMaxAgeDays: number
+  }
 }
 
 // ===========================================================================
@@ -844,7 +865,7 @@ export class TierConfig {
   // Integration
   // ---------------------------------------------------------------------------
 
-  toTieredFSConfig(): any {
+  toTieredFSConfig(): TieredFSConfig {
     return {
       thresholds: { ...this._thresholds },
       warmEnabled: this._warmEnabled,
@@ -854,7 +875,7 @@ export class TierConfig {
     }
   }
 
-  toTieredR2Config(): any {
+  toTieredR2Config(): TieredR2Config {
     return {
       policy: {
         hotMaxAgeDays: this._demotionThresholds.hotMaxAgeDays,

@@ -72,9 +72,9 @@ export class StorageError extends Error {
     code: StorageErrorCode,
     message: string,
     options?: {
-      path?: string
-      cause?: Error
-      operation?: string
+      path?: string | undefined
+      cause?: Error | undefined
+      operation?: string | undefined
     }
   ) {
     super(message)
@@ -150,10 +150,10 @@ export interface StorageOperationContext {
   path: string
 
   /** Storage tier involved (if applicable) */
-  tier?: StorageTier
+  tier?: StorageTier | undefined
 
   /** Size in bytes (for put/get operations) */
-  size?: number
+  size?: number | undefined
 
   /** Operation start timestamp (Unix ms) */
   startTime: number
@@ -170,16 +170,16 @@ export interface StorageOperationResult {
   durationMs: number
 
   /** Error (if operation failed) */
-  error?: StorageError
+  error?: StorageError | undefined
 
   /** Size in bytes (for get operations) */
-  size?: number
+  size?: number | undefined
 
   /** Storage tier used */
-  tier?: StorageTier
+  tier?: StorageTier | undefined
 
   /** Whether a tier migration occurred */
-  migrated?: boolean
+  migrated?: boolean | undefined
 }
 
 /**

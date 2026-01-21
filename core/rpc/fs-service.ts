@@ -100,15 +100,15 @@ export interface BatchOperationResult {
   /** Whether the operation succeeded */
   success: boolean
   /** Error message if failed */
-  error?: string
+  error?: string | undefined
   /** Error code if failed */
-  code?: string
+  code?: string | undefined
   /** Bytes written/read */
-  bytes?: number
+  bytes?: number | undefined
   /** Storage tier used */
-  tier?: StorageTier
+  tier?: StorageTier | undefined
   /** File checksum (SHA-256) */
-  checksum?: string
+  checksum?: string | undefined
 }
 
 /**
@@ -256,7 +256,7 @@ export interface RpcResponse<T = unknown> {
     details?: unknown
   }
   /** Request ID for correlation */
-  id?: string
+  id?: string | undefined
   /** Duration in milliseconds */
   durationMs?: number
 }
@@ -280,7 +280,7 @@ export interface FsServiceMethods {
    * Read multiple files in a single RPC call
    */
   batchRead: {
-    params: { paths: string[]; options?: BatchReadOptions }
+    params: { paths: string[]; options?: BatchReadOptions | undefined }
     result: BatchResult & { contents: Map<string, string | Uint8Array> }
   }
 
@@ -288,7 +288,7 @@ export interface FsServiceMethods {
    * Write multiple files in a single RPC call
    */
   batchWrite: {
-    params: { files: BatchFileItem[]; options?: BatchWriteOptions }
+    params: { files: BatchFileItem[]; options?: BatchWriteOptions | undefined }
     result: BatchResult
   }
 
@@ -296,7 +296,7 @@ export interface FsServiceMethods {
    * Delete multiple files/directories in a single RPC call
    */
   batchDelete: {
-    params: { paths: string[]; options?: BatchDeleteOptions }
+    params: { paths: string[]; options?: BatchDeleteOptions | undefined }
     result: BatchResult
   }
 
@@ -316,7 +316,7 @@ export interface FsServiceMethods {
    * Start a streaming read session
    */
   streamReadStart: {
-    params: { path: string; options?: StreamReadOptions }
+    params: { path: string; options?: StreamReadOptions | undefined }
     result: { sessionId: string; totalSize: number; totalChunks: number; chunkSize: number }
   }
 
@@ -340,7 +340,7 @@ export interface FsServiceMethods {
    * Start a streaming write session
    */
   streamWriteStart: {
-    params: { path: string; totalSize: number; options?: StreamWriteOptions }
+    params: { path: string; totalSize: number; options?: StreamWriteOptions | undefined }
     result: { sessionId: string; chunkSize: number }
   }
 
@@ -376,7 +376,7 @@ export interface FsServiceMethods {
    * Copy a directory tree
    */
   copyTree: {
-    params: { src: string; dest: string; options?: { overwrite?: boolean; preserveMetadata?: boolean } }
+    params: { src: string; dest: string; options?: { overwrite?: boolean; preserveMetadata?: boolean } | undefined }
     result: BatchResult
   }
 
@@ -384,7 +384,7 @@ export interface FsServiceMethods {
    * Move a directory tree
    */
   moveTree: {
-    params: { src: string; dest: string; options?: { overwrite?: boolean } }
+    params: { src: string; dest: string; options?: { overwrite?: boolean } | undefined }
     result: BatchResult
   }
 
