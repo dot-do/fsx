@@ -28,6 +28,22 @@
     "./client": {
       "types": "./dist/client/index.d.ts",
       "import": "./dist/client/index.js"
+    },
+    "./compression": {
+      "types": "./dist/storage/compression/index.d.ts",
+      "import": "./dist/storage/compression/index.js"
+    },
+    "./compression/gzip": {
+      "types": "./dist/storage/compression/gzip.d.ts",
+      "import": "./dist/storage/compression/gzip.js"
+    },
+    "./compression/lz4": {
+      "types": "./dist/storage/compression/lz4.d.ts",
+      "import": "./dist/storage/compression/lz4.js"
+    },
+    "./compression/zstd": {
+      "types": "./dist/storage/compression/zstd.d.ts",
+      "import": "./dist/storage/compression/zstd.js"
     }
   },
   "files": [
