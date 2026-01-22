@@ -53,6 +53,10 @@ import {
   createCleanupSchedulerState,
   DEFAULT_CLEANUP_CONFIG,
 } from '../storage/blob-utils.js'
+import { createPageStorage, CHUNK_SIZE as PAGE_CHUNK_SIZE, type PageStorage } from '../storage/page-storage.js'
+
+// Re-export CHUNK_SIZE for consumers
+export { CHUNK_SIZE } from '../storage/page-storage.js'
 
 // Re-export security module for backward compatibility
 export { PathValidator, pathValidator, SecurityConstants } from './security.js'
@@ -91,6 +95,8 @@ export { TransactionManager, type TransactionManagerConfig, type TransactionLogE
 export interface FsModuleConfig {
   /** SQLite storage instance from Durable Object context */
   sql: SqlStorage
+  /** Optional Durable Object storage instance for PageStorage chunking */
+  storage?: DurableObjectStorage
   /** Optional R2 bucket for warm tier storage */
   r2?: R2Bucket
   /** Optional R2 bucket for cold/archive tier storage */
@@ -99,6 +105,12 @@ export interface FsModuleConfig {
   basePath?: string
   /** Hot tier max size in bytes (default: 1MB) */
   hotMaxSize?: number
+  /**
+   * Threshold for using PageStorage chunking (default: 1MB).
+   * Blobs larger than this will be chunked into 2MB pages for cost optimization.
+   * Set to 0 to disable chunking, or a large value to always use inline storage.
+   */
+  chunkingThreshold?: number
   /** Default file mode (default: 0o644) */
   defaultMode?: number
   /** Default directory mode (default: 0o755) */
@@ -197,6 +209,10 @@ export const FILES_TABLE_COLUMNS = {
  * Stores binary content with tiered storage support.
  * Content-addressable: id is derived from SHA-256 hash of content.
  * ref_count tracks how many files reference this blob for dedup and cleanup.
+ *
+ * For large blobs (>chunkingThreshold), data is stored via PageStorage:
+ * - is_chunked: 1 if blob is chunked, 0 otherwise
+ * - page_keys: JSON array of page keys for chunked blobs
  */
 export const BLOBS_TABLE_COLUMNS = {
   id: { type: 'TEXT', constraints: 'PRIMARY KEY' },
@@ -206,6 +222,8 @@ export const BLOBS_TABLE_COLUMNS = {
   tier: { type: 'TEXT', constraints: `NOT NULL DEFAULT 'hot' CHECK(tier IN (${STORAGE_TIERS.map((t) => `'${t}'`).join(', ')}))` },
   ref_count: { type: 'INTEGER', constraints: 'NOT NULL DEFAULT 1' },
   created_at: { type: 'INTEGER', constraints: 'NOT NULL' },
+  is_chunked: { type: 'INTEGER', constraints: 'NOT NULL DEFAULT 0' },
+  page_keys: { type: 'TEXT', constraints: '' },
 } as const
 
 /**
@@ -313,6 +331,10 @@ export class FsModule implements FsCapability {
   private cleanupConfig: Required<CleanupConfig>
   private cleanupState: CleanupSchedulerState
 
+  // PageStorage for 2MB chunking optimization
+  private pageStorage?: PageStorage
+  private chunkingThreshold: number
+
   constructor(config: FsModuleConfig) {
     this.sql = config.sql
     this.r2 = config.r2
@@ -323,6 +345,13 @@ export class FsModule implements FsCapability {
     this.defaultDirMode = config.defaultDirMode ?? DEFAULT_DIR_MODE
     this.cleanupConfig = { ...DEFAULT_CLEANUP_CONFIG, ...config.cleanupConfig }
     this.cleanupState = createCleanupSchedulerState()
+
+    // Initialize PageStorage if storage is provided
+    // Default chunking threshold is 1MB - blobs larger than this will be chunked
+    this.chunkingThreshold = config.chunkingThreshold ?? 1024 * 1024 // 1MB
+    if (config.storage) {
+      this.pageStorage = createPageStorage({ storage: config.storage })
+    }
   }
 
   // ===========================================================================
@@ -592,6 +621,9 @@ export class FsModule implements FsCapability {
    *
    * Optimized deduplication: uses single query to check existence
    * and atomic UPDATE for ref_count increment.
+   *
+   * For large blobs (>chunkingThreshold), uses PageStorage for 2MB chunking
+   * to optimize DO SQLite costs (per-row pricing, not per-byte).
    */
   private async storeBlob(data: Uint8Array, tier: StorageTier): Promise<string> {
     const now = Date.now()
@@ -610,39 +642,71 @@ export class FsModule implements FsCapability {
       return blobId
     }
 
+    // Determine if we should use chunking for hot tier
+    // Chunking is only beneficial for hot tier (SQLite) where per-row pricing applies
+    // For warm/cold tiers (R2), chunking adds overhead without cost benefit
+    const shouldChunk = tier === 'hot' &&
+      this.pageStorage &&
+      this.chunkingThreshold > 0 &&
+      data.length > this.chunkingThreshold
+
     // New blob - store with ref_count = 1
     if (tier === 'hot') {
-      this.sql.exec(
-        'INSERT INTO blobs (id, data, size, checksum, tier, ref_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        blobId,
-        data.buffer,
-        data.length,
-        checksum,
-        tier,
-        1,
-        now
-      )
+      if (shouldChunk) {
+        // Use PageStorage for 2MB chunking optimization
+        const pageKeys = await this.pageStorage!.writePages(blobId, data)
+        this.sql.exec(
+          'INSERT INTO blobs (id, data, size, checksum, tier, ref_count, created_at, is_chunked, page_keys) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          blobId,
+          null, // No inline data for chunked blobs
+          data.length,
+          checksum,
+          tier,
+          1,
+          now,
+          1, // is_chunked = true
+          JSON.stringify(pageKeys)
+        )
+      } else {
+        // Store inline for small blobs
+        this.sql.exec(
+          'INSERT INTO blobs (id, data, size, checksum, tier, ref_count, created_at, is_chunked, page_keys) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          blobId,
+          data.buffer,
+          data.length,
+          checksum,
+          tier,
+          1,
+          now,
+          0, // is_chunked = false
+          null
+        )
+      }
     } else if (tier === 'warm' && this.r2) {
       await this.r2.put(blobId, data)
       this.sql.exec(
-        'INSERT INTO blobs (id, size, checksum, tier, ref_count, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO blobs (id, size, checksum, tier, ref_count, created_at, is_chunked, page_keys) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         blobId,
         data.length,
         checksum,
         tier,
         1,
-        now
+        now,
+        0, // R2 stores as single object, not chunked
+        null
       )
     } else if (tier === 'cold' && this.archive) {
       await this.archive.put(blobId, data)
       this.sql.exec(
-        'INSERT INTO blobs (id, size, checksum, tier, ref_count, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO blobs (id, size, checksum, tier, ref_count, created_at, is_chunked, page_keys) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         blobId,
         data.length,
         checksum,
         tier,
         1,
-        now
+        now,
+        0, // Archive R2 stores as single object, not chunked
+        null
       )
     }
 
@@ -679,6 +743,21 @@ export class FsModule implements FsCapability {
    * Completely delete a blob from storage
    */
   private async deleteBlobCompletely(blobId: string, tier: StorageTier): Promise<void> {
+    // Check if blob is chunked before deleting
+    if (tier === 'hot' && this.pageStorage) {
+      const blobInfo = this.sql.exec<{ is_chunked: number; page_keys: string | null }>(
+        'SELECT is_chunked, page_keys FROM blobs WHERE id = ?',
+        blobId
+      ).toArray()
+      const firstBlob = blobInfo[0]
+
+      if (firstBlob?.is_chunked === 1 && firstBlob.page_keys) {
+        // Delete pages from PageStorage
+        const pageKeys = JSON.parse(firstBlob.page_keys) as string[]
+        await this.pageStorage.deletePages(pageKeys)
+      }
+    }
+
     this.sql.exec('DELETE FROM blobs WHERE id = ?', blobId)
 
     if (tier === 'warm' && this.r2) {
@@ -698,9 +777,22 @@ export class FsModule implements FsCapability {
   private async getBlob(id: string, tier: 'hot' | 'warm' | 'cold'): Promise<Uint8Array | null> {
     if (tier === 'hot') {
       // Note: Use .toArray() instead of .one() since .one() throws if no results
-      const blobs = this.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', id).toArray()
+      const blobs = this.sql.exec<{ data: ArrayBuffer | null; is_chunked: number; page_keys: string | null }>(
+        'SELECT data, is_chunked, page_keys FROM blobs WHERE id = ?',
+        id
+      ).toArray()
       const firstBlob = blobs[0]
-      if (!firstBlob?.data) return null
+      if (!firstBlob) return null
+
+      // Check if blob is chunked
+      if (firstBlob.is_chunked === 1 && firstBlob.page_keys && this.pageStorage) {
+        // Read from PageStorage
+        const pageKeys = JSON.parse(firstBlob.page_keys) as string[]
+        return this.pageStorage.readPages(id, pageKeys)
+      }
+
+      // Inline blob
+      if (!firstBlob.data) return null
       return new Uint8Array(firstBlob.data)
     }
 
@@ -1902,25 +1994,80 @@ export class FsModule implements FsCapability {
     fromTier: StorageTier,
     toTier: StorageTier
   ): Promise<void> {
+    // Get current blob state to check if it's chunked
+    const currentBlob = this.sql.exec<{ is_chunked: number; page_keys: string | null }>(
+      'SELECT is_chunked, page_keys FROM blobs WHERE id = ?',
+      blobId
+    ).toArray()
+    const blobInfo = currentBlob[0]
+
+    // Determine if we should use chunking for hot tier
+    const shouldChunk = toTier === 'hot' &&
+      this.pageStorage &&
+      this.chunkingThreshold > 0 &&
+      data.length > this.chunkingThreshold
+
     // Store data in new tier
     if (toTier === 'hot') {
-      // Hot tier stores data inline in SQLite
-      this.sql.exec('UPDATE blobs SET data = ?, tier = ? WHERE id = ?', data.buffer, toTier, blobId)
+      // Clean up old chunks if moving FROM hot tier with chunks
+      if (fromTier === 'hot' && blobInfo?.is_chunked === 1 && blobInfo.page_keys && this.pageStorage) {
+        const oldPageKeys = JSON.parse(blobInfo.page_keys) as string[]
+        await this.pageStorage.deletePages(oldPageKeys)
+      }
+
+      if (shouldChunk) {
+        // Use PageStorage for 2MB chunking optimization
+        const pageKeys = await this.pageStorage!.writePages(blobId, data)
+        this.sql.exec(
+          'UPDATE blobs SET data = NULL, tier = ?, is_chunked = ?, page_keys = ? WHERE id = ?',
+          toTier,
+          1,
+          JSON.stringify(pageKeys),
+          blobId
+        )
+      } else {
+        // Hot tier stores data inline in SQLite
+        this.sql.exec(
+          'UPDATE blobs SET data = ?, tier = ?, is_chunked = ?, page_keys = ? WHERE id = ?',
+          data.buffer,
+          toTier,
+          0,
+          null,
+          blobId
+        )
+      }
     } else if (toTier === 'warm' && this.r2) {
       await this.r2.put(blobId, data)
-      this.sql.exec('UPDATE blobs SET data = NULL, tier = ? WHERE id = ?', toTier, blobId)
+      this.sql.exec(
+        'UPDATE blobs SET data = NULL, tier = ?, is_chunked = ?, page_keys = ? WHERE id = ?',
+        toTier,
+        0,
+        null,
+        blobId
+      )
     } else if (toTier === 'cold' && this.archive) {
       await this.archive.put(blobId, data)
-      this.sql.exec('UPDATE blobs SET data = NULL, tier = ? WHERE id = ?', toTier, blobId)
+      this.sql.exec(
+        'UPDATE blobs SET data = NULL, tier = ?, is_chunked = ?, page_keys = ? WHERE id = ?',
+        toTier,
+        0,
+        null,
+        blobId
+      )
     }
 
     // Clean up old tier data
+    if (fromTier === 'hot' && blobInfo?.is_chunked === 1 && blobInfo.page_keys && this.pageStorage && toTier !== 'hot') {
+      // Delete pages from PageStorage when moving away from hot tier
+      const oldPageKeys = JSON.parse(blobInfo.page_keys) as string[]
+      await this.pageStorage.deletePages(oldPageKeys)
+    }
     if (fromTier === 'warm' && this.r2) {
       await this.r2.delete(blobId)
     } else if (fromTier === 'cold' && this.archive) {
       await this.archive.delete(blobId)
     }
-    // Hot tier data is overwritten in place, no cleanup needed
+    // Hot tier inline data is overwritten in place, no cleanup needed
   }
 
   async getTier(path: string): Promise<'hot' | 'warm' | 'cold'> {

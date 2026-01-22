@@ -1233,9 +1233,13 @@ export class FsServiceHandler {
       throw Object.assign(new Error('Invalid session'), { code: 'INVALID_SESSION' })
     }
 
+    if (!session.data) {
+      throw Object.assign(new Error('Session data missing'), { code: 'INVALID_SESSION' })
+    }
+
     const offset = chunkIndex * session.chunkSize
     const end = Math.min(offset + session.chunkSize, session.totalSize)
-    const data = session.data!.slice(offset, end)
+    const data = session.data.slice(offset, end)
     const totalChunks = Math.ceil(session.totalSize / session.chunkSize)
 
     return {
@@ -1292,13 +1296,17 @@ export class FsServiceHandler {
       throw Object.assign(new Error('Invalid session'), { code: 'INVALID_SESSION' })
     }
 
+    if (!session.chunks) {
+      throw Object.assign(new Error('Session chunks missing'), { code: 'INVALID_SESSION' })
+    }
+
     // Handle chunk.data which may come in various formats:
     // - Uint8Array (direct call)
     // - number[] (JSON serialization of Uint8Array)
     // - object with numeric keys (JSON object representation)
     const data = this.toUint8Array(chunk.data)
 
-    session.chunks!.push(data)
+    session.chunks.push(data)
     session.position += data.length
 
     return { success: true, bytesWritten: data.length }
@@ -1349,11 +1357,15 @@ export class FsServiceHandler {
       throw Object.assign(new Error('Invalid session'), { code: 'INVALID_SESSION' })
     }
 
+    if (!session.chunks) {
+      throw Object.assign(new Error('Session chunks missing'), { code: 'INVALID_SESSION' })
+    }
+
     // Combine chunks
-    const totalLength = session.chunks!.reduce((sum, c) => sum + c.length, 0)
+    const totalLength = session.chunks.reduce((sum, c) => sum + c.length, 0)
     const combined = new Uint8Array(totalLength)
     let offset = 0
-    for (const chunk of session.chunks!) {
+    for (const chunk of session.chunks) {
       combined.set(chunk, offset)
       offset += chunk.length
     }

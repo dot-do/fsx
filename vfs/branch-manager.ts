@@ -433,6 +433,18 @@ export class GitBranchManager implements BranchManager {
     }
   }
 
+  /**
+   * Get the current branch with type narrowing.
+   * Must be called after ensureInit() to be valid.
+   * @throws BranchError if not initialized
+   */
+  private getCurrentBranchChecked(): Branch {
+    if (!this.currentBranch) {
+      throw BranchError.notInitialized()
+    }
+    return this.currentBranch
+  }
+
   // ===========================================================================
   // Branch Operations
   // ===========================================================================
@@ -513,7 +525,7 @@ export class GitBranchManager implements BranchManager {
       throw BranchError.branchNotFound(name)
     }
 
-    if (branch.id.value === this.currentBranch!.id.value) {
+    if (branch.id.value === this.getCurrentBranchChecked().id.value) {
       throw BranchError.cannotDeleteCurrent()
     }
 
@@ -613,7 +625,7 @@ export class GitBranchManager implements BranchManager {
   async writePage(fileId: string, pageNum: number, data: Uint8Array): Promise<void> {
     this.ensureInit()
 
-    const branchId = this.currentBranch!.id
+    const branchId = this.getCurrentBranchChecked().id
     const storage = await this.getExtentStorageForBranch(branchId)
 
     // Write to current branch's extent storage
@@ -673,7 +685,7 @@ export class GitBranchManager implements BranchManager {
   async truncate(fileId: string, size: number): Promise<void> {
     this.ensureInit()
 
-    const branchId = this.currentBranch!.id
+    const branchId = this.getCurrentBranchChecked().id
     const storage = await this.getExtentStorageForBranch(branchId)
 
     await storage.truncate(this.getBranchFileId(branchId, fileId), size)
@@ -691,7 +703,7 @@ export class GitBranchManager implements BranchManager {
   async deleteFile(fileId: string): Promise<void> {
     this.ensureInit()
 
-    const branchId = this.currentBranch!.id
+    const branchId = this.getCurrentBranchChecked().id
     const storage = await this.getExtentStorageForBranch(branchId)
 
     // Delete from extent storage
@@ -754,7 +766,7 @@ export class GitBranchManager implements BranchManager {
   async flush(): Promise<void> {
     this.ensureInit()
 
-    const storage = await this.getExtentStorageForBranch(this.currentBranch!.id)
+    const storage = await this.getExtentStorageForBranch(this.getCurrentBranchChecked().id)
     await storage.flush()
   }
 
@@ -774,7 +786,7 @@ export class GitBranchManager implements BranchManager {
     // Flush pending writes first
     await this.flush()
 
-    const branchId = this.currentBranch!.id
+    const branchId = this.getCurrentBranchChecked().id
     const timestamp = Date.now()
 
     // Generate commit ID
@@ -784,7 +796,7 @@ export class GitBranchManager implements BranchManager {
     const snapshot = await this.createSnapshot(branchId)
 
     // Get parent commit
-    const parentCommit = this.currentBranch!.headCommit
+    const parentCommit = this.getCurrentBranchChecked().headCommit
 
     // Serialize snapshot
     const snapshotJson = this.serializeSnapshot(snapshot)
@@ -968,7 +980,8 @@ export class GitBranchManager implements BranchManager {
       'SELECT deleted FROM branch_files WHERE branch_id = ? AND file_id = ?',
       [branchId.value, fileId]
     )
-    return result.rows.length > 0 && result.rows[0]!.deleted === 1
+    const firstRow = result.rows[0]
+    return firstRow !== undefined && firstRow.deleted === 1
   }
 
   /**
@@ -993,7 +1006,8 @@ export class GitBranchManager implements BranchManager {
       [branchId.value, fileId]
     )
 
-    const currentSize = result.rows.length > 0 ? (result.rows[0]!.size as number) : 0
+    const firstRow = result.rows[0]
+    const currentSize = firstRow ? (firstRow.size as number) : 0
     const newSize = Math.max(currentSize, size)
 
     this.config.sql.exec(

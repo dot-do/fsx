@@ -421,11 +421,12 @@ export class ExtentStorage {
 
     const result = this.config.sql.exec('SELECT file_size FROM extent_files WHERE file_id = ?', [fileId])
 
-    if (result.rows.length === 0) {
+    const firstRow = result.rows[0]
+    if (!firstRow) {
       return 0
     }
 
-    return result.rows[0]!.file_size as number
+    return firstRow.file_size as number
   }
 
   /**
@@ -603,8 +604,9 @@ export class ExtentStorage {
       [fileId, pageNum]
     )
 
-    if (dirtyResult.rows.length > 0) {
-      const data = dirtyResult.rows[0]!.data
+    const dirtyRow = dirtyResult.rows[0]
+    if (dirtyRow) {
+      const data = dirtyRow.data
       if (data instanceof ArrayBuffer) {
         return new Uint8Array(data)
       }
@@ -737,13 +739,15 @@ export class ExtentStorage {
       // Determine which extent this page belongs to
       const extentIndex = Math.floor(pageNum / this.pagesPerExtent)
 
-      if (!pagesByExtent.has(extentIndex)) {
-        pagesByExtent.set(extentIndex, new Map())
+      let extentPages = pagesByExtent.get(extentIndex)
+      if (!extentPages) {
+        extentPages = new Map()
+        pagesByExtent.set(extentIndex, extentPages)
       }
 
       // Page index within the extent (0-based)
       const pageIndexInExtent = pageNum - extentIndex * this.pagesPerExtent
-      pagesByExtent.get(extentIndex)!.set(pageIndexInExtent, data)
+      extentPages.set(pageIndexInExtent, data)
     }
 
     // Process each extent group
@@ -795,8 +799,9 @@ export class ExtentStorage {
       'SELECT extent_id FROM extents WHERE file_id = ? AND extent_index = ?',
       [fileId, extentIndex]
     )
-    if (existingResult.rows.length > 0) {
-      const oldExtentId = existingResult.rows[0]!.extent_id as string
+    const existingRow = existingResult.rows[0]
+    if (existingRow) {
+      const oldExtentId = existingRow.extent_id as string
       if (oldExtentId !== extentId) {
         // Delete old extent from storage
         const oldKey = `${this.config.extentPrefix}${oldExtentId}`
@@ -949,8 +954,9 @@ export class ExtentStorage {
       [fileId, pageNum]
     )
 
-    if (dirtyResult.rows.length > 0) {
-      const data = dirtyResult.rows[0]!.data
+    const syncDirtyRow = dirtyResult.rows[0]
+    if (syncDirtyRow) {
+      const data = syncDirtyRow.data
       if (data instanceof ArrayBuffer) {
         return new Uint8Array(data)
       }
@@ -965,12 +971,13 @@ export class ExtentStorage {
       [fileId, pageNum]
     )
 
-    if (extentResult.rows.length === 0) {
+    const extentRow = extentResult.rows[0]
+    if (!extentRow) {
       return null
     }
 
-    const extentId = extentResult.rows[0]!.extent_id as string
-    const startPage = extentResult.rows[0]!.start_page as number
+    const extentId = extentRow.extent_id as string
+    const startPage = extentRow.start_page as number
 
     const cached = this.extentCache.get(extentId)
     if (!cached) {

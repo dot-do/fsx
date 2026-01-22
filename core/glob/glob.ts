@@ -739,10 +739,13 @@ export async function glob(
     checkTimeout()
     checkAbort()
 
+    // Backend is guaranteed to be defined when this function is called
+    if (!backend) return
+
     // Use backend for readdir
     let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>
     try {
-      entries = await backend!.readdir(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>
+      entries = await backend.readdir(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>
     } catch (err) {
       // Handle permission denied gracefully - skip directory
       const e = err as Error & { code?: string }
@@ -765,7 +768,7 @@ export async function glob(
       }
 
       // Determine entry type using stat
-      const stats = await backend!.stat(fullPath)
+      const stats = await backend.stat(fullPath)
       const entryType: FileType = stats.isDirectory() ? 'directory' : stats.isSymbolicLink?.() ? 'symlink' : 'file'
 
       // Handle symlinks
@@ -1122,9 +1125,12 @@ export async function* globStream(
     checkTimeout()
     checkAbort()
 
+    // Backend is guaranteed to be defined when this function is called
+    if (!backend) return
+
     let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>
     try {
-      entries = await backend!.readdir(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>
+      entries = await backend.readdir(dir, { withFileTypes: true }) as Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>
     } catch (err) {
       const e = err as Error & { code?: string }
       if (e.code === 'EACCES' || e.message?.includes('EACCES')) {
@@ -1144,7 +1150,7 @@ export async function* globStream(
         continue
       }
 
-      const stats = await backend!.stat(fullPath)
+      const stats = await backend.stat(fullPath)
       const entryType: FileType = stats.isDirectory() ? 'directory' : stats.isSymbolicLink?.() ? 'symlink' : 'file'
 
       if (entryType === 'symlink' && !followSymlinks) {

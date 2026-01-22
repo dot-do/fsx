@@ -1245,6 +1245,16 @@ function anySignal(signals: AbortSignal[]): AbortSignal {
 }
 
 // =============================================================================
+// Remote FS Client (FsCapability Interface)
+// =============================================================================
+
+export {
+  RemoteFsClient,
+  createRemoteFs,
+  type RemoteFsClientOptions,
+} from './remote-client.js'
+
+// =============================================================================
 // Default Export
 // =============================================================================
 
