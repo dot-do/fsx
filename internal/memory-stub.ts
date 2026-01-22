@@ -45,25 +45,46 @@ interface MethodError {
 }
 
 /**
- * Create a mock DurableObjectStub that wraps a MemoryBackend.
+ * Minimal stub interface for memory-backed filesystem operations.
+ *
+ * This interface represents the subset of DurableObjectStub that we actually
+ * implement for testing purposes. It only includes the `fetch` method which
+ * is used for RPC-style communication.
+ *
+ * @internal
+ */
+export interface MemoryStub {
+  /**
+   * Fetch method for RPC-style calls to the backend.
+   */
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>
+}
+
+/**
+ * Create a mock stub that wraps a MemoryBackend.
  *
  * This enables SDK-style usage without requiring a real Durable Object binding.
  * The stub simulates the RPC protocol used by FSx to communicate with FileSystemDO.
  *
+ * Note: This returns a MemoryStub interface which is a minimal subset of
+ * DurableObjectStub, containing only the `fetch` method needed for RPC calls.
+ * For full DurableObjectStub compatibility, callers should use type assertions
+ * when they know their use case only requires fetch.
+ *
  * @param backend - The MemoryBackend to use for filesystem operations
- * @returns A mock DurableObjectStub that forwards calls to the backend
+ * @returns A MemoryStub that forwards fetch calls to the backend
  *
  * @example
  * ```typescript
  * const backend = new MemoryBackend()
  * const stub = createMemoryStub(backend)
- * const fs = new FSx(stub)
+ * // Use with RPC-based FSx adapter
  * ```
  *
  * @internal
  */
-export function createMemoryStub(backend: MemoryBackend): DurableObjectStub {
-  const stub: Pick<DurableObjectStub, 'fetch'> = {
+export function createMemoryStub(backend: MemoryBackend): MemoryStub {
+  const stub: MemoryStub = {
     async fetch(url: string, init?: RequestInit): Promise<Response> {
       if (init?.method !== 'POST' || !init.body) {
         return new Response('Not found', { status: 404 })
@@ -95,7 +116,7 @@ export function createMemoryStub(backend: MemoryBackend): DurableObjectStub {
     },
   }
 
-  return stub as unknown as DurableObjectStub
+  return stub
 }
 
 /**

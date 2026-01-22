@@ -32,7 +32,7 @@
  * @module
  */
 
-import type { Dirent, FileHandle, MkdirOptions, RmdirOptions, ReaddirOptions, ReadStreamOptions, WriteStreamOptions, WatchOptions, FSWatcher, BufferEncoding } from './types.js'
+import type { Dirent, IFileHandle, MkdirOptions, RmdirOptions, ReaddirOptions, ReadStreamOptions, WriteStreamOptions, WatchOptions, FSWatcher, BufferEncoding } from './types.js'
 import { Stats } from './types.js'
 import type { FsBackend } from './backend.js'
 import { constants } from './constants.js'
@@ -1438,7 +1438,7 @@ export class FSx {
    * }
    * ```
    */
-  async open(path: string, flags?: string | number, _mode?: number): Promise<FileHandle> {
+  async open(path: string, flags?: string | number, _mode?: number): Promise<IFileHandle> {
     path = this.normalizePath(path)
     return this.createFileHandle(path, flags)
   }
@@ -1461,11 +1461,11 @@ export class FSx {
    *
    * @param path - The normalized file path
    * @param flags - Open flags (string or numeric)
-   * @returns A FileHandle with read, write, stat, sync, and close methods
+   * @returns An IFileHandle with read, write, stat, sync, and close methods
    *
    * @internal
    */
-  private createFileHandle(path: string, flags?: string | number): FileHandle {
+  private createFileHandle(path: string, flags?: string | number): IFileHandle {
     const backend = this.backend
 
     // Parse flags into structured format for access mode enforcement
@@ -1740,6 +1740,6 @@ export class FSx {
       },
     }
 
-    return handle as unknown as FileHandle
+    return handle as IFileHandle
   }
 }

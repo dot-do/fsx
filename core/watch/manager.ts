@@ -49,8 +49,8 @@ interface PendingEvent {
   originalEventType: WatchEventType
   /** The affected path */
   path: string
-  /** The timer handle for debounce */
-  timer: ReturnType<typeof setTimeout>
+  /** The timer handle for debounce (null before first scheduled emission) */
+  timer: ReturnType<typeof setTimeout> | null
   /** The timer handle for max wait (optional) */
   maxWaitTimer?: ReturnType<typeof setTimeout>
   /** Timestamp of first event in this batch */
@@ -211,7 +211,9 @@ export class WatchManager {
         // Check if there are any remaining watchers that would receive this event
         const hasRemainingWatchers = this.findMatchingWatchers(pending.eventType, pendingPath).length > 0
         if (!hasRemainingWatchers) {
-          clearTimeout(pending.timer)
+          if (pending.timer !== null) {
+            clearTimeout(pending.timer)
+          }
           // Also clear maxWait timer to prevent timer leak
           if (pending.maxWaitTimer) {
             clearTimeout(pending.maxWaitTimer)
@@ -505,7 +507,7 @@ export class WatchManager {
         eventType,
         originalEventType: eventType,
         path: normalizedPath,
-        timer: null as unknown as ReturnType<typeof setTimeout>,
+        timer: null,
         firstEventTime: now,
         leadingEmitted: false,
       }
