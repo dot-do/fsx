@@ -46,6 +46,7 @@ import {
   computeChecksum,
   blobIdFromChecksum,
   selectTierBySize,
+  generateSavepointName,
   type CleanupConfig,
   type CleanupResult,
   type CleanupSchedulerState,
@@ -338,8 +339,10 @@ export class FsModule implements FsCapability {
       await this.sql.exec('BEGIN TRANSACTION')
     } else {
       // Create savepoint for nested transaction
+      // Use generateSavepointName() for safe identifier generation (prevents SQL injection)
       this.savepointCounter++
-      await this.sql.exec(`SAVEPOINT sp_${this.savepointCounter}`)
+      const savepointName = generateSavepointName(this.savepointCounter)
+      await this.sql.exec(`SAVEPOINT ${savepointName}`)
     }
     this.transactionDepth++
   }
@@ -368,7 +371,9 @@ export class FsModule implements FsCapability {
       this.savepointCounter = 0
     } else {
       // Release savepoint
-      await this.sql.exec(`RELEASE SAVEPOINT sp_${this.savepointCounter}`)
+      // Use generateSavepointName() for safe identifier generation (prevents SQL injection)
+      const savepointName = generateSavepointName(this.savepointCounter)
+      await this.sql.exec(`RELEASE SAVEPOINT ${savepointName}`)
       this.savepointCounter--
     }
   }
@@ -397,7 +402,9 @@ export class FsModule implements FsCapability {
       this.savepointCounter = 0
     } else {
       // Rollback to savepoint
-      await this.sql.exec(`ROLLBACK TO SAVEPOINT sp_${this.savepointCounter}`)
+      // Use generateSavepointName() for safe identifier generation (prevents SQL injection)
+      const savepointName = generateSavepointName(this.savepointCounter)
+      await this.sql.exec(`ROLLBACK TO SAVEPOINT ${savepointName}`)
       this.savepointCounter--
     }
   }

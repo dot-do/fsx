@@ -714,6 +714,81 @@ export interface StatsLike {
 }
 
 /**
+ * Public interface for file handles.
+ *
+ * This interface defines the contract for file handle operations that
+ * FSx.open() returns. Both the FileHandle class and lightweight handle
+ * implementations satisfy this interface.
+ *
+ * @example
+ * ```typescript
+ * const handle: IFileHandle = await fs.open('/file.txt', 'r+')
+ * await handle.write('data')
+ * await handle.sync()
+ * await handle.close()
+ * ```
+ */
+export interface IFileHandle {
+  /** File descriptor number (3+ for user files; 0-2 reserved for stdin/stdout/stderr) */
+  readonly fd: number
+
+  /**
+   * Read from file into buffer.
+   */
+  read(
+    buffer: Uint8Array,
+    offset?: number,
+    length?: number,
+    position?: number
+  ): Promise<{ bytesRead: number; buffer: Uint8Array }>
+
+  /**
+   * Write data to the file.
+   */
+  write(
+    data: Uint8Array | ArrayBuffer | string,
+    position?: number | null,
+    length?: number,
+    offset?: number
+  ): Promise<{ bytesWritten: number; buffer?: Uint8Array }>
+
+  /**
+   * Get statistics about the open file.
+   */
+  stat(): Promise<Stats>
+
+  /**
+   * Truncate the file to a specified length.
+   */
+  truncate(length?: number): Promise<void>
+
+  /**
+   * Synchronize the file's in-core state with the storage device.
+   */
+  sync(): Promise<void>
+
+  /**
+   * Close the file handle and release any resources.
+   */
+  close(): Promise<void>
+
+  /**
+   * Create a readable stream from the file.
+   */
+  createReadStream(options?: ReadStreamOptions): ReadableStream<Uint8Array>
+
+  /**
+   * Create a writable stream to the file.
+   */
+  createWriteStream(options?: WriteStreamOptions): WritableStream<Uint8Array>
+
+  /**
+   * Async disposable support for 'await using' syntax.
+   */
+  [Symbol.asyncDispose](): Promise<void>
+}
+
+/**
  * File handle for open files.
  *
  * Provides a low-level interface for file operations with proper tracking of
@@ -734,7 +809,7 @@ export interface StatsLike {
  * await handle.close()
  * ```
  */
-export class FileHandle {
+export class FileHandle implements IFileHandle {
   /** File descriptor number (3+ for user files; 0-2 reserved for stdin/stdout/stderr) */
   readonly fd: number
   /** Internal data buffer containing file contents */
@@ -2130,7 +2205,7 @@ export interface FsCapability {
    * @param path - Path to the file
    * @param flags - Open flags ('r', 'w', 'a', 'r+', 'w+', 'a+', etc.)
    * @param mode - File mode for newly created files
-   * @returns A FileHandle for the opened file
+   * @returns An IFileHandle for the opened file
    *
    * @throws {ENOENT} If file does not exist and flag doesn't allow creation
    * @throws {EEXIST} If 'x' flag used and file exists
@@ -2147,7 +2222,7 @@ export interface FsCapability {
    * }
    * ```
    */
-  open(path: string, flags?: string | number, mode?: number): Promise<FileHandle>
+  open(path: string, flags?: string | number, mode?: number): Promise<IFileHandle>
 
   // ===========================================================================
   // Watch Operations
@@ -2271,10 +2346,14 @@ export function isDirent(value: unknown): value is Dirent {
 }
 
 /**
- * Type guard to check if a value is a FileHandle instance.
+ * Type guard to check if a value implements the IFileHandle interface.
+ *
+ * Checks for the presence of required file handle methods (read, write, close, etc.)
+ * rather than using instanceof, allowing both FileHandle class instances and
+ * plain object implementations to pass.
  *
  * @param value - Value to check
- * @returns true if value is a FileHandle instance
+ * @returns true if value implements IFileHandle
  *
  * @example
  * ```typescript
@@ -2284,8 +2363,19 @@ export function isDirent(value: unknown): value is Dirent {
  * }
  * ```
  */
-export function isFileHandle(value: unknown): value is FileHandle {
-  return value instanceof FileHandle
+export function isFileHandle(value: unknown): value is IFileHandle {
+  if (value === null || typeof value !== 'object') {
+    return false
+  }
+  const obj = value as Record<string, unknown>
+  return (
+    typeof obj.fd === 'number' &&
+    typeof obj.read === 'function' &&
+    typeof obj.write === 'function' &&
+    typeof obj.stat === 'function' &&
+    typeof obj.close === 'function' &&
+    typeof obj.sync === 'function'
+  )
 }
 
 /**

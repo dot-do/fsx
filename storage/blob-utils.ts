@@ -7,6 +7,7 @@
  * - Deduplication helpers
  * - Tier transition validation
  * - Cleanup scheduling
+ * - SQL identifier sanitization
  *
  * @module storage/blob-utils
  */
@@ -356,4 +357,112 @@ export function calculateDedupSavings(
 export function calculateDedupRatio(totalBlobs: number, totalRefs: number): number {
   if (totalBlobs === 0) return 1.0
   return totalRefs / totalBlobs
+}
+
+// =============================================================================
+// SQL Identifier Sanitization
+// =============================================================================
+
+/**
+ * Regular expression for valid SQL identifier characters.
+ * Only allows alphanumeric characters and underscores.
+ */
+const VALID_SQL_IDENTIFIER_REGEX = /^[a-zA-Z_][a-zA-Z0-9_]*$/
+
+/**
+ * Sanitize a string to be safe for use as an SQL identifier.
+ *
+ * SQL identifiers (table names, column names, savepoint names) cannot be
+ * parameterized in most SQL databases. This function ensures the identifier
+ * only contains safe characters to prevent SQL injection.
+ *
+ * Security: This is critical for preventing SQL injection attacks when
+ * constructing dynamic SQL with identifiers like savepoint names.
+ *
+ * @param identifier - The raw identifier string
+ * @returns Sanitized identifier safe for SQL use
+ * @throws Error if the identifier cannot be sanitized to a valid value
+ *
+ * @example
+ * ```typescript
+ * sanitizeSqlIdentifier('sp_1')           // 'sp_1'
+ * sanitizeSqlIdentifier('tx-abc-123')     // 'tx_abc_123'
+ * sanitizeSqlIdentifier('1invalid')       // 'sp_1invalid' (prefixed)
+ * sanitizeSqlIdentifier('; DROP TABLE--') // throws Error
+ * ```
+ */
+export function sanitizeSqlIdentifier(identifier: string): string {
+  if (!identifier || identifier.length === 0) {
+    throw new Error('SQL identifier cannot be empty')
+  }
+
+  // Replace dashes and other common separators with underscores
+  let sanitized = identifier.replace(/[-.\s]/g, '_')
+
+  // Remove any characters that aren't alphanumeric or underscore
+  sanitized = sanitized.replace(/[^a-zA-Z0-9_]/g, '')
+
+  // Ensure identifier doesn't start with a number
+  if (/^[0-9]/.test(sanitized)) {
+    sanitized = 'sp_' + sanitized
+  }
+
+  // If nothing remains, the original was entirely invalid
+  if (sanitized.length === 0) {
+    throw new Error(`Cannot sanitize SQL identifier: '${identifier}'`)
+  }
+
+  // Validate the result matches expected pattern
+  if (!VALID_SQL_IDENTIFIER_REGEX.test(sanitized)) {
+    throw new Error(`Sanitized identifier '${sanitized}' is still invalid`)
+  }
+
+  // Limit length to prevent issues (SQLite allows up to ~1 billion chars but let's be reasonable)
+  if (sanitized.length > 128) {
+    sanitized = sanitized.substring(0, 128)
+  }
+
+  return sanitized
+}
+
+/**
+ * Check if a string is a valid SQL identifier without modification.
+ *
+ * @param identifier - The identifier to check
+ * @returns true if the identifier is valid as-is
+ *
+ * @example
+ * ```typescript
+ * isValidSqlIdentifier('sp_123')   // true
+ * isValidSqlIdentifier('tx-abc')   // false (contains dash)
+ * isValidSqlIdentifier('123abc')   // false (starts with number)
+ * ```
+ */
+export function isValidSqlIdentifier(identifier: string): boolean {
+  if (!identifier || identifier.length === 0 || identifier.length > 128) {
+    return false
+  }
+  return VALID_SQL_IDENTIFIER_REGEX.test(identifier)
+}
+
+/**
+ * Generate a safe savepoint name from a counter.
+ *
+ * This is the recommended way to generate savepoint names for nested
+ * transactions. Using a numeric counter ensures predictable, safe names.
+ *
+ * @param counter - Savepoint counter (must be non-negative integer)
+ * @returns Safe savepoint name like 'sp_1', 'sp_2', etc.
+ *
+ * @example
+ * ```typescript
+ * generateSavepointName(1)  // 'sp_1'
+ * generateSavepointName(42) // 'sp_42'
+ * ```
+ */
+export function generateSavepointName(counter: number): string {
+  if (!Number.isInteger(counter) || counter < 0) {
+    throw new Error(`Savepoint counter must be a non-negative integer, got: ${counter}`)
+  }
+  return `sp_${counter}`
 }

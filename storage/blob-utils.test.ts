@@ -23,6 +23,9 @@ import {
   prepareDedupCheck,
   calculateDedupSavings,
   calculateDedupRatio,
+  sanitizeSqlIdentifier,
+  isValidSqlIdentifier,
+  generateSavepointName,
 } from './blob-utils.js'
 
 describe('Blob ID Generation', () => {
@@ -180,5 +183,124 @@ describe('Deduplication Helpers', () => {
 
     // No blobs = ratio of 1.0
     expect(calculateDedupRatio(0, 0)).toBe(1.0)
+  })
+})
+
+describe('SQL Identifier Sanitization', () => {
+  describe('sanitizeSqlIdentifier', () => {
+    it('should pass through valid identifiers unchanged', () => {
+      expect(sanitizeSqlIdentifier('sp_1')).toBe('sp_1')
+      expect(sanitizeSqlIdentifier('my_table')).toBe('my_table')
+      expect(sanitizeSqlIdentifier('ValidName123')).toBe('ValidName123')
+      expect(sanitizeSqlIdentifier('_underscore')).toBe('_underscore')
+    })
+
+    it('should replace dashes with underscores', () => {
+      expect(sanitizeSqlIdentifier('tx-abc-123')).toBe('tx_abc_123')
+      expect(sanitizeSqlIdentifier('my-name')).toBe('my_name')
+    })
+
+    it('should replace dots and spaces with underscores', () => {
+      expect(sanitizeSqlIdentifier('table.name')).toBe('table_name')
+      expect(sanitizeSqlIdentifier('some name')).toBe('some_name')
+    })
+
+    it('should remove invalid characters', () => {
+      expect(sanitizeSqlIdentifier('name@special')).toBe('namespecial')
+      expect(sanitizeSqlIdentifier('test!@#$%^chars')).toBe('testchars')
+    })
+
+    it('should prefix identifiers starting with numbers', () => {
+      expect(sanitizeSqlIdentifier('123abc')).toBe('sp_123abc')
+      expect(sanitizeSqlIdentifier('1invalid')).toBe('sp_1invalid')
+    })
+
+    it('should throw for empty identifiers', () => {
+      expect(() => sanitizeSqlIdentifier('')).toThrow('SQL identifier cannot be empty')
+    })
+
+    it('should throw for identifiers that become empty after sanitization', () => {
+      expect(() => sanitizeSqlIdentifier('!@#$%^')).toThrow('Cannot sanitize SQL identifier')
+      expect(() => sanitizeSqlIdentifier(';;;')).toThrow('Cannot sanitize SQL identifier')
+    })
+
+    it('should prevent SQL injection attacks', () => {
+      // Classic SQL injection attempts should be sanitized
+      // The key is that the output is safe - exact format may vary
+      const sql1 = sanitizeSqlIdentifier('; DROP TABLE users--')
+      expect(isValidSqlIdentifier(sql1)).toBe(true)
+      expect(sql1).not.toContain(';')
+      expect(sql1).not.toContain("'")
+      expect(sql1).not.toContain('-')
+
+      const sql2 = sanitizeSqlIdentifier("' OR '1'='1")
+      expect(isValidSqlIdentifier(sql2)).toBe(true)
+      expect(sql2).not.toContain("'")
+      expect(sql2).not.toContain('=')
+
+      const sql3 = sanitizeSqlIdentifier('UNION SELECT * FROM passwords')
+      expect(isValidSqlIdentifier(sql3)).toBe(true)
+      expect(sql3).not.toContain('*')
+
+      // Numeric prefix gets 'sp_' added
+      const sql4 = sanitizeSqlIdentifier('1; DELETE FROM files')
+      expect(isValidSqlIdentifier(sql4)).toBe(true)
+      expect(sql4).not.toContain(';')
+      expect(sql4.startsWith('sp_')).toBe(true)
+    })
+
+    it('should truncate very long identifiers', () => {
+      const longName = 'a'.repeat(200)
+      const result = sanitizeSqlIdentifier(longName)
+      expect(result.length).toBe(128)
+    })
+  })
+
+  describe('isValidSqlIdentifier', () => {
+    it('should return true for valid identifiers', () => {
+      expect(isValidSqlIdentifier('sp_1')).toBe(true)
+      expect(isValidSqlIdentifier('my_table')).toBe(true)
+      expect(isValidSqlIdentifier('Column123')).toBe(true)
+      expect(isValidSqlIdentifier('_private')).toBe(true)
+    })
+
+    it('should return false for invalid identifiers', () => {
+      expect(isValidSqlIdentifier('tx-abc')).toBe(false) // Contains dash
+      expect(isValidSqlIdentifier('123abc')).toBe(false) // Starts with number
+      expect(isValidSqlIdentifier('table.name')).toBe(false) // Contains dot
+      expect(isValidSqlIdentifier('has space')).toBe(false) // Contains space
+      expect(isValidSqlIdentifier('')).toBe(false) // Empty
+    })
+
+    it('should return false for very long identifiers', () => {
+      const longName = 'a'.repeat(200)
+      expect(isValidSqlIdentifier(longName)).toBe(false)
+    })
+  })
+
+  describe('generateSavepointName', () => {
+    it('should generate valid savepoint names', () => {
+      expect(generateSavepointName(0)).toBe('sp_0')
+      expect(generateSavepointName(1)).toBe('sp_1')
+      expect(generateSavepointName(42)).toBe('sp_42')
+      expect(generateSavepointName(999)).toBe('sp_999')
+    })
+
+    it('should throw for negative numbers', () => {
+      expect(() => generateSavepointName(-1)).toThrow('non-negative integer')
+    })
+
+    it('should throw for non-integers', () => {
+      expect(() => generateSavepointName(1.5)).toThrow('non-negative integer')
+      expect(() => generateSavepointName(NaN)).toThrow('non-negative integer')
+    })
+
+    it('should produce names safe from SQL injection', () => {
+      // Since we only accept integers, the output is always safe
+      for (let i = 0; i < 100; i++) {
+        const name = generateSavepointName(i)
+        expect(isValidSqlIdentifier(name)).toBe(true)
+      }
+    })
   })
 })

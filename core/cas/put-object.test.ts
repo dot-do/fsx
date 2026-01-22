@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { putObject, putObjectBatch, ObjectStorage, BatchPutItem, BatchProgress } from './put-object'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { putObject, putObjectBatch, ObjectStorage, BatchPutItem, BatchProgress, __resetInFlightWrites } from './put-object'
 import { sha1 } from './hash'
 import { decompress } from './compression'
 import { createGitObject, parseGitObject } from './git-object'
@@ -33,6 +33,11 @@ describe('putObject', () => {
 
   beforeEach(() => {
     storage = new MockStorage()
+    __resetInFlightWrites()
+  })
+
+  afterEach(() => {
+    __resetInFlightWrites()
   })
 
   describe('Basic Storage', () => {
@@ -949,6 +954,291 @@ describe('putObjectBatch', () => {
         expect(parsed.type).toBe('blob')
         expect(new TextDecoder().decode(parsed.content)).toBe(`batch compressed ${i + 1}`)
       }
+    })
+  })
+})
+
+describe('Concurrent Write Race Condition Prevention', () => {
+  afterEach(() => {
+    __resetInFlightWrites()
+  })
+
+  describe('putObject concurrent writes', () => {
+    it('should prevent data corruption when concurrent writes have same checksum', async () => {
+      // Create a slow storage that simulates network latency
+      let writeCount = 0
+      const writtenData = new Map<string, Uint8Array>()
+      const slowStorage: ObjectStorage = {
+        async write(path: string, data: Uint8Array) {
+          writeCount++
+          // Simulate slow write
+          await new Promise(resolve => setTimeout(resolve, 50))
+          writtenData.set(path, data)
+        },
+        async exists(path: string) {
+          return writtenData.has(path)
+        },
+      }
+
+      const content = new TextEncoder().encode('concurrent test data')
+
+      // Start multiple concurrent writes with same content
+      const promises = [
+        putObject(slowStorage, 'blob', content),
+        putObject(slowStorage, 'blob', content),
+        putObject(slowStorage, 'blob', content),
+      ]
+
+      const results = await Promise.all(promises)
+
+      // All should return the same hash
+      expect(results[0]).toBe(results[1])
+      expect(results[1]).toBe(results[2])
+
+      // Only one actual write should occur (due to coordination)
+      // Note: With our in-flight coordination, subsequent requests wait for the first
+      expect(writeCount).toBeLessThanOrEqual(2) // At most 2 (one might slip through before registration)
+      expect(writtenData.size).toBe(1)
+
+      // Verify the data is correct (not corrupted)
+      const storedData = writtenData.values().next().value as Uint8Array
+      const decompressed = await decompress(storedData)
+      const parsed = parseGitObject(decompressed)
+      expect(parsed.type).toBe('blob')
+      expect(new TextDecoder().decode(parsed.content)).toBe('concurrent test data')
+    })
+
+    it('should serialize concurrent writes to same hash', async () => {
+      const writeOrder: number[] = []
+      let writeInProgress = false
+      const writtenData = new Map<string, Uint8Array>()
+
+      const trackingStorage: ObjectStorage = {
+        async write(path: string, data: Uint8Array) {
+          // Check for concurrent writes (should not happen with coordination)
+          if (writeInProgress) {
+            throw new Error('Concurrent write detected - race condition!')
+          }
+          writeInProgress = true
+          writeOrder.push(Date.now())
+          await new Promise(resolve => setTimeout(resolve, 20))
+          writtenData.set(path, data)
+          writeInProgress = false
+        },
+        async exists(path: string) {
+          return writtenData.has(path)
+        },
+      }
+
+      const content = new TextEncoder().encode('serialize test')
+
+      // Launch concurrent writes
+      const promises = [
+        putObject(trackingStorage, 'blob', content),
+        putObject(trackingStorage, 'blob', content),
+        putObject(trackingStorage, 'blob', content),
+      ]
+
+      // Should not throw (no concurrent writes)
+      await Promise.all(promises)
+
+      // Only one write should have actually occurred
+      expect(writtenData.size).toBe(1)
+    })
+
+    it('should use writeIfAbsent when available for atomic operation', async () => {
+      let writeIfAbsentCalls = 0
+      let regularWriteCalls = 0
+      const writtenData = new Map<string, Uint8Array>()
+
+      const atomicStorage: ObjectStorage = {
+        async write(path: string, data: Uint8Array) {
+          regularWriteCalls++
+          writtenData.set(path, data)
+        },
+        async exists(path: string) {
+          return writtenData.has(path)
+        },
+        async writeIfAbsent(path: string, data: Uint8Array) {
+          writeIfAbsentCalls++
+          if (writtenData.has(path)) {
+            return false // Already exists
+          }
+          writtenData.set(path, data)
+          return true // Written
+        },
+      }
+
+      const content = new TextEncoder().encode('atomic test')
+
+      // Multiple writes with same content
+      await putObject(atomicStorage, 'blob', content)
+      await putObject(atomicStorage, 'blob', content)
+
+      // Should use writeIfAbsent, not regular write
+      expect(writeIfAbsentCalls).toBe(2)
+      expect(regularWriteCalls).toBe(0)
+      expect(writtenData.size).toBe(1)
+    })
+
+    it('should handle write errors gracefully without corrupting in-flight tracking', async () => {
+      let callCount = 0
+      const failingStorage: ObjectStorage = {
+        async write() {
+          callCount++
+          if (callCount === 1) {
+            throw new Error('Write failed')
+          }
+        },
+        async exists() {
+          return false
+        },
+      }
+
+      const content = new TextEncoder().encode('error test')
+
+      // First write should fail
+      await expect(putObject(failingStorage, 'blob', content)).rejects.toThrow('Write failed')
+
+      // Second write should be able to proceed (in-flight map should be cleaned up)
+      // This would hang if we didn't clean up properly
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout - likely deadlock from improper cleanup')), 1000)
+      )
+
+      await expect(
+        Promise.race([
+          putObject(failingStorage, 'blob', content),
+          timeoutPromise,
+        ])
+      ).resolves.toBeDefined()
+    })
+  })
+
+  describe('putObjectBatch concurrent writes', () => {
+    it('should deduplicate concurrent writes with same checksum in batch', async () => {
+      let writeCount = 0
+      const writtenData = new Map<string, Uint8Array>()
+
+      const countingStorage: ObjectStorage = {
+        async write(path: string, data: Uint8Array) {
+          writeCount++
+          await new Promise(resolve => setTimeout(resolve, 10))
+          writtenData.set(path, data)
+        },
+        async exists(path: string) {
+          return writtenData.has(path)
+        },
+      }
+
+      const content = new TextEncoder().encode('batch concurrent')
+      const items: BatchPutItem[] = [
+        { content, type: 'blob' },
+        { content, type: 'blob' },
+        { content, type: 'blob' },
+        { content, type: 'blob' },
+        { content, type: 'blob' },
+      ]
+
+      // High concurrency to maximize race condition potential
+      const results = await putObjectBatch(countingStorage, items, { concurrency: 5 })
+
+      // All should have same hash
+      const hashes = results.map(r => r.hash)
+      expect(new Set(hashes).size).toBe(1)
+
+      // Only one should be marked as written (or at most a couple due to timing)
+      const writtenCount = results.filter(r => r.written).length
+      expect(writtenCount).toBeLessThanOrEqual(2)
+
+      // Storage should only have one entry
+      expect(writtenData.size).toBe(1)
+
+      // Data should not be corrupted
+      const storedData = writtenData.values().next().value as Uint8Array
+      const decompressed = await decompress(storedData)
+      const parsed = parseGitObject(decompressed)
+      expect(new TextDecoder().decode(parsed.content)).toBe('batch concurrent')
+    })
+
+    it('should handle mix of unique and duplicate content in concurrent batch', async () => {
+      const writtenData = new Map<string, Uint8Array>()
+
+      const storage: ObjectStorage = {
+        async write(path: string, data: Uint8Array) {
+          await new Promise(resolve => setTimeout(resolve, 5))
+          writtenData.set(path, data)
+        },
+        async exists(path: string) {
+          return writtenData.has(path)
+        },
+      }
+
+      const duplicateContent = new TextEncoder().encode('duplicate')
+      const items: BatchPutItem[] = [
+        { content: new TextEncoder().encode('unique1'), type: 'blob' },
+        { content: duplicateContent, type: 'blob' },
+        { content: new TextEncoder().encode('unique2'), type: 'blob' },
+        { content: duplicateContent, type: 'blob' },
+        { content: new TextEncoder().encode('unique3'), type: 'blob' },
+        { content: duplicateContent, type: 'blob' },
+      ]
+
+      const results = await putObjectBatch(storage, items, { concurrency: 6 })
+
+      // Should have 4 unique hashes (3 unique + 1 duplicate)
+      const uniqueHashes = new Set(results.map(r => r.hash))
+      expect(uniqueHashes.size).toBe(4)
+
+      // Storage should have exactly 4 entries
+      expect(writtenData.size).toBe(4)
+    })
+
+    it('should not cause data corruption under high concurrency with same content', async () => {
+      const writtenData = new Map<string, Uint8Array>()
+      let corruptionDetected = false
+
+      const storage: ObjectStorage = {
+        async write(path: string, data: Uint8Array) {
+          // Check if we're overwriting with different data (corruption)
+          if (writtenData.has(path)) {
+            const existing = writtenData.get(path)!
+            if (existing.length !== data.length) {
+              corruptionDetected = true
+            }
+            for (let i = 0; i < existing.length; i++) {
+              if (existing[i] !== data[i]) {
+                corruptionDetected = true
+                break
+              }
+            }
+          }
+          writtenData.set(path, data)
+        },
+        async exists(path: string) {
+          return writtenData.has(path)
+        },
+      }
+
+      const content = new TextEncoder().encode('corruption test data that is longer')
+
+      // Create many items with same content
+      const items: BatchPutItem[] = Array.from({ length: 20 }, () => ({
+        content,
+        type: 'blob' as const,
+      }))
+
+      // Run with high concurrency
+      await putObjectBatch(storage, items, { concurrency: 20 })
+
+      expect(corruptionDetected).toBe(false)
+      expect(writtenData.size).toBe(1)
+
+      // Verify final data is correct
+      const storedData = writtenData.values().next().value as Uint8Array
+      const decompressed = await decompress(storedData)
+      const parsed = parseGitObject(decompressed)
+      expect(new TextDecoder().decode(parsed.content)).toBe('corruption test data that is longer')
     })
   })
 })

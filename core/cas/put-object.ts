@@ -23,7 +23,24 @@ const VALID_TYPES = ['blob', 'tree', 'commit', 'tag'] as const
 export interface ObjectStorage {
   write(path: string, data: Uint8Array): Promise<void>
   exists(path: string): Promise<boolean>
+  /**
+   * Optional atomic write-if-absent operation.
+   * If implemented, this should atomically check for existence and write.
+   * Returns true if the write was performed, false if the path already exists.
+   *
+   * When not implemented, the default check-then-write pattern is used with
+   * in-memory coordination to prevent race conditions.
+   */
+  writeIfAbsent?(path: string, data: Uint8Array): Promise<boolean>
 }
+
+/**
+ * In-flight write coordination for preventing race conditions.
+ * Maps path -> Promise that resolves when the write completes.
+ * This ensures that concurrent writes to the same path are serialized.
+ * @internal
+ */
+const inFlightWrites = new Map<string, Promise<void>>()
 
 /**
  * Input item for batch putObject operation
@@ -74,6 +91,10 @@ export interface BatchPutOptions {
 /**
  * Store a git object and return its content hash
  *
+ * This function handles concurrent writes safely using one of two strategies:
+ * 1. If storage implements writeIfAbsent, uses atomic check-and-write
+ * 2. Otherwise, uses in-memory coordination to serialize writes to same path
+ *
  * @param storage - Storage backend to write to
  * @param type - Object type: 'blob', 'tree', 'commit', or 'tag'
  * @param content - Object content as Uint8Array
@@ -102,21 +123,84 @@ export async function putObject(
   // Get the storage path from the hash
   const path = hashToPath(hash)
 
-  // Deduplication: check if object already exists before writing
-  const exists = await storage.exists(path)
-  if (exists) {
-    // Object already exists, skip write and return existing hash
+  // Use atomic writeIfAbsent if available
+  if (storage.writeIfAbsent) {
+    // Compress the git object with zlib
+    const compressedData = await compress(gitObject)
+    // Atomic write - returns false if already exists
+    await storage.writeIfAbsent(path, compressedData)
     return hash
   }
 
-  // Compress the git object with zlib
-  const compressedData = await compress(gitObject)
+  // Fallback: use in-memory coordination to prevent race conditions
+  // Acquire write lock SYNCHRONOUSLY before any async operations
+  const lock = acquireWriteLock(path)
 
-  // Write the compressed data to storage
-  await storage.write(path, compressedData)
+  if (!lock.shouldExecute) {
+    // Another write is in progress - wait for it and return
+    await lock.waitPromise
+    return hash
+  }
 
-  // Return the 40-character hex hash
+  // We have the lock - execute the write
+  try {
+    // Check if object already exists in storage
+    const exists = await storage.exists(path)
+    if (!exists) {
+      // Compress the git object with zlib
+      const compressedData = await compress(gitObject)
+      // Write the compressed data to storage
+      await storage.write(path, compressedData)
+    }
+    lock.completeWrite!()
+  } catch (err) {
+    lock.completeWrite!(err as Error)
+    throw err
+  }
+
   return hash
+}
+
+/**
+ * Serialize writes to the same path to prevent race conditions.
+ * This function returns a tuple: [shouldExecute, waitPromise]
+ * - If shouldExecute is true, the caller should execute the write and then call completeWrite
+ * - If shouldExecute is false, the caller should wait on waitPromise (the write is already in progress)
+ *
+ * This pattern ensures the check-and-register happens SYNCHRONOUSLY to prevent races.
+ *
+ * @internal
+ */
+function acquireWriteLock(path: string): { shouldExecute: boolean; waitPromise?: Promise<void>; completeWrite?: (err?: Error) => void } {
+  // Check if there's an in-flight write for this path (synchronous check!)
+  const existingWrite = inFlightWrites.get(path)
+  if (existingWrite) {
+    // Another write is in progress - caller should wait
+    return { shouldExecute: false, waitPromise: existingWrite }
+  }
+
+  // Create a deferred promise for this write operation
+  let resolveWrite!: () => void
+  let rejectWrite!: (err: Error) => void
+  const writePromise = new Promise<void>((resolve, reject) => {
+    resolveWrite = resolve
+    rejectWrite = reject
+  })
+
+  // Register SYNCHRONOUSLY before returning to prevent races
+  inFlightWrites.set(path, writePromise)
+
+  // Return a completeWrite function for the caller to signal completion
+  const completeWrite = (err?: Error) => {
+    inFlightWrites.delete(path)
+    if (err) {
+      rejectWrite(err)
+    } else {
+      resolveWrite()
+    }
+  }
+
+  return { shouldExecute: true, completeWrite }
 }
 
 /**
@@ -161,6 +245,7 @@ async function prepareObject(
  * This function enables efficient batch storage of multiple objects:
  * - Parallelizes hash computation and compression
  * - Deduplicates writes (skips objects that already exist)
+ * - Uses in-memory coordination to prevent race conditions on concurrent writes
  * - Reports progress via optional callback
  * - Controls concurrency to prevent resource exhaustion
  *
@@ -207,14 +292,56 @@ export async function putObjectBatch(
     // Prepare the object (hash + compress)
     const { hash, path, compressedData } = await prepareObject(item.type, item.content)
 
-    // Check if object already exists (deduplication)
-    const exists = await storage.exists(path)
+    // Use atomic writeIfAbsent if available
+    if (storage.writeIfAbsent) {
+      const written = await storage.writeIfAbsent(path, compressedData)
+      results[index] = { hash, written, index }
+      processed++
+      if (onProgress) {
+        onProgress({
+          processed,
+          total: items.length,
+          currentHash: hash,
+          currentWritten: written,
+        })
+      }
+      return
+    }
 
+    // Acquire write lock SYNCHRONOUSLY to prevent race conditions
+    const lock = acquireWriteLock(path)
+
+    if (!lock.shouldExecute) {
+      // Another write is in progress - wait for it and return
+      await lock.waitPromise
+      // Object was written by another concurrent operation
+      results[index] = { hash, written: false, index }
+      processed++
+      if (onProgress) {
+        onProgress({
+          processed,
+          total: items.length,
+          currentHash: hash,
+          currentWritten: false,
+        })
+      }
+      return
+    }
+
+    // We have the lock - execute the write
     let written = false
-    if (!exists) {
-      // Write the compressed data to storage
-      await storage.write(path, compressedData)
-      written = true
+    try {
+      // Check if object already exists in storage
+      const exists = await storage.exists(path)
+      if (!exists) {
+        // Write the compressed data to storage
+        await storage.write(path, compressedData)
+        written = true
+      }
+      lock.completeWrite!()
+    } catch (err) {
+      lock.completeWrite!(err as Error)
+      throw err
     }
 
     // Store result
@@ -236,7 +363,7 @@ export async function putObjectBatch(
   const processChunk = async (startIdx: number, endIdx: number): Promise<void> => {
     const chunkPromises: Promise<void>[] = []
     for (let i = startIdx; i < endIdx && i < items.length; i++) {
-      chunkPromises.push(processSingle(items[i], i))
+      chunkPromises.push(processSingle(items[i]!, i))
     }
     await Promise.all(chunkPromises)
   }
@@ -247,4 +374,14 @@ export async function putObjectBatch(
   }
 
   return results
+}
+
+/**
+ * Clear in-flight writes map.
+ * **Only use in tests** to clear state between test cases.
+ *
+ * @internal
+ */
+export function __resetInFlightWrites(): void {
+  inFlightWrites.clear()
 }

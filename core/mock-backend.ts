@@ -939,11 +939,13 @@ export class MockBackend implements FsBackend {
         // After resolving a symlink, we need to re-resolve the result in case
         // it points to another symlink
         const resolvedComponents = resolved.split('/').filter(Boolean)
-        resolved = ''
 
-        // Prepend remaining original components to resolved components
+        // Get remaining components after the symlink
         const remaining = components.slice(i + 1)
-        components.splice(i + 1, components.length - i - 1, ...resolvedComponents, ...remaining)
+
+        // Replace entire components array with resolved path + remaining
+        components.length = 0
+        components.push(...resolvedComponents, ...remaining)
 
         // Reset i to continue from the start of resolved path
         i = -1

@@ -120,6 +120,10 @@ export {
   calculateDedupSavings,
   calculateDedupRatio,
   type BlobStats,
+  // SQL identifier sanitization (security)
+  sanitizeSqlIdentifier,
+  isValidSqlIdentifier,
+  generateSavepointName,
 } from './blob-utils.js'
 
 // Page Storage (2MB BLOB chunking for DO cost optimization)

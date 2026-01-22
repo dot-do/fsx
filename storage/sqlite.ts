@@ -85,6 +85,7 @@ import type {
   UpdateEntryOptions,
   StorageStats,
 } from './interfaces.js'
+import { generateSavepointName } from './blob-utils.js'
 
 /**
  * Internal file row structure matching the SQLite schema.
@@ -701,8 +702,10 @@ export class SQLiteMetadata implements MetadataStorage {
       this.emitTransactionEvent('begin')
     } else {
       // Create savepoint for nested transaction
+      // Use generateSavepointName() for safe identifier generation (prevents SQL injection)
       this.savepointCounter++
-      await this.sql.exec(`SAVEPOINT sp_${this.savepointCounter}`)
+      const savepointName = generateSavepointName(this.savepointCounter)
+      await this.sql.exec(`SAVEPOINT ${savepointName}`)
       this.emitTransactionEvent('begin')
     }
     this.transactionDepth++
@@ -762,7 +765,9 @@ export class SQLiteMetadata implements MetadataStorage {
       this.savepointCounter = 0
     } else {
       // Release savepoint
-      await this.sql.exec(`RELEASE SAVEPOINT sp_${this.savepointCounter}`)
+      // Use generateSavepointName() for safe identifier generation (prevents SQL injection)
+      const savepointName = generateSavepointName(this.savepointCounter)
+      await this.sql.exec(`RELEASE SAVEPOINT ${savepointName}`)
       this.savepointCounter--
     }
   }
@@ -830,7 +835,9 @@ export class SQLiteMetadata implements MetadataStorage {
       this.savepointCounter = 0
     } else {
       // Rollback to savepoint
-      await this.sql.exec(`ROLLBACK TO SAVEPOINT sp_${this.savepointCounter}`)
+      // Use generateSavepointName() for safe identifier generation (prevents SQL injection)
+      const savepointName = generateSavepointName(this.savepointCounter)
+      await this.sql.exec(`ROLLBACK TO SAVEPOINT ${savepointName}`)
       this.savepointCounter--
     }
   }

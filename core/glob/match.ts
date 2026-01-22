@@ -184,11 +184,27 @@ function hasWildcards(segment: string): boolean {
 }
 
 /**
+ * Check if a pattern segment contains escape sequences.
+ * Patterns with escapes cannot use simple string comparison
+ * because the escaped characters need to be unescaped.
+ */
+function hasEscapeSequences(segment: string): boolean {
+  for (let i = 0; i < segment.length; i++) {
+    if (segment[i] === '\\' && i + 1 < segment.length) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
  * Check if the entire pattern is a literal (no wildcards).
  * Literal patterns can use simple string comparison.
+ * Note: Patterns with escape sequences are NOT considered literal
+ * because they need regex processing to unescape characters.
  */
 function isLiteralPattern(segments: string[]): boolean {
-  return segments.every((seg) => !hasWildcards(seg))
+  return segments.every((seg) => !hasWildcards(seg) && !hasEscapeSequences(seg))
 }
 
 /**
