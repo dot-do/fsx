@@ -1588,7 +1588,10 @@ export class FSx {
 
         // Copy data to buffer
         for (let i = 0; i < bytesToRead; i++) {
-          buffer[targetOffset + i] = fileData[readPosition + i]!
+          const byteValue = fileData[readPosition + i]
+          if (byteValue !== undefined) {
+            buffer[targetOffset + i] = byteValue
+          }
         }
 
         // Update position if not explicitly specified
@@ -1646,7 +1649,10 @@ export class FSx {
 
         // Write the bytes
         for (let i = 0; i < bytes.length; i++) {
-          fileData[writePos + i] = bytes[i]!
+          const byteValue = bytes[i]
+          if (byteValue !== undefined) {
+            fileData[writePos + i] = byteValue
+          }
         }
 
         // Update position (not in append mode when position wasn't explicit)

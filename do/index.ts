@@ -165,6 +165,10 @@ function generateETag(size: number, mtime: number): string {
 export { FsModule, type FsModuleConfig } from './module.js'
 export { withFs, hasFs, getFs, type WithFsContext, type WithFsOptions, type WithFsDO } from './mixin.js'
 
+// Re-export helper modules for standalone usage
+export { BlobManager, type BlobManagerConfig, type BlobMetadata, type BlobWithData, type BlobInfo } from './blob-manager.js'
+export { TransactionManager, type TransactionManagerConfig, type TransactionLogEntry } from './transaction-manager.js'
+
 // Re-export security module for path validation
 export {
   PathValidator,

@@ -58,6 +58,9 @@ import {
 export { PathValidator, pathValidator, SecurityConstants } from './security.js'
 export type { ValidationResult, ValidationSuccess, ValidationFailure } from './security.js'
 
+// Import pathValidator for internal use at entry points
+import { pathValidator } from './security.js'
+
 // Re-export blob utilities for consumers
 export {
   computeChecksum,
@@ -74,6 +77,10 @@ export {
   type BlobStats,
 } from '../storage/blob-utils.js'
 
+
+// Re-export new helper modules for consumers
+export { BlobManager, type BlobManagerConfig, type BlobMetadata, type BlobWithData, type BlobInfo } from './blob-manager.js'
+export { TransactionManager, type TransactionManagerConfig, type TransactionLogEntry } from './transaction-manager.js'
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -553,7 +560,8 @@ export class FsModule implements FsCapability {
     const normalized = this.normalizePath(path)
     // Note: Use .toArray() instead of .one() since .one() throws if no results
     const results = this.sql.exec<FileEntry>('SELECT * FROM files WHERE path = ?', normalized).toArray()
-    return results.length > 0 ? results[0]! : null
+    const firstResult = results[0]
+    return firstResult ?? null
   }
 
   private selectTier(size: number, explicitTier?: StorageTier): StorageTier {
@@ -691,8 +699,9 @@ export class FsModule implements FsCapability {
     if (tier === 'hot') {
       // Note: Use .toArray() instead of .one() since .one() throws if no results
       const blobs = this.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', id).toArray()
-      if (blobs.length === 0 || !blobs[0]?.data) return null
-      return new Uint8Array(blobs[0].data)
+      const firstBlob = blobs[0]
+      if (!firstBlob?.data) return null
+      return new Uint8Array(firstBlob.data)
     }
 
     if (tier === 'warm' && this.r2) {
@@ -725,6 +734,7 @@ export class FsModule implements FsCapability {
   // ===========================================================================
 
   async read(path: string, options?: ReadOptions): Promise<string | Uint8Array> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -770,6 +780,7 @@ export class FsModule implements FsCapability {
   }
 
   async write(path: string, data: string | Uint8Array, options?: WriteOptions): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const parentPath = this.getParentPath(normalized)
@@ -879,6 +890,7 @@ export class FsModule implements FsCapability {
   }
 
   async unlink(path: string): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -901,6 +913,8 @@ export class FsModule implements FsCapability {
   }
 
   async rename(oldPath: string, newPath: string, options?: MoveOptions): Promise<void> {
+    pathValidator.validateInput(oldPath)
+    pathValidator.validateInput(newPath)
     await this.initialize()
     const oldNormalized = this.normalizePath(oldPath)
     const newNormalized = this.normalizePath(newPath)
@@ -956,6 +970,8 @@ export class FsModule implements FsCapability {
   }
 
   async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    pathValidator.validateInput(src)
+    pathValidator.validateInput(dest)
     await this.initialize()
     const srcNormalized = this.normalizePath(src)
     const destNormalized = this.normalizePath(dest)
@@ -979,6 +995,7 @@ export class FsModule implements FsCapability {
   }
 
   async truncate(path: string, length: number = 0): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1023,6 +1040,7 @@ export class FsModule implements FsCapability {
   // ===========================================================================
 
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const now = Date.now()
@@ -1095,6 +1113,7 @@ export class FsModule implements FsCapability {
   }
 
   async rmdir(path: string, options?: RmdirOptions): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1140,6 +1159,7 @@ export class FsModule implements FsCapability {
   }
 
   async rm(path: string, options?: RemoveOptions): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1157,10 +1177,12 @@ export class FsModule implements FsCapability {
   }
 
   async list(path: string, options?: ListOptions): Promise<string[] | Dirent[]> {
+    pathValidator.validateInput(path)
     return this.readdir(path, options as ReaddirOptions)
   }
 
   async readdir(path: string, options?: ReaddirOptions): Promise<string[] | Dirent[]> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1209,6 +1231,7 @@ export class FsModule implements FsCapability {
   // ===========================================================================
 
   async stat(path: string): Promise<Stats> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     let file = await this.getFile(normalized)
@@ -1229,6 +1252,7 @@ export class FsModule implements FsCapability {
   }
 
   async lstat(path: string): Promise<Stats> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1276,12 +1300,14 @@ export class FsModule implements FsCapability {
   }
 
   async exists(path: string): Promise<boolean> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const file = await this.getFile(path)
     return file !== null
   }
 
   async access(path: string, _mode?: number): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const file = await this.getFile(path)
     if (!file) {
@@ -1291,6 +1317,7 @@ export class FsModule implements FsCapability {
   }
 
   async chmod(path: string, mode: number): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1303,6 +1330,7 @@ export class FsModule implements FsCapability {
   }
 
   async chown(path: string, uid: number, gid: number): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1315,6 +1343,7 @@ export class FsModule implements FsCapability {
   }
 
   async utimes(path: string, atime: Date | number, mtime: Date | number): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1334,6 +1363,8 @@ export class FsModule implements FsCapability {
   // ===========================================================================
 
   async symlink(target: string, path: string): Promise<void> {
+    pathValidator.validateInput(target)
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const now = Date.now()
@@ -1372,6 +1403,8 @@ export class FsModule implements FsCapability {
   }
 
   async link(existingPath: string, newPath: string): Promise<void> {
+    pathValidator.validateInput(existingPath)
+    pathValidator.validateInput(newPath)
     await this.initialize()
     const existingNormalized = this.normalizePath(existingPath)
     const newNormalized = this.normalizePath(newPath)
@@ -1426,6 +1459,7 @@ export class FsModule implements FsCapability {
   }
 
   async readlink(path: string): Promise<string> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1442,6 +1476,7 @@ export class FsModule implements FsCapability {
   }
 
   async realpath(path: string): Promise<string> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     let file = await this.getFile(normalized)
@@ -1505,6 +1540,7 @@ export class FsModule implements FsCapability {
    * ```
    */
   async createReadStream(path: string, options?: ReadStreamOptions): Promise<ReadableStream<Uint8Array>> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1570,8 +1606,9 @@ export class FsModule implements FsCapability {
     highWaterMark: number
   ): Promise<ReadableStream<Uint8Array>> {
     const blob = this.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', blobId).toArray()
+    const firstBlob = blob[0]
 
-    if (blob.length === 0 || !blob[0]?.data) {
+    if (!firstBlob?.data) {
       return new ReadableStream<Uint8Array>({
         start(controller) {
           controller.close()
@@ -1579,7 +1616,7 @@ export class FsModule implements FsCapability {
       })
     }
 
-    const fullData = new Uint8Array(blob[0].data)
+    const fullData = new Uint8Array(firstBlob.data)
 
     // Apply range
     const rangeEnd = end !== undefined ? Math.min(end + 1, fullData.length) : fullData.length
@@ -1643,6 +1680,7 @@ export class FsModule implements FsCapability {
   }
 
   async createWriteStream(path: string, options?: WriteStreamOptions): Promise<WritableStream<Uint8Array>> {
+    pathValidator.validateInput(path)
     const chunks: Uint8Array[] = []
     const self = this
 
@@ -1668,6 +1706,7 @@ export class FsModule implements FsCapability {
   // ===========================================================================
 
   async open(path: string, flags?: string | number, mode?: number): Promise<FileHandle> {
+    pathValidator.validateInput(path)
     // Simplified implementation - read entire file into memory
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1699,7 +1738,10 @@ export class FsModule implements FsCapability {
         const bytesToRead = Math.min(readLen, data.length - readPos)
 
         for (let i = 0; i < bytesToRead; i++) {
-          buffer[(offset ?? 0) + i] = data[readPos + i]!
+          const byteValue = data[readPos + i]
+          if (byteValue !== undefined) {
+            buffer[(offset ?? 0) + i] = byteValue
+          }
         }
 
         return { bytesRead: bytesToRead, buffer }
@@ -1715,7 +1757,10 @@ export class FsModule implements FsCapability {
         }
 
         for (let i = 0; i < bytes.length; i++) {
-          data[pos + i] = bytes[i]!
+          const byteValue = bytes[i]
+          if (byteValue !== undefined) {
+            data[pos + i] = byteValue
+          }
         }
 
         return { bytesWritten: bytes.length }
@@ -1797,6 +1842,7 @@ export class FsModule implements FsCapability {
   // ===========================================================================
 
   async promote(path: string, tier: 'hot' | 'warm'): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1822,6 +1868,7 @@ export class FsModule implements FsCapability {
   }
 
   async demote(path: string, tier: 'warm' | 'cold'): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -1835,8 +1882,8 @@ export class FsModule implements FsCapability {
     const currentTier = file.tier as StorageTier
     if (currentTier === tier) return
 
-    // Read from current tier
-    const data = await this.getBlob(file.blob_id!, currentTier)
+    // Read from current tier (blob_id is guaranteed non-null by the check above)
+    const data = await this.getBlob(file.blob_id, currentTier)
     if (!data) return
 
     // Move blob to new tier - delete from old tier first
@@ -1877,6 +1924,7 @@ export class FsModule implements FsCapability {
   }
 
   async getTier(path: string): Promise<'hot' | 'warm' | 'cold'> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const file = await this.getFile(path)
 
@@ -1904,6 +1952,8 @@ export class FsModule implements FsCapability {
     dest: string,
     options?: { recursive?: boolean; preserveMetadata?: boolean }
   ): Promise<void> {
+    pathValidator.validateInput(src)
+    pathValidator.validateInput(dest)
     await this.initialize()
     const srcNormalized = this.normalizePath(src)
     const destNormalized = this.normalizePath(dest)
@@ -2070,6 +2120,7 @@ export class FsModule implements FsCapability {
    * @param options - Delete options
    */
   async softDelete(path: string, options?: { recursive?: boolean }): Promise<void> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
@@ -2116,6 +2167,7 @@ export class FsModule implements FsCapability {
     refCount: number
     createdAt: number
   } | null> {
+    pathValidator.validateInput(path)
     await this.initialize()
     const normalized = this.normalizePath(path)
     const file = await this.getFile(normalized)
