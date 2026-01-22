@@ -48,6 +48,10 @@ export {
   Stats,
   Dirent,
   FileHandle,
+  // Branded Type Constructors
+  fileId,
+  blobId,
+  absolutePath,
   // Type Guards
   isStats,
   isDirent,
@@ -55,11 +59,19 @@ export {
   isFileType,
   isStorageTier,
   isStatsLike,
+  isFileId,
+  isBlobId,
+  isAbsolutePath,
 } from './types.js'
 
 export type {
   // Core capability interface
   FsCapability,
+
+  // Branded types
+  FileId,
+  BlobId,
+  AbsolutePath,
 
   // Storage tier type
   StorageTier,

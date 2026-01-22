@@ -350,7 +350,17 @@ class MockSqlStorage {
 }
 
 /**
+ * Mock R2 object response for testing tiered storage
+ */
+interface MockR2Object {
+  body: ReadableStream<Uint8Array>
+  arrayBuffer: () => Promise<ArrayBuffer>
+  size: number
+}
+
+/**
  * Mock R2 bucket for testing tiered storage
+ * Supports both arrayBuffer() and body (ReadableStream) for streaming tests
  */
 class MockR2Bucket {
   private objects: Map<string, Uint8Array> = new Map()
@@ -365,11 +375,33 @@ class MockR2Bucket {
     }
   }
 
-  async get(key: string): Promise<{ arrayBuffer: () => Promise<ArrayBuffer> } | null> {
+  async get(key: string, options?: { range?: { offset?: number; length?: number; suffix?: number } }): Promise<MockR2Object | null> {
     const data = this.objects.get(key)
     if (!data) return null
+
+    // Handle range requests
+    let slicedData = data
+    if (options?.range) {
+      const { offset = 0, length } = options.range
+      if (length !== undefined) {
+        slicedData = data.slice(offset, offset + length)
+      } else {
+        slicedData = data.slice(offset)
+      }
+    }
+
+    // Create a ReadableStream from the data (simulates R2's streaming body)
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(slicedData)
+        controller.close()
+      },
+    })
+
     return {
-      arrayBuffer: async () => data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+      body,
+      arrayBuffer: async () => slicedData.buffer.slice(slicedData.byteOffset, slicedData.byteOffset + slicedData.byteLength),
+      size: slicedData.length,
     }
   }
 
@@ -1424,6 +1456,154 @@ describe('FsModule', () => {
         const content = new TextDecoder().decode(combined)
         expect(content).toBe('Stream content')
       })
+
+      it('should throw ENOENT for non-existent file', async () => {
+        await expect(fsModule.createReadStream('/nonexistent.txt')).rejects.toThrow()
+        try {
+          await fsModule.createReadStream('/nonexistent.txt')
+        } catch (error: any) {
+          expect(error.code).toBe('ENOENT')
+        }
+      })
+
+      it('should throw EISDIR for directories', async () => {
+        await fsModule.mkdir('/testdir')
+
+        await expect(fsModule.createReadStream('/testdir')).rejects.toThrow()
+        try {
+          await fsModule.createReadStream('/testdir')
+        } catch (error: any) {
+          expect(error.code).toBe('EISDIR')
+        }
+      })
+
+      it('should return empty stream for empty file', async () => {
+        await fsModule.write('/empty.txt', '')
+        const stream = await fsModule.createReadStream('/empty.txt')
+
+        const reader = stream.getReader()
+        const result = await reader.read()
+        expect(result.done).toBe(true)
+      })
+
+      it('should support range read with start option', async () => {
+        await fsModule.write('/file.txt', 'Hello, World!')
+        const stream = await fsModule.createReadStream('/file.txt', { start: 7 })
+
+        const reader = stream.getReader()
+        const chunks: Uint8Array[] = []
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          if (result.done) {
+            done = true
+          } else {
+            chunks.push(result.value)
+          }
+        }
+
+        const combined = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0))
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+
+        const content = new TextDecoder().decode(combined)
+        expect(content).toBe('World!')
+      })
+
+      it('should support range read with start and end options', async () => {
+        await fsModule.write('/file.txt', 'Hello, World!')
+        const stream = await fsModule.createReadStream('/file.txt', { start: 0, end: 4 })
+
+        const reader = stream.getReader()
+        const chunks: Uint8Array[] = []
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          if (result.done) {
+            done = true
+          } else {
+            chunks.push(result.value)
+          }
+        }
+
+        const combined = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0))
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+
+        const content = new TextDecoder().decode(combined)
+        expect(content).toBe('Hello')
+      })
+
+      it('should respect highWaterMark for chunking', async () => {
+        // Create content larger than default chunk size
+        const content = 'x'.repeat(1000)
+        await fsModule.write('/file.txt', content)
+
+        // Use small highWaterMark to force multiple chunks
+        const stream = await fsModule.createReadStream('/file.txt', { highWaterMark: 100 })
+
+        const reader = stream.getReader()
+        const chunks: Uint8Array[] = []
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          if (result.done) {
+            done = true
+          } else {
+            chunks.push(result.value)
+          }
+        }
+
+        // Should have multiple chunks
+        expect(chunks.length).toBeGreaterThan(1)
+
+        // Each chunk (except possibly last) should be <= highWaterMark
+        for (let i = 0; i < chunks.length - 1; i++) {
+          expect(chunks[i]!.length).toBeLessThanOrEqual(100)
+        }
+
+        // Total content should be correct
+        const combined = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0))
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+        expect(new TextDecoder().decode(combined)).toBe(content)
+      })
+
+      it('should follow symlinks', async () => {
+        await fsModule.write('/target.txt', 'Target content')
+        await fsModule.symlink('/target.txt', '/link.txt')
+
+        const stream = await fsModule.createReadStream('/link.txt')
+        const reader = stream.getReader()
+        const chunks: Uint8Array[] = []
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          if (result.done) {
+            done = true
+          } else {
+            chunks.push(result.value)
+          }
+        }
+
+        const combined = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0))
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+
+        expect(new TextDecoder().decode(combined)).toBe('Target content')
+      })
     })
 
     describe('createWriteStream', () => {
@@ -1636,6 +1816,102 @@ describe('FsModule', () => {
 
         const file = mockSql.getFile('/large.txt')
         expect(mockR2.has(file!.blob_id!)).toBe(true)
+      })
+    })
+
+    describe('streaming from warm tier (R2)', () => {
+      it('should stream file from R2 without loading entire file into memory', async () => {
+        const largeContent = 'x'.repeat(200)
+        await fsModule.write('/warm-file.txt', largeContent)
+
+        // Verify file is in warm tier
+        const tier = await fsModule.getTier('/warm-file.txt')
+        expect(tier).toBe('warm')
+
+        // Stream the file
+        const stream = await fsModule.createReadStream('/warm-file.txt')
+        expect(stream).toBeInstanceOf(ReadableStream)
+
+        // Read stream content
+        const reader = stream.getReader()
+        const chunks: Uint8Array[] = []
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          if (result.done) {
+            done = true
+          } else {
+            chunks.push(result.value)
+          }
+        }
+
+        const combined = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0))
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+
+        expect(new TextDecoder().decode(combined)).toBe(largeContent)
+      })
+
+      it('should support range reads from R2', async () => {
+        const content = 'Hello, World from R2!'
+        // Force warm tier by using explicit tier option
+        await fsModule.write('/r2-file.txt', content, { tier: 'warm' })
+
+        // Stream with range
+        const stream = await fsModule.createReadStream('/r2-file.txt', { start: 7, end: 11 })
+
+        const reader = stream.getReader()
+        const chunks: Uint8Array[] = []
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          if (result.done) {
+            done = true
+          } else {
+            chunks.push(result.value)
+          }
+        }
+
+        const combined = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0))
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+
+        expect(new TextDecoder().decode(combined)).toBe('World')
+      })
+
+      it('should stream from cold tier (archive)', async () => {
+        const content = 'Archived content'
+        await fsModule.write('/cold-file.txt', content, { tier: 'cold' })
+
+        const stream = await fsModule.createReadStream('/cold-file.txt')
+        expect(stream).toBeInstanceOf(ReadableStream)
+
+        const reader = stream.getReader()
+        const chunks: Uint8Array[] = []
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          if (result.done) {
+            done = true
+          } else {
+            chunks.push(result.value)
+          }
+        }
+
+        const combined = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0))
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+
+        expect(new TextDecoder().decode(combined)).toBe(content)
       })
     })
   })

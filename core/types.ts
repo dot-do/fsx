@@ -11,6 +11,200 @@
 import { constants } from './constants'
 
 // =============================================================================
+// Branded Types
+// =============================================================================
+
+/**
+ * A branded type for unique file identifiers.
+ *
+ * FileId is a string that has been validated to be a proper file identifier.
+ * The brand prevents accidental mixing with other string types like BlobId
+ * or AbsolutePath.
+ *
+ * @example
+ * ```typescript
+ * const id = fileId('abc123')  // FileId
+ * const path = absolutePath('/home/user/file.txt')  // AbsolutePath
+ *
+ * // These would be compile-time errors in strict typing:
+ * // lookupFile(path)  // Error: AbsolutePath is not FileId
+ * ```
+ */
+export type FileId = string & { readonly __brand: 'FileId' }
+
+/**
+ * A branded type for blob storage identifiers.
+ *
+ * BlobId is a string that identifies a blob in the storage layer (e.g., R2).
+ * The brand prevents accidental mixing with FileId or AbsolutePath.
+ *
+ * @example
+ * ```typescript
+ * const blob = blobId('sha256:abc123...')  // BlobId
+ * const file = fileId('file-001')          // FileId
+ *
+ * // Type-safe: can't accidentally use one for the other
+ * ```
+ */
+export type BlobId = string & { readonly __brand: 'BlobId' }
+
+/**
+ * A branded type for absolute filesystem paths.
+ *
+ * AbsolutePath is a string that represents a validated absolute path
+ * (starting with '/'). The brand prevents accidental mixing with
+ * relative paths or identifiers.
+ *
+ * @example
+ * ```typescript
+ * const path = absolutePath('/home/user/file.txt')  // AbsolutePath
+ *
+ * // Type-safe path handling
+ * function readFile(path: AbsolutePath): Promise<Uint8Array>
+ * ```
+ */
+export type AbsolutePath = string & { readonly __brand: 'AbsolutePath' }
+
+// =============================================================================
+// Branded Type Constructors
+// =============================================================================
+
+/**
+ * Create a FileId from a string.
+ *
+ * This is a runtime cast that marks the string as a FileId.
+ * Use this when you have a string that you know is a valid file identifier.
+ *
+ * @param id - The string identifier
+ * @returns The same string branded as FileId
+ *
+ * @example
+ * ```typescript
+ * const id = fileId('file-abc123')
+ * await storage.getEntry(id)
+ * ```
+ */
+export function fileId(id: string): FileId {
+  return id as FileId
+}
+
+/**
+ * Create a BlobId from a string.
+ *
+ * This is a runtime cast that marks the string as a BlobId.
+ * Use this when you have a string that you know is a valid blob identifier.
+ *
+ * @param id - The string identifier
+ * @returns The same string branded as BlobId
+ *
+ * @example
+ * ```typescript
+ * const blob = blobId('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+ * await storage.getBlob(blob)
+ * ```
+ */
+export function blobId(id: string): BlobId {
+  return id as BlobId
+}
+
+/**
+ * Create an AbsolutePath from a string.
+ *
+ * This is a runtime cast that marks the string as an AbsolutePath.
+ * Use this when you have a string that you know is a valid absolute path.
+ *
+ * Note: This function does NOT validate that the path is actually absolute.
+ * For validation, use isAbsolutePath() first.
+ *
+ * @param path - The path string
+ * @returns The same string branded as AbsolutePath
+ *
+ * @example
+ * ```typescript
+ * const path = absolutePath('/home/user/documents/file.txt')
+ * await fs.read(path)
+ * ```
+ */
+export function absolutePath(path: string): AbsolutePath {
+  return path as AbsolutePath
+}
+
+// =============================================================================
+// Branded Type Guards
+// =============================================================================
+
+/**
+ * Type guard to check if a value is a FileId.
+ *
+ * Since FileId is a branded string, at runtime we can only check that
+ * the value is a non-empty string. The brand provides compile-time safety.
+ *
+ * @param value - Value to check
+ * @returns true if value is a non-empty string (assumed to be a valid FileId)
+ *
+ * @example
+ * ```typescript
+ * function processId(id: unknown): void {
+ *   if (isFileId(id)) {
+ *     // id is now typed as FileId
+ *     await storage.getEntry(id)
+ *   }
+ * }
+ * ```
+ */
+export function isFileId(value: unknown): value is FileId {
+  return typeof value === 'string' && value.length > 0
+}
+
+/**
+ * Type guard to check if a value is a BlobId.
+ *
+ * Since BlobId is a branded string, at runtime we can only check that
+ * the value is a non-empty string. The brand provides compile-time safety.
+ *
+ * @param value - Value to check
+ * @returns true if value is a non-empty string (assumed to be a valid BlobId)
+ *
+ * @example
+ * ```typescript
+ * function processBlob(id: unknown): void {
+ *   if (isBlobId(id)) {
+ *     // id is now typed as BlobId
+ *     await storage.getBlob(id)
+ *   }
+ * }
+ * ```
+ */
+export function isBlobId(value: unknown): value is BlobId {
+  return typeof value === 'string' && value.length > 0
+}
+
+/**
+ * Type guard to check if a value is an AbsolutePath.
+ *
+ * Checks that the value is a string starting with '/'.
+ * This provides both runtime validation and type narrowing.
+ *
+ * @param value - Value to check
+ * @returns true if value is a string starting with '/'
+ *
+ * @example
+ * ```typescript
+ * function processPath(path: unknown): void {
+ *   if (isAbsolutePath(path)) {
+ *     // path is now typed as AbsolutePath
+ *     await fs.read(path)
+ *   } else {
+ *     throw new Error('Path must be absolute')
+ *   }
+ * }
+ * ```
+ */
+export function isAbsolutePath(value: unknown): value is AbsolutePath {
+  return typeof value === 'string' && value.startsWith('/')
+}
+
+// =============================================================================
 // Storage Tier Types
 // =============================================================================
 

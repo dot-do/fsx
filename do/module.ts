@@ -653,7 +653,10 @@ export class FsModule implements FsCapability {
 
     if (blob.length === 0) return
 
-    const newRefCount = blob[0]!.ref_count - 1
+    const firstBlob = blob[0]
+    if (!firstBlob) return
+
+    const newRefCount = firstBlob.ref_count - 1
 
     if (newRefCount <= 0) {
       // Delete blob completely
@@ -1473,9 +1476,114 @@ export class FsModule implements FsCapability {
   // STREAMING OPERATIONS
   // ===========================================================================
 
+  /**
+   * Create a readable stream for a file.
+   *
+   * This method implements true streaming where possible:
+   * - **Hot tier (SQLite)**: Data must be read from SQLite first, then chunked.
+   *   SQLite doesn't support streaming blob reads, so the full blob is loaded
+   *   into memory, then streamed out in chunks with proper backpressure.
+   * - **Warm/Cold tier (R2)**: Uses R2's native streaming via `object.body`,
+   *   which returns a true `ReadableStream` without loading the entire file
+   *   into memory. Range requests are also supported natively.
+   *
+   * @param path - File path to stream
+   * @param options - Streaming options (start, end, highWaterMark)
+   * @returns ReadableStream that emits Uint8Array chunks
+   *
+   * @example
+   * ```typescript
+   * // Stream a file
+   * const stream = await fs.createReadStream('/large-file.bin')
+   * return new Response(stream)
+   *
+   * // Stream with byte range (for HTTP Range requests)
+   * const partial = await fs.createReadStream('/video.mp4', {
+   *   start: 1000,
+   *   end: 2000
+   * })
+   * ```
+   */
   async createReadStream(path: string, options?: ReadStreamOptions): Promise<ReadableStream<Uint8Array>> {
-    const data = (await this.read(path, options)) as Uint8Array
-    const highWaterMark = options?.highWaterMark ?? 16384
+    await this.initialize()
+    const normalized = this.normalizePath(path)
+    const file = await this.getFile(normalized)
+
+    if (!file) {
+      throw new ENOENT(undefined, normalized)
+    }
+
+    if (file.type === 'directory') {
+      throw new EISDIR(undefined, normalized)
+    }
+
+    // Follow symlinks
+    if (file.type === 'symlink' && file.link_target) {
+      return this.createReadStream(file.link_target, options)
+    }
+
+    // Handle empty file or file without blob
+    if (!file.blob_id || file.size === 0) {
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      })
+    }
+
+    const tier = file.tier as StorageTier
+    const highWaterMark = options?.highWaterMark ?? 64 * 1024 // 64KB default chunk size
+    const start = options?.start ?? 0
+    const end = options?.end
+
+    // Update atime
+    this.sql.exec('UPDATE files SET atime = ? WHERE id = ?', Date.now(), file.id)
+
+    // For warm/cold tier (R2), use native streaming
+    if (tier === 'warm' && this.r2) {
+      return this.createR2ReadStream(file.blob_id, this.r2, start, end)
+    }
+
+    if (tier === 'cold' && this.archive) {
+      return this.createR2ReadStream(file.blob_id, this.archive, start, end)
+    }
+
+    // For hot tier (SQLite), read blob and stream chunks
+    // Note: SQLite doesn't support streaming blob reads, so we must load the full blob.
+    // This is a known limitation documented in the method comment.
+    return this.createHotTierReadStream(file.blob_id, start, end, highWaterMark)
+  }
+
+  /**
+   * Create a read stream for hot tier (SQLite) data.
+   *
+   * Since SQLite doesn't support streaming blob reads, we load the full blob
+   * into memory and then stream it out in chunks. This provides proper
+   * backpressure handling and memory-efficient consumption for the caller.
+   *
+   * @internal
+   */
+  private async createHotTierReadStream(
+    blobId: string,
+    start: number,
+    end: number | undefined,
+    highWaterMark: number
+  ): Promise<ReadableStream<Uint8Array>> {
+    const blob = this.sql.exec<{ data: ArrayBuffer }>('SELECT data FROM blobs WHERE id = ?', blobId).toArray()
+
+    if (blob.length === 0 || !blob[0]?.data) {
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      })
+    }
+
+    const fullData = new Uint8Array(blob[0].data)
+
+    // Apply range
+    const rangeEnd = end !== undefined ? Math.min(end + 1, fullData.length) : fullData.length
+    const data = fullData.subarray(start, rangeEnd)
     let offset = 0
 
     return new ReadableStream<Uint8Array>({
@@ -1485,11 +1593,53 @@ export class FsModule implements FsCapability {
           return
         }
 
-        const chunk = data.slice(offset, offset + highWaterMark)
-        offset += chunk.length
+        // Create chunk copy (slice) for safe consumer usage
+        const chunkEnd = Math.min(offset + highWaterMark, data.length)
+        const chunk = data.slice(offset, chunkEnd)
+        offset = chunkEnd
         controller.enqueue(chunk)
       },
     })
+  }
+
+  /**
+   * Create a read stream for warm/cold tier (R2) data.
+   *
+   * Uses R2's native streaming support. For range requests, R2's range option
+   * is used so only the requested bytes are transferred from storage.
+   *
+   * @internal
+   */
+  private async createR2ReadStream(
+    blobId: string,
+    bucket: R2Bucket,
+    start: number,
+    end: number | undefined
+  ): Promise<ReadableStream<Uint8Array>> {
+    // Build R2 range options for partial reads
+    let r2Options: R2GetOptions | undefined
+    if (start > 0 || end !== undefined) {
+      if (end !== undefined) {
+        r2Options = { range: { offset: start, length: end - start + 1 } }
+      } else {
+        r2Options = { range: { offset: start } }
+      }
+    }
+
+    const object = await bucket.get(blobId, r2Options)
+
+    if (!object) {
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      })
+    }
+
+    // R2 returns a native ReadableStream via object.body
+    // This is true streaming - the data is not loaded into memory all at once.
+    // The caller can apply additional transforms if needed.
+    return object.body as ReadableStream<Uint8Array>
   }
 
   async createWriteStream(path: string, options?: WriteStreamOptions): Promise<WritableStream<Uint8Array>> {
@@ -1981,15 +2131,16 @@ export class FsModule implements FsCapability {
       created_at: number
     }>('SELECT id, size, checksum, tier, ref_count, created_at FROM blobs WHERE id = ?', file.blob_id).toArray()
 
-    if (blob.length === 0) return null
+    const firstBlob = blob[0]
+    if (!firstBlob) return null
 
     return {
-      blobId: blob[0]!.id,
-      size: blob[0]!.size,
-      checksum: blob[0]!.checksum,
-      tier: blob[0]!.tier as StorageTier,
-      refCount: blob[0]!.ref_count,
-      createdAt: blob[0]!.created_at,
+      blobId: firstBlob.id,
+      size: firstBlob.size,
+      checksum: firstBlob.checksum,
+      tier: firstBlob.tier as StorageTier,
+      refCount: firstBlob.ref_count,
+      createdAt: firstBlob.created_at,
     }
   }
 
@@ -2017,15 +2168,16 @@ export class FsModule implements FsCapability {
       created_at: number
     }>('SELECT id, size, checksum, tier, ref_count, created_at FROM blobs WHERE id = ?', blobId).toArray()
 
-    if (blob.length === 0) return null
+    const firstBlob = blob[0]
+    if (!firstBlob) return null
 
     return {
-      id: blob[0]!.id,
-      size: blob[0]!.size,
-      checksum: blob[0]!.checksum,
-      tier: blob[0]!.tier as StorageTier,
-      ref_count: blob[0]!.ref_count,
-      created_at: blob[0]!.created_at,
+      id: firstBlob.id,
+      size: firstBlob.size,
+      checksum: firstBlob.checksum,
+      tier: firstBlob.tier as StorageTier,
+      ref_count: firstBlob.ref_count,
+      created_at: firstBlob.created_at,
     }
   }
 
@@ -2050,18 +2202,19 @@ export class FsModule implements FsCapability {
       tier: string
     }>('SELECT id, size, checksum, tier FROM blobs WHERE id = ?', blobId).toArray()
 
-    if (blobMeta.length === 0) return null
+    const firstBlobMeta = blobMeta[0]
+    if (!firstBlobMeta) return null
 
-    const tier = blobMeta[0]!.tier as StorageTier
+    const tier = firstBlobMeta.tier as StorageTier
     const data = await this.getBlob(blobId, tier)
 
     if (!data) return null
 
     return {
-      id: blobMeta[0]!.id,
+      id: firstBlobMeta.id,
       data,
-      size: blobMeta[0]!.size,
-      checksum: blobMeta[0]!.checksum,
+      size: firstBlobMeta.size,
+      checksum: firstBlobMeta.checksum,
       tier,
     }
   }
@@ -2086,11 +2239,12 @@ export class FsModule implements FsCapability {
       tier: string
     }>('SELECT id, size, checksum, tier FROM blobs WHERE id = ?', blobId).toArray()
 
-    if (blobMeta.length === 0) {
+    const firstBlobMeta = blobMeta[0]
+    if (!firstBlobMeta) {
       throw new Error(`Blob not found: ${blobId}`)
     }
 
-    const tier = blobMeta[0]!.tier as StorageTier
+    const tier = firstBlobMeta.tier as StorageTier
     const data = await this.getBlob(blobId, tier)
 
     if (!data) {
@@ -2098,7 +2252,7 @@ export class FsModule implements FsCapability {
     }
 
     const actualChecksum = await this.computeBlobChecksum(data)
-    const storedChecksum = blobMeta[0]!.checksum
+    const storedChecksum = firstBlobMeta.checksum
 
     return {
       valid: actualChecksum === storedChecksum,
@@ -2144,8 +2298,9 @@ export class FsModule implements FsCapability {
     for (const blobId of orphaned) {
       // Get blob tier before deleting
       const blobMeta = this.sql.exec<{ tier: string }>('SELECT tier FROM blobs WHERE id = ?', blobId).toArray()
-      if (blobMeta.length > 0) {
-        const tier = blobMeta[0]!.tier as StorageTier
+      const firstMeta = blobMeta[0]
+      if (firstMeta) {
+        const tier = firstMeta.tier as StorageTier
         await this.deleteBlobCompletely(blobId, tier)
       }
     }
@@ -2234,7 +2389,8 @@ export class FsModule implements FsCapability {
   async getBlobRefCount(blobId: string): Promise<number> {
     await this.initialize()
     const blob = this.sql.exec<{ ref_count: number }>('SELECT ref_count FROM blobs WHERE id = ?', blobId).toArray()
-    return blob.length > 0 ? blob[0]!.ref_count : 0
+    const firstBlob = blob[0]
+    return firstBlob ? firstBlob.ref_count : 0
   }
 
   // ===========================================================================
