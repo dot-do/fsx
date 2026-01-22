@@ -697,6 +697,12 @@ export class SQLiteMetadata implements MetadataStorage {
         }, options.timeout)
       }
 
+      // WARNING: BEGIN/COMMIT/ROLLBACK are BLOCKED in production Cloudflare DOs.
+      // This code works in Miniflare (local testing) but will FAIL in production.
+      // Production alternatives:
+      // 1. Use state.storage.transactionSync() for synchronous operations
+      // 2. Avoid await between SQL statements (automatic atomicity)
+      // See db/TRANSACTIONS.md for full documentation (do-stc2d.3)
       await this.sql.exec('BEGIN TRANSACTION')
       this.emitTransactionEvent('begin')
     } else {
