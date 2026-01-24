@@ -13,6 +13,8 @@
  * @module core/mcp/tools
  */
 
+import type { ToolResponse, DoInput, DoResult, Tool, ToolHandler, ToolRegistry } from '@dotdo/mcp/tools'
+
 import type { StorageBackend } from './shared'
 import { normalizePath } from './shared'
 import { invokeFsSearch } from './fs-search'
@@ -25,16 +27,10 @@ import {
 } from './scope'
 
 // =============================================================================
-// Types
+// Types - Re-export shared types from @dotdo/mcp
 // =============================================================================
 
-/**
- * MCP tool response format.
- */
-export interface ToolResponse {
-  content: Array<{ type: string; text: string }>
-  isError?: boolean
-}
+export type { ToolResponse, DoInput, DoResult, Tool, ToolHandler, ToolRegistry }
 
 /**
  * Input parameters for the search tool.
@@ -54,25 +50,6 @@ export interface SearchInput {
 export interface FetchInput {
   /** Resource identifier - file path */
   resource: string
-}
-
-/**
- * Input parameters for the do tool.
- */
-export interface DoInput {
-  /** TypeScript/JavaScript code to execute */
-  code: string
-}
-
-/**
- * Result from the do tool execution.
- */
-export interface DoResult {
-  success: boolean
-  value?: unknown
-  logs: Array<{ level: string; message: string; timestamp: number }>
-  error?: string
-  duration: number
 }
 
 // =============================================================================
@@ -469,40 +446,6 @@ export function createDoHandler(
 // =============================================================================
 // Tool Registration
 // =============================================================================
-
-/**
- * Tool definition compatible with MCP protocol.
- */
-export interface Tool {
-  name: string
-  description: string
-  inputSchema: {
-    type: string
-    properties: Record<string, unknown>
-    required: string[]
-  }
-}
-
-/**
- * Tool handler function type.
- */
-export type ToolHandler = (input: unknown) => Promise<ToolResponse>
-
-/**
- * Tool registry containing tools and their handlers.
- */
-export interface ToolRegistry {
-  /** Map of tool name to tool definition */
-  tools: Record<string, Tool>
-  /** Map of tool name to handler function */
-  handlers: Record<string, ToolHandler>
-  /** Register a new tool */
-  register: (tool: Tool, handler: ToolHandler) => void
-  /** Get handler for a tool by name */
-  getHandler: (name: string) => ToolHandler | undefined
-  /** List all registered tools */
-  list: () => Tool[]
-}
 
 /**
  * Configuration for registering the three core tools.

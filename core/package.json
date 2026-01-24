@@ -1,25 +1,57 @@
 {
   "name": "@dotdo/fsx",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Pure POSIX filesystem implementation in TypeScript. Zero dependencies. Self-hostable. FsBackend interface for pluggable storage.",
   "type": "module",
-  "main": "./index.ts",
-  "types": "./index.ts",
+  "main": "./index.js",
+  "types": "./index.d.ts",
   "exports": {
-    ".": "./index.ts",
-    "./types": "./types.ts",
-    "./errors": "./errors.ts",
-    "./constants": "./constants.ts",
-    "./path": "./path.ts",
-    "./backend": "./backend.ts",
-    "./fs": "./fs/index.ts",
-    "./glob": "./glob/index.ts",
-    "./grep": "./grep/index.ts",
-    "./find": "./find/index.ts",
-    "./cas": "./cas/index.ts"
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./types": {
+      "types": "./types.d.ts",
+      "import": "./types.js"
+    },
+    "./errors": {
+      "types": "./errors.d.ts",
+      "import": "./errors.js"
+    },
+    "./constants": {
+      "types": "./constants.d.ts",
+      "import": "./constants.js"
+    },
+    "./path": {
+      "types": "./path.d.ts",
+      "import": "./path.js"
+    },
+    "./backend": {
+      "types": "./backend.d.ts",
+      "import": "./backend.js"
+    },
+    "./glob": {
+      "types": "./glob/index.d.ts",
+      "import": "./glob/index.js"
+    },
+    "./grep": {
+      "types": "./grep/index.d.ts",
+      "import": "./grep/index.js"
+    },
+    "./find": {
+      "types": "./find/index.d.ts",
+      "import": "./find/index.js"
+    },
+    "./cas": {
+      "types": "./cas/index.d.ts",
+      "import": "./cas/index.js"
+    }
   },
   "files": [
-    "*.ts",
+    "*.js",
+    "*.d.ts",
+    "*.d.ts.map",
+    "*.js.map",
     "fs/",
     "glob/",
     "grep/",
@@ -28,7 +60,9 @@
     "sparse/",
     "transaction/",
     "watch/",
-    "utils/"
+    "mcp/",
+    "utils/",
+    "rpc/"
   ],
   "keywords": [
     "filesystem",
@@ -58,6 +92,7 @@
   "bugs": {
     "url": "https://github.com/dot-do/fsx/issues"
   },
-  "devDependencies": {},
-  "peerDependencies": {}
+  "dependencies": {
+    "@dotdo/mcp": "^0.1.0"
+  }
 }
