@@ -30,7 +30,6 @@ import { createMatcher } from '../glob/match'
 import {
   type McpToolResult,
   type StorageBackend,
-  normalizePath,
   joinPath,
   isPathTraversal,
   errorResult,
@@ -92,7 +91,7 @@ interface TreeEntry {
 /**
  * Extended storage backend for fs_tree operations.
  */
-interface TreeStorageBackend extends StorageBackend {
+export interface TreeStorageBackend extends StorageBackend {
   /** Normalize a path */
   normalizePath(path: string): string
   /** Get file name from path */
