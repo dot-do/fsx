@@ -8,14 +8,19 @@
  * @module core/mcp/scope
  */
 
+import type { DoScope, DoPermissions } from '@dotdo/mcp/scope'
 import type { StorageBackend } from './shared'
+
+// Re-export DoPermissions for consumers
+export type { DoPermissions }
 
 // =============================================================================
 // Types
 // =============================================================================
 
 /**
- * Permissions for the scope's sandbox environment.
+ * Permissions for the fs binding operations.
+ * These control what the fs binding can do within the sandbox.
  */
 export interface FsPermissions {
   /** Whether write operations are allowed */
@@ -27,9 +32,17 @@ export interface FsPermissions {
 }
 
 /**
- * The scope configuration for the Do tool with fs binding.
+ * Combined permissions for FsDoScope.
+ * Extends DoPermissions with fs-specific permissions, providing a unified
+ * permission model for both sandbox and filesystem operations.
  */
-export interface FsDoScope {
+export interface FsDoPermissions extends DoPermissions, FsPermissions {}
+
+/**
+ * The scope configuration for the Do tool with fs binding.
+ * Extends DoScope from @dotdo/mcp to be compatible with createDoHandler.
+ */
+export interface FsDoScope extends DoScope {
   /**
    * Bindings to inject into the sandbox.
    * The `fs` binding provides filesystem operations.
@@ -40,16 +53,11 @@ export interface FsDoScope {
   }
 
   /**
-   * TypeScript .d.ts content describing the bindings.
-   * Used by the LLM to generate correctly typed code.
+   * Permissions for sandbox and filesystem operations.
+   * Includes both DoPermissions (allowNetwork, allowedHosts) and
+   * FsPermissions (allowWrite, allowDelete, allowedPaths).
    */
-  types: string
-
-  /** Optional execution timeout in milliseconds */
-  timeout?: number
-
-  /** Optional permissions for the sandbox environment */
-  permissions?: FsPermissions
+  permissions?: FsDoPermissions
 }
 
 /**
@@ -764,9 +772,10 @@ declare const fs: {
  * Create a DoScope with fs bindings for filesystem operations.
  *
  * @param storage - Storage backend for filesystem operations
- * @param permissions - Optional permission restrictions
+ * @param fsPermissions - Optional fs-specific permission restrictions (allowWrite, allowDelete, allowedPaths)
  * @param additionalBindings - Additional bindings to include in the scope
- * @returns FsDoScope with fs binding
+ * @param sandboxPermissions - Optional sandbox permissions (allowNetwork, allowedHosts)
+ * @returns FsDoScope with fs binding and merged permissions
  *
  * @example
  * ```typescript
@@ -783,10 +792,20 @@ declare const fs: {
  */
 export function createFsScope(
   storage: ExtendedFsStorage,
-  permissions?: FsPermissions,
-  additionalBindings?: Record<string, unknown>
+  fsPermissions?: FsPermissions,
+  additionalBindings?: Record<string, unknown>,
+  sandboxPermissions?: DoPermissions
 ): FsDoScope {
-  const fsBinding = createFsBinding(storage, permissions)
+  const fsBinding = createFsBinding(storage, fsPermissions)
+
+  // Merge sandbox and fs permissions into unified permissions field
+  const mergedPermissions: FsDoPermissions | undefined =
+    fsPermissions || sandboxPermissions
+      ? {
+          ...sandboxPermissions,
+          ...fsPermissions,
+        }
+      : undefined
 
   return {
     bindings: {
@@ -795,6 +814,6 @@ export function createFsScope(
     },
     types: FS_BINDING_TYPES,
     timeout: 30000, // 30 second default timeout
-    permissions,
+    permissions: mergedPermissions,
   }
 }

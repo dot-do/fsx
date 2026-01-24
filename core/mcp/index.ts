@@ -206,6 +206,8 @@ export {
   type FsDoScope,
   type FsBinding,
   type FsPermissions,
+  type FsDoPermissions,
+  type DoPermissions,
   type ExtendedFsStorage,
   type FsStatResult,
   type FsListEntry,
@@ -242,4 +244,5 @@ export {
   /** @deprecated Use ToolRegistry from tool-registry instead for the global registry */
   type ToolRegistry as CoreToolRegistry,
   type ToolsConfig,
+  type SandboxEnv,
 } from './tools'
