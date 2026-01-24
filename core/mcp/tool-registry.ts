@@ -4,21 +4,36 @@
  * Provides a central registry for MCP tools with:
  * - Tool registration and unregistration
  * - Tool invocation via dispatcher
- * - Built-in filesystem tools (fs_*)
+ * - Built-in core tools: search, fetch, do
  * - Parameter validation
  * - Middleware support for cross-cutting concerns
+ *
+ * Only the three core tools (search, fetch, do) are registered as MCP tools.
+ * Legacy fs_* tool schemas are exported for backward compatibility but are
+ * not registered in the tool registry.
  *
  * @module core/mcp/tool-registry
  */
 
 import type { McpToolResult, StorageBackend } from './shared'
 
-// Import existing tool implementations and schemas
-import { invokeFsSearch, fsSearchToolSchema } from './fs-search'
-import { invokeFsList, fsListToolSchema } from './fs-list'
-import { invokeFsMkdir, fsMkdirToolSchema } from './fs-mkdir'
-import { invokeFsStat, fsStatToolSchema } from './fs-stat'
-import { invokeFsTree, fsTreeToolSchema } from './fs-tree'
+// Import legacy tool schemas (exported for backward compatibility)
+import { fsSearchToolSchema } from './fs-search'
+import { fsListToolSchema } from './fs-list'
+import { fsMkdirToolSchema } from './fs-mkdir'
+import { fsStatToolSchema } from './fs-stat'
+import { fsTreeToolSchema } from './fs-tree'
+
+// Import core tool schemas and handlers
+import {
+  searchToolSchema,
+  fetchToolSchema,
+  doToolSchema,
+  createSearchHandler,
+  createFetchHandler,
+  createDoHandler,
+} from './tools'
+import { createFsScope, type ExtendedFsStorage } from './scope'
 
 // =============================================================================
 // Types
@@ -373,7 +388,7 @@ export function getToolRegistry(): ToolRegistry {
 /**
  * Clear all custom tools from the registry.
  *
- * Built-in fs_* tools are preserved. Middleware is also cleared.
+ * Built-in core tools (search, fetch, do) are preserved. Middleware is also cleared.
  */
 export function clearToolRegistry(): void {
   // Remove only custom tools
@@ -585,7 +600,7 @@ export async function invokeTool(
 }
 
 // =============================================================================
-// Builtin Tool Schemas
+// Legacy Tool Schemas (exported for backward compatibility, not registered)
 // =============================================================================
 
 /**
@@ -743,291 +758,44 @@ export const fsExistsToolSchema: McpToolSchema = {
 }
 
 // =============================================================================
-// Builtin Tool Handlers
-// =============================================================================
-
-/**
- * Handler for fs_read tool.
- */
-async function invokeFsRead(
-  params: Record<string, unknown>,
-  storage?: unknown
-): Promise<McpToolResult> {
-  const path = params.path as string
-  const st = storage as StorageBackend
-
-  if (!st?.has(path)) {
-    return {
-      content: [{ type: 'text', text: `ENOENT: no such file: ${path}` }],
-      isError: true,
-    }
-  }
-
-  const entry = st.get(path)
-  if (!entry) {
-    return {
-      content: [{ type: 'text', text: `ENOENT: no such file: ${path}` }],
-      isError: true,
-    }
-  }
-
-  if (entry.type === 'directory') {
-    return {
-      content: [{ type: 'text', text: `EISDIR: is a directory: ${path}` }],
-      isError: true,
-    }
-  }
-
-  const content = new TextDecoder().decode(entry.content)
-  return {
-    content: [{ type: 'text', text: content }],
-    isError: false,
-  }
-}
-
-/**
- * Handler for fs_write tool.
- */
-async function invokeFsWrite(
-  params: Record<string, unknown>,
-  storage?: unknown
-): Promise<McpToolResult> {
-  const path = params.path as string
-  const content = params.content as string
-  const st = storage as StorageBackend & {
-    addFile(path: string, content: string | Uint8Array): void
-    getParentPath?(path: string): string
-    parentExists?(path: string): boolean
-  }
-
-  // Check parent exists
-  if (st.parentExists && !st.parentExists(path)) {
-    return {
-      content: [{ type: 'text', text: `ENOENT: parent directory does not exist` }],
-      isError: true,
-    }
-  }
-
-  st.addFile(path, content)
-  return {
-    content: [{ type: 'text', text: `Successfully wrote to ${path}` }],
-    isError: false,
-  }
-}
-
-/**
- * Handler for fs_append tool.
- */
-async function invokeFsAppend(
-  params: Record<string, unknown>,
-  storage?: unknown
-): Promise<McpToolResult> {
-  const path = params.path as string
-  const content = params.content as string
-  const st = storage as StorageBackend & {
-    addFile(path: string, content: string | Uint8Array): void
-    updateContent?(path: string, content: string | Uint8Array): void
-  }
-
-  const entry = st.get(path)
-  if (entry) {
-    const existingContent = new TextDecoder().decode(entry.content)
-    const newContent = existingContent + content
-
-    if (st.updateContent) {
-      st.updateContent(path, newContent)
-    } else {
-      st.addFile(path, newContent)
-    }
-  } else {
-    st.addFile(path, content)
-  }
-
-  return {
-    content: [{ type: 'text', text: `Successfully appended to ${path}` }],
-    isError: false,
-  }
-}
-
-/**
- * Handler for fs_delete tool.
- */
-async function invokeFsDelete(
-  params: Record<string, unknown>,
-  storage?: unknown
-): Promise<McpToolResult> {
-  const path = params.path as string
-  const recursive = params.recursive as boolean
-  const st = storage as StorageBackend & {
-    remove(path: string): boolean
-    getAllPaths?(): string[]
-  }
-
-  if (!st.has(path)) {
-    return {
-      content: [{ type: 'text', text: `ENOENT: no such file or directory: ${path}` }],
-      isError: true,
-    }
-  }
-
-  const entry = st.get(path)
-  if (entry?.type === 'directory') {
-    const children = st.getChildren(path)
-    if (children.length > 0 && !recursive) {
-      return {
-        content: [{ type: 'text', text: `ENOTEMPTY: directory not empty: ${path}` }],
-        isError: true,
-      }
-    }
-
-    if (recursive && st.getAllPaths) {
-      const allPaths = st.getAllPaths()
-      const toRemove = allPaths.filter((p) => p.startsWith(path + '/') || p === path)
-      toRemove.sort((a, b) => b.length - a.length)
-      for (const p of toRemove) {
-        st.remove(p)
-      }
-    } else {
-      st.remove(path)
-    }
-  } else {
-    st.remove(path)
-  }
-
-  return {
-    content: [{ type: 'text', text: `Successfully deleted ${path}` }],
-    isError: false,
-  }
-}
-
-/**
- * Handler for fs_move tool.
- */
-async function invokeFsMove(
-  params: Record<string, unknown>,
-  storage?: unknown
-): Promise<McpToolResult> {
-  const source = params.source as string
-  const destination = params.destination as string
-  const st = storage as StorageBackend & {
-    addFile(path: string, content: string | Uint8Array, options?: { mode?: number }): void
-    addDirectory(path: string, options?: { mode?: number }): void
-    remove(path: string): boolean
-  }
-
-  if (!st.has(source)) {
-    return {
-      content: [{ type: 'text', text: `ENOENT: no such file or directory: ${source}` }],
-      isError: true,
-    }
-  }
-
-  const entry = st.get(source)
-  if (!entry) {
-    return {
-      content: [{ type: 'text', text: `ENOENT: no such file or directory: ${source}` }],
-      isError: true,
-    }
-  }
-
-  if (entry.type === 'file') {
-    st.addFile(destination, entry.content)
-  } else if (entry.type === 'directory') {
-    st.addDirectory(destination)
-  }
-
-  st.remove(source)
-
-  return {
-    content: [{ type: 'text', text: `Successfully moved ${source} to ${destination}` }],
-    isError: false,
-  }
-}
-
-/**
- * Handler for fs_copy tool.
- */
-async function invokeFsCopy(
-  params: Record<string, unknown>,
-  storage?: unknown
-): Promise<McpToolResult> {
-  const source = params.source as string
-  const destination = params.destination as string
-  const st = storage as StorageBackend & {
-    addFile(path: string, content: string | Uint8Array): void
-  }
-
-  if (!st.has(source)) {
-    return {
-      content: [{ type: 'text', text: `ENOENT: no such file: ${source}` }],
-      isError: true,
-    }
-  }
-
-  const entry = st.get(source)
-  if (!entry) {
-    return {
-      content: [{ type: 'text', text: `ENOENT: no such file: ${source}` }],
-      isError: true,
-    }
-  }
-
-  if (entry.type === 'directory') {
-    return {
-      content: [{ type: 'text', text: `EISDIR: cannot copy directory: ${source}` }],
-      isError: true,
-    }
-  }
-
-  st.addFile(destination, entry.content)
-
-  return {
-    content: [{ type: 'text', text: `Successfully copied ${source} to ${destination}` }],
-    isError: false,
-  }
-}
-
-/**
- * Handler for fs_exists tool.
- */
-async function invokeFsExists(
-  params: Record<string, unknown>,
-  storage?: unknown
-): Promise<McpToolResult> {
-  const path = params.path as string
-  const st = storage as StorageBackend
-
-  const exists = st.has(path)
-
-  return {
-    content: [{ type: 'text', text: exists ? 'true' : 'false' }],
-    isError: false,
-  }
-}
-
-// =============================================================================
 // fsTools Array
 // =============================================================================
 
 /**
  * Array of all built-in filesystem MCP tools.
  *
- * Each tool has a schema and handler that can be used for
- * direct invocation or MCP registration.
+ * Only contains the 3 core tools: search, fetch, do.
+ * The legacy fs_* tools are NOT registered as MCP tools.
+ * Their implementations are still available for the fs binding in the 'do' tool.
  */
 export const fsTools: McpTool[] = [
-  { schema: fsSearchToolSchema as McpToolSchema, handler: invokeFsSearch as McpToolHandler },
-  { schema: fsListToolSchema as McpToolSchema, handler: invokeFsList as McpToolHandler },
-  { schema: fsTreeToolSchema as McpToolSchema, handler: invokeFsTree as McpToolHandler },
-  { schema: fsStatToolSchema as McpToolSchema, handler: invokeFsStat as McpToolHandler },
-  { schema: fsMkdirToolSchema as McpToolSchema, handler: invokeFsMkdir as McpToolHandler },
-  { schema: fsReadToolSchema, handler: invokeFsRead },
-  { schema: fsWriteToolSchema, handler: invokeFsWrite },
-  { schema: fsAppendToolSchema, handler: invokeFsAppend },
-  { schema: fsDeleteToolSchema, handler: invokeFsDelete },
-  { schema: fsMoveToolSchema, handler: invokeFsMove },
-  { schema: fsCopyToolSchema, handler: invokeFsCopy },
-  { schema: fsExistsToolSchema, handler: invokeFsExists },
+  // Only the 3 core tools are exposed via MCP
+  // Handlers create tool handlers on-the-fly using storage passed at invocation time
+  {
+    schema: searchToolSchema as McpToolSchema,
+    handler: async (params, storage) => {
+      const searchHandler = createSearchHandler(storage as StorageBackend)
+      const result = await searchHandler(params as { query: string; limit?: number; path?: string })
+      return result as McpToolResult
+    },
+  },
+  {
+    schema: fetchToolSchema as McpToolSchema,
+    handler: async (params, storage) => {
+      const fetchHandler = createFetchHandler(storage as StorageBackend)
+      const result = await fetchHandler(params as { resource: string })
+      return result as McpToolResult
+    },
+  },
+  {
+    schema: doToolSchema as McpToolSchema,
+    handler: async (params, storage) => {
+      const scope = createFsScope(storage as ExtendedFsStorage)
+      const doHandler = createDoHandler(scope)
+      const result = await doHandler(params as { code: string })
+      return result as McpToolResult
+    },
+  },
 ]
 
 // =============================================================================
@@ -1035,7 +803,7 @@ export const fsTools: McpTool[] = [
 // =============================================================================
 
 /**
- * Register all builtin filesystem tools.
+ * Register all builtin tools (search, fetch, do).
  *
  * Called on module initialization and after clearToolRegistry().
  * Builtin tools are tracked separately and preserved across registry clears.
@@ -1065,10 +833,9 @@ export function isBuiltinTool(name: string): boolean {
 registerBuiltinTools()
 
 // =============================================================================
-// Re-exports
+// Re-exports (legacy schemas for backward compatibility)
 // =============================================================================
 
-// Re-export existing schemas for backward compatibility
 export {
   fsSearchToolSchema,
   fsListToolSchema,

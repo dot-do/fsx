@@ -66,12 +66,11 @@ export interface AuthMiddlewareConfig {
 // =============================================================================
 
 /**
- * MCP tools that only require read access
- * These can be accessed anonymously or with authentication
+ * MCP tools that only require read access.
+ * These can be accessed anonymously or with authentication.
  *
- * Includes both:
- * - Core 3 tools: search, fetch (do requires admin)
- * - Legacy fs_* tool names (for backward compatibility in auth checks)
+ * - Core tools: search, fetch (do requires admin, handled via fallback)
+ * - Legacy fs_* tool names retained for backward compatibility in auth checks
  */
 export const READ_ONLY_TOOLS = new Set([
   // Core read-only tools
@@ -88,8 +87,10 @@ export const READ_ONLY_TOOLS = new Set([
 ])
 
 /**
- * MCP tools that require write access
- * These require authentication with write scope
+ * MCP tools that require write access.
+ * These require authentication with write scope.
+ * Legacy fs_* tool names retained for backward compatibility in auth checks.
+ * Note: The 'do' tool falls through to the "unknown tool" path, requiring admin.
  */
 export const WRITE_TOOLS = new Set([
   'fs_write',

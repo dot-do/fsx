@@ -4,9 +4,9 @@
  * This module provides filesystem tools for AI-assisted file operations
  * via the Model Context Protocol (MCP).
  *
- * ## Core Tools (Recommended Pattern)
+ * ## Core Tools (3-Tool Architecture)
  *
- * The recommended pattern uses three core tools with an fs binding:
+ * The MCP interface exposes exactly three tools:
  *
  * - `search` - Search for files using glob patterns or content search
  * - `fetch` - Read file content by path
@@ -26,31 +26,19 @@
  * - fs.search(pattern, options?) - Search for files
  * - fs.exists(path) - Check if path exists
  *
- * ## Legacy Tools (Backward Compatible)
- *
- * Individual fs_* tools are still available for backward compatibility:
- * - `fs_search` - Glob pattern file search with content filtering
- * - `fs_list` - Directory listing with recursive, pattern filtering, and pagination
- * - `fs_mkdir` - Directory creation with recursive and permission support
- * - `fs_stat` - File/directory statistics with symlink handling
- * - `fs_lstat` - File/directory statistics (does not follow symlinks)
- * - `fs_tree` - Directory tree visualization with ASCII and JSON output
- * - `fs_read` - Read file contents
- * - `fs_write` - Write content to a file
- * - `fs_append` - Append content to a file
- * - `fs_delete` - Delete a file or directory
- * - `fs_move` - Move/rename a file or directory
- * - `fs_copy` - Copy a file
- * - `fs_exists` - Check if a file or directory exists
- *
  * ## Tool Infrastructure
  *
  * - `registerTools()` - Register search/fetch/do tools with fs binding
- * - `createToolRegistry()` - Create a new tool registry
  * - `registerTool()` - Register custom tools
  * - `unregisterTool()` - Remove tools from registry
  * - `invokeTool()` - Dispatch to tool handler by name
  * - `getToolRegistry()` - Get registry interface
+ *
+ * ## Internal Modules
+ *
+ * The underlying fs operations (invokeFsSearch, invokeFsList, etc.) are
+ * still exported for use by the fs binding implementation and testing,
+ * but are not registered as MCP tools.
  *
  * @module core/mcp
  */
@@ -80,7 +68,7 @@ export {
   successResult,
 } from './shared'
 
-// fs_search - Glob pattern file search
+// fs_search - Glob pattern file search (used internally by search tool and fs binding)
 export {
   invokeFsSearch,
   // Types
@@ -92,21 +80,21 @@ export {
   searchDirectory,
 } from './fs-search'
 
-// fs_list - Directory listing
+// fs_list - Directory listing (used internally by fs binding)
 export {
   invokeFsList,
   // Types
   type FsListOptions,
 } from './fs-list'
 
-// fs_mkdir - Directory creation
+// fs_mkdir - Directory creation (used internally by fs binding)
 export {
   invokeFsMkdir,
   // Types
   type FsMkdirOptions,
 } from './fs-mkdir'
 
-// fs_stat - File/directory statistics
+// fs_stat - File/directory statistics (used internally by fs binding)
 export {
   invokeFsStat,
   invokeFsLstat,
@@ -131,7 +119,7 @@ export {
   MAX_SYMLINK_DEPTH,
 } from './fs-stat'
 
-// fs_tree - Directory tree visualization
+// fs_tree - Directory tree visualization (used internally by fetch tool and fs binding)
 export {
   invokeFsTree,
   formatSize,
@@ -153,7 +141,7 @@ export {
   clearMiddleware,
   // Utility functions
   isBuiltinTool,
-  // fsTools array with all built-in tools
+  // fsTools array with built-in tools (search, fetch, do)
   fsTools,
   // Types
   type PropertySchema,
@@ -165,7 +153,7 @@ export {
   type InvokeToolOptions,
   type ToolContext,
   type ToolMiddleware,
-  // All tool schemas
+  // Tool schemas (core tools are registered; legacy schemas exported for compatibility)
   fsSearchToolSchema,
   fsListToolSchema,
   fsTreeToolSchema,
@@ -204,7 +192,7 @@ export {
 } from './auth-middleware'
 
 // =============================================================================
-// Core Tools Pattern: search, fetch, do with fs binding
+// Core Tools: search, fetch, do with fs binding
 // =============================================================================
 
 // DoScope for sandboxed code execution with fs binding
@@ -251,6 +239,7 @@ export {
   type DoResult,
   type Tool,
   type ToolHandler,
+  /** @deprecated Use ToolRegistry from tool-registry instead for the global registry */
   type ToolRegistry as CoreToolRegistry,
   type ToolsConfig,
 } from './tools'

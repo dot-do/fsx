@@ -702,68 +702,23 @@ describe('MCP Tool Infrastructure - fsTools Array', () => {
       expect(Array.isArray(fsTools)).toBe(true)
     })
 
-    it('should include fs_search tool', () => {
-      const hasSearch = fsTools.some((tool) => tool.schema.name === 'fs_search')
+    it('should include search tool', () => {
+      const hasSearch = fsTools.some((tool) => tool.schema.name === 'search')
       expect(hasSearch).toBe(true)
     })
 
-    it('should include fs_list tool', () => {
-      const hasList = fsTools.some((tool) => tool.schema.name === 'fs_list')
-      expect(hasList).toBe(true)
+    it('should include fetch tool', () => {
+      const hasFetch = fsTools.some((tool) => tool.schema.name === 'fetch')
+      expect(hasFetch).toBe(true)
     })
 
-    it('should include fs_tree tool', () => {
-      const hasTree = fsTools.some((tool) => tool.schema.name === 'fs_tree')
-      expect(hasTree).toBe(true)
+    it('should include do tool', () => {
+      const hasDo = fsTools.some((tool) => tool.schema.name === 'do')
+      expect(hasDo).toBe(true)
     })
 
-    it('should include fs_stat tool', () => {
-      const hasStat = fsTools.some((tool) => tool.schema.name === 'fs_stat')
-      expect(hasStat).toBe(true)
-    })
-
-    it('should include fs_mkdir tool', () => {
-      const hasMkdir = fsTools.some((tool) => tool.schema.name === 'fs_mkdir')
-      expect(hasMkdir).toBe(true)
-    })
-
-    it('should include fs_read tool', () => {
-      const hasRead = fsTools.some((tool) => tool.schema.name === 'fs_read')
-      expect(hasRead).toBe(true)
-    })
-
-    it('should include fs_write tool', () => {
-      const hasWrite = fsTools.some((tool) => tool.schema.name === 'fs_write')
-      expect(hasWrite).toBe(true)
-    })
-
-    it('should include fs_append tool', () => {
-      const hasAppend = fsTools.some((tool) => tool.schema.name === 'fs_append')
-      expect(hasAppend).toBe(true)
-    })
-
-    it('should include fs_delete tool', () => {
-      const hasDelete = fsTools.some((tool) => tool.schema.name === 'fs_delete')
-      expect(hasDelete).toBe(true)
-    })
-
-    it('should include fs_move tool', () => {
-      const hasMove = fsTools.some((tool) => tool.schema.name === 'fs_move')
-      expect(hasMove).toBe(true)
-    })
-
-    it('should include fs_copy tool', () => {
-      const hasCopy = fsTools.some((tool) => tool.schema.name === 'fs_copy')
-      expect(hasCopy).toBe(true)
-    })
-
-    it('should include fs_exists tool', () => {
-      const hasExists = fsTools.some((tool) => tool.schema.name === 'fs_exists')
-      expect(hasExists).toBe(true)
-    })
-
-    it('should contain at least 12 filesystem tools', () => {
-      expect(fsTools.length).toBeGreaterThanOrEqual(12)
+    it('should contain exactly 3 core tools', () => {
+      expect(fsTools.length).toBe(3)
     })
 
     it('should have all tools with valid schemas', () => {
@@ -783,10 +738,9 @@ describe('MCP Tool Infrastructure - fsTools Array', () => {
       }
     })
 
-    it('should have all tool names prefixed with fs_', () => {
-      for (const tool of fsTools) {
-        expect(tool.schema.name.startsWith('fs_')).toBe(true)
-      }
+    it('should have only search, fetch, do tool names', () => {
+      const names = fsTools.map((tool) => tool.schema.name).sort()
+      expect(names).toEqual(['do', 'fetch', 'search'])
     })
   })
 
@@ -960,13 +914,14 @@ describe('MCP Tool Infrastructure - clearToolRegistry()', () => {
     expect(registryAfter.has('clear_test_2')).toBe(false)
   })
 
-  it('should preserve built-in fs_ tools after clear', () => {
+  it('should preserve built-in core tools after clear', () => {
     clearToolRegistry()
 
     const registry = getToolRegistry()
-    // Built-in tools should still be available
-    expect(registry.has('fs_search')).toBe(true)
-    expect(registry.has('fs_list')).toBe(true)
+    // Built-in core tools should still be available
+    expect(registry.has('search')).toBe(true)
+    expect(registry.has('fetch')).toBe(true)
+    expect(registry.has('do')).toBe(true)
   })
 
   it('should allow re-registration after clear', () => {
@@ -1003,43 +958,42 @@ describe('MCP Tool Infrastructure - Integration', () => {
     clearToolRegistry()
   })
 
-  describe('invoking built-in fs tools via invokeTool', () => {
-    it('should invoke fs_search through invokeTool dispatcher', async () => {
-      const result = await invokeTool('fs_search', { pattern: '*.txt', path: '/home/user' }, storage)
+  describe('invoking built-in core tools via invokeTool', () => {
+    it('should invoke search through invokeTool dispatcher', async () => {
+      const result = await invokeTool('search', { query: '*.txt', path: '/home/user' }, storage)
 
       expect(result.isError).toBeFalsy()
       const text = (result.content[0] as { type: 'text'; text: string }).text
       expect(text).toContain('hello.txt')
     })
 
-    it('should invoke fs_list through invokeTool dispatcher', async () => {
-      const result = await invokeTool('fs_list', { path: '/home/user' }, storage)
+    it('should invoke fetch through invokeTool dispatcher', async () => {
+      const result = await invokeTool('fetch', { resource: '/home/user/hello.txt' }, storage)
 
       expect(result.isError).toBeFalsy()
       const text = (result.content[0] as { type: 'text'; text: string }).text
-      expect(text).toContain('hello.txt')
-      expect(text).toContain('data.json')
+      expect(text).toContain('Hello')
     })
 
-    it('should invoke fs_exists through invokeTool dispatcher', async () => {
-      const result = await invokeTool('fs_exists', { path: '/home/user/hello.txt' }, storage)
+    it('should invoke do through invokeTool dispatcher for fs.exists', async () => {
+      const result = await invokeTool('do', { code: 'return await fs.exists("/home/user/hello.txt")' }, storage)
 
       expect(result.isError).toBeFalsy()
       const text = (result.content[0] as { type: 'text'; text: string }).text
-      expect(text).toMatch(/true|exists|found/i)
+      expect(text).toMatch(/true|success/i)
     })
 
-    it('should invoke fs_stat through invokeTool dispatcher', async () => {
-      const result = await invokeTool('fs_stat', { path: '/home/user/hello.txt' }, storage)
+    it('should invoke do through invokeTool dispatcher for fs.list', async () => {
+      const result = await invokeTool('do', { code: 'return await fs.list("/home/user")' }, storage)
 
       expect(result.isError).toBeFalsy()
       const text = (result.content[0] as { type: 'text'; text: string }).text
-      expect(text).toMatch(/file|size|type/i)
+      expect(text).toMatch(/hello\.txt|data\.json|success/i)
     })
   })
 
   describe('custom tool alongside built-in tools', () => {
-    it('should allow custom tool to work alongside fs tools', async () => {
+    it('should allow custom tool to work alongside core tools', async () => {
       registerTool(
         {
           name: 'custom_grep',
@@ -1063,9 +1017,9 @@ describe('MCP Tool Infrastructure - Integration', () => {
         }
       )
 
-      // Use built-in tool
-      const listResult = await invokeTool('fs_list', { path: '/home/user' }, storage)
-      expect(listResult.isError).toBeFalsy()
+      // Use built-in search tool
+      const searchResult = await invokeTool('search', { query: '*.txt', path: '/home/user' }, storage)
+      expect(searchResult.isError).toBeFalsy()
 
       // Use custom tool
       const grepResult = await invokeTool('custom_grep', { pattern: 'Hello', file: '/home/user/hello.txt' }, storage)
@@ -1084,9 +1038,10 @@ describe('MCP Tool Infrastructure - Integration', () => {
       const registry = getToolRegistry()
       const tools = registry.list()
 
-      // Built-in tools
-      expect(tools).toContain('fs_search')
-      expect(tools).toContain('fs_list')
+      // Built-in core tools (search, fetch, do)
+      expect(tools).toContain('search')
+      expect(tools).toContain('fetch')
+      expect(tools).toContain('do')
 
       // Custom tool
       expect(tools).toContain('my_custom')
@@ -1102,7 +1057,7 @@ describe('MCP Tool Infrastructure - Integration', () => {
       const schemas = registry.schemas()
 
       // Find schemas
-      const searchSchema = schemas.find((s) => s.name === 'fs_search')
+      const searchSchema = schemas.find((s) => s.name === 'search')
       const customSchema = schemas.find((s) => s.name === 'schema_custom')
 
       expect(searchSchema).toBeDefined()

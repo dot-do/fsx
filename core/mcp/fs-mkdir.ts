@@ -16,7 +16,6 @@
  * @module core/mcp/fs-mkdir
  */
 
-import { constants } from '../constants'
 import type { McpToolResult, StorageBackend } from './fs-search'
 
 // =============================================================================

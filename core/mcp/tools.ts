@@ -6,8 +6,9 @@
  * - fetch: Read file content by path
  * - do: Execute code with fs binding available
  *
- * These tools replace the 12 individual fs_* tools with a simpler, more
- * flexible pattern that enables sandboxed code execution with filesystem access.
+ * The fs binding in the 'do' tool provides all filesystem operations
+ * (read, write, delete, move, copy, mkdir, stat, list, tree, search, exists),
+ * making individual tool exposure unnecessary.
  *
  * @module core/mcp/tools
  */
@@ -194,7 +195,7 @@ export function createSearchHandler(
         }
       }
 
-      // Use existing fs_search implementation
+      // Delegate to fs_search implementation
       const result = await invokeFsSearch(searchParams, storage)
 
       return {
