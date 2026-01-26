@@ -7,6 +7,9 @@
  * @module storage/compression/types
  */
 
+// Re-export CompressionFormat from @dotdo/types for consistency
+export type { CompressionFormat } from '@dotdo/types/compression'
+
 /**
  * Core Compressor interface.
  *

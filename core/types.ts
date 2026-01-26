@@ -11,127 +11,36 @@
 import { constants } from './constants'
 
 // =============================================================================
-// Branded Types
+// Re-exports from @dotdo/types/filesystem
 // =============================================================================
 
-/**
- * A branded type for unique file identifiers.
- *
- * FileId is a string that has been validated to be a proper file identifier.
- * The brand prevents accidental mixing with other string types like BlobId
- * or AbsolutePath.
- *
- * @example
- * ```typescript
- * const id = fileId('abc123')  // FileId
- * const path = absolutePath('/home/user/file.txt')  // AbsolutePath
- *
- * // These would be compile-time errors in strict typing:
- * // lookupFile(path)  // Error: AbsolutePath is not FileId
- * ```
- */
-export type FileId = string & { readonly __brand: 'FileId' }
+// Branded types
+export type {
+  FileId,
+  BlobId,
+  AbsolutePath,
+  RelativePath,
+} from '@dotdo/types/filesystem'
 
-/**
- * A branded type for blob storage identifiers.
- *
- * BlobId is a string that identifies a blob in the storage layer (e.g., R2).
- * The brand prevents accidental mixing with FileId or AbsolutePath.
- *
- * @example
- * ```typescript
- * const blob = blobId('sha256:abc123...')  // BlobId
- * const file = fileId('file-001')          // FileId
- *
- * // Type-safe: can't accidentally use one for the other
- * ```
- */
-export type BlobId = string & { readonly __brand: 'BlobId' }
+// Branded type constructors
+export {
+  fileId,
+  blobId,
+  absolutePath,
+  relativePath,
+} from '@dotdo/types/filesystem'
 
-/**
- * A branded type for absolute filesystem paths.
- *
- * AbsolutePath is a string that represents a validated absolute path
- * (starting with '/'). The brand prevents accidental mixing with
- * relative paths or identifiers.
- *
- * @example
- * ```typescript
- * const path = absolutePath('/home/user/file.txt')  // AbsolutePath
- *
- * // Type-safe path handling
- * function readFile(path: AbsolutePath): Promise<Uint8Array>
- * ```
- */
-export type AbsolutePath = string & { readonly __brand: 'AbsolutePath' }
+// Re-export IFileHandle interface from @dotdo/types (aliased for backwards compatibility)
+export type { IFileHandle as IFileHandleInterface } from '@dotdo/types/filesystem'
+
+// Re-export Stats interface from @dotdo/types for type compatibility checking
+export type { Stats as StatsInterface } from '@dotdo/types/filesystem'
 
 // =============================================================================
-// Branded Type Constructors
+// Branded Type Guards (local implementations for runtime checks)
 // =============================================================================
 
-/**
- * Create a FileId from a string.
- *
- * This is a runtime cast that marks the string as a FileId.
- * Use this when you have a string that you know is a valid file identifier.
- *
- * @param id - The string identifier
- * @returns The same string branded as FileId
- *
- * @example
- * ```typescript
- * const id = fileId('file-abc123')
- * await storage.getEntry(id)
- * ```
- */
-export function fileId(id: string): FileId {
-  return id as FileId
-}
-
-/**
- * Create a BlobId from a string.
- *
- * This is a runtime cast that marks the string as a BlobId.
- * Use this when you have a string that you know is a valid blob identifier.
- *
- * @param id - The string identifier
- * @returns The same string branded as BlobId
- *
- * @example
- * ```typescript
- * const blob = blobId('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
- * await storage.getBlob(blob)
- * ```
- */
-export function blobId(id: string): BlobId {
-  return id as BlobId
-}
-
-/**
- * Create an AbsolutePath from a string.
- *
- * This is a runtime cast that marks the string as an AbsolutePath.
- * Use this when you have a string that you know is a valid absolute path.
- *
- * Note: This function does NOT validate that the path is actually absolute.
- * For validation, use isAbsolutePath() first.
- *
- * @param path - The path string
- * @returns The same string branded as AbsolutePath
- *
- * @example
- * ```typescript
- * const path = absolutePath('/home/user/documents/file.txt')
- * await fs.read(path)
- * ```
- */
-export function absolutePath(path: string): AbsolutePath {
-  return path as AbsolutePath
-}
-
-// =============================================================================
-// Branded Type Guards
-// =============================================================================
+import type { FileId, BlobId, AbsolutePath } from '@dotdo/types/filesystem'
 
 /**
  * Type guard to check if a value is a FileId.
@@ -1025,6 +934,7 @@ export class FileHandle implements IFileHandle {
    * Set to true when data has been modified since last sync.
    * Allows sync() to be a no-op when no changes have been made.
    */
+  // @ts-ignore Reserved for future sync optimization (value written but not yet read)
   private _dirty: boolean = false
 
   constructor(fd: number, data: Uint8Array, stats: StatsLike) {
