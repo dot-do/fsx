@@ -12,11 +12,10 @@
  * @module storage/compression/gzip
  */
 
-// @ts-expect-error - pako types (@types/pako) not included in tsconfig.json 'types' array.
 import pako from 'pako'
 
 import {
-  type Compressor,
+  type Compressor as _Compressor,
   type CompressorWithMetrics,
   type CompressionMetrics,
   CompressionError,

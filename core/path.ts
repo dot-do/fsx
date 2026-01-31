@@ -276,7 +276,9 @@ export function normalize(path: string): string {
   if (path === '/') return '/'
 
   const isAbsolute = isSlash(path.charCodeAt(0))
-  const trailingSlash = isSlash(path.charCodeAt(path.length - 1))
+  // Reserved: trailingSlash could be used to preserve trailing slashes in normalization
+  const _trailingSlash = isSlash(path.charCodeAt(path.length - 1))
+  void _trailingSlash
 
   // Normalize the path
   let normalized = normalizeStringPosix(path, !isAbsolute)

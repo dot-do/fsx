@@ -894,16 +894,18 @@ function getAncestorDirectories(path: string): string[] {
 
 /**
  * Check if a path is an immediate child of a directory
- * e.g., isImmediateChildOf('src/index.ts', 'src') -> true
- * e.g., isImmediateChildOf('src/utils/helper.ts', 'src') -> false
+ * Reserved for future pattern matching optimization
+ * e.g., _isImmediateChildOf('src/index.ts', 'src') -> true
+ * e.g., _isImmediateChildOf('src/utils/helper.ts', 'src') -> false
  */
-function isImmediateChildOf(path: string, dir: string): boolean {
+function _isImmediateChildOf(path: string, dir: string): boolean {
   if (!path.startsWith(dir + '/')) {
     return false
   }
   const relativePath = path.slice(dir.length + 1)
   return !relativePath.includes('/')
 }
+void _isImmediateChildOf
 
 /**
  * Check if a path is under a directory (immediate or nested)

@@ -16,9 +16,6 @@ import { runCLI } from './index.js'
 import { FSx } from '../core/fsx.js'
 import { MemoryBackend } from '../core/backend.js'
 import type { Dirent } from '../core/types.js'
-import { createLogger } from '../../utils/logger'
-
-const logger = createLogger('[fsx-cli]')
 
 // Create a shared filesystem instance
 const backend = new MemoryBackend()
@@ -90,6 +87,6 @@ runCLI(args, context)
     process.exit(result.exitCode)
   })
   .catch(err => {
-    logger.error('Fatal error:', err)
+    console.error('Fatal error:', err)
     process.exit(1)
   })

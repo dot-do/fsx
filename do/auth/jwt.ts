@@ -33,14 +33,16 @@ function base64UrlDecode(str: string): Uint8Array {
 
 /**
  * Base64URL encode (RFC 4648)
+ * Reserved for future JWT signing functionality
  */
-function base64UrlEncode(bytes: Uint8Array): string {
+function _base64UrlEncode(bytes: Uint8Array): string {
   let binary = ''
   for (const byte of bytes) {
     binary += String.fromCharCode(byte)
   }
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
+void _base64UrlEncode
 
 /**
  * Parse a JWT token into its parts

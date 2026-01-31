@@ -1,6 +1,6 @@
 {
   "name": "@dotdo/fsx",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "Pure POSIX filesystem implementation in TypeScript. Zero dependencies. Self-hostable. FsBackend interface for pluggable storage.",
   "type": "module",
   "main": "./index.js",
@@ -45,6 +45,10 @@
     "./cas": {
       "types": "./cas/index.d.ts",
       "import": "./cas/index.js"
+    },
+    "./fn": {
+      "types": "./fn.d.ts",
+      "import": "./fn.js"
     }
   },
   "files": [
@@ -94,5 +98,14 @@
   },
   "dependencies": {
     "@dotdo/mcp": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@dotdo/types": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@dotdo/types": { "optional": true }
+  },
+  "devDependencies": {
+    "@dotdo/types": "file:../../types"
   }
 }

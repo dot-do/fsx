@@ -5,6 +5,9 @@
   "compatibility_date": "2024-12-01",
   "compatibility_flags": ["nodejs_compat"],
 
+  // Worker loaders for ai-evaluate sandboxed execution
+  "worker_loaders": [{ "binding": "LOADER" }],
+
   // Routes
   "routes": [
     { "pattern": "fsx.do", "custom_domain": true }

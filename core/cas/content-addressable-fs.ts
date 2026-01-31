@@ -351,11 +351,9 @@ export class ContentAddressableFS {
       type: item.type,
     }))
 
-    // Track sizes for refcount storage
-    const sizes = new Map<string, number>()
-    items.forEach(item => {
-      // We'll populate this after we get hashes back
-    })
+    // Track sizes for refcount storage (reserved for future stats tracking)
+    const _sizes = new Map<string, number>()
+    void _sizes // Reserved for future size tracking after hash computation
 
     // Wrap onProgress to add refcount updates
     const originalOnProgress = options.onProgress

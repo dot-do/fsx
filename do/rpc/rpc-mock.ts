@@ -209,7 +209,7 @@ export class BinarySerializer implements Serializer {
     const processed = preprocess(msg)
     const json = JSON.stringify(processed)
     const encoder = new TextEncoder()
-    return encoder.encode(json).buffer
+    return encoder.encode(json).buffer as ArrayBuffer
   }
 
   decode(data: ArrayBuffer): unknown {
@@ -244,7 +244,7 @@ export class JsonSerializer implements Serializer {
   encode(msg: unknown): ArrayBuffer {
     const json = JSON.stringify(msg)
     const encoder = new TextEncoder()
-    return encoder.encode(json).buffer
+    return encoder.encode(json).buffer as ArrayBuffer
   }
 
   decode(data: ArrayBuffer): unknown {
@@ -464,7 +464,7 @@ export function createRPCHandler(instance: unknown, ctx: RPCHandlerContext = {})
     registeredMethods,
 
     async handleRequest(request: RPCRequest): Promise<RPCResponse> {
-      const { id, path, args, timestamp } = request
+      const { id, path, args, timestamp: _timestamp } = request
 
       // Resolve method from path
       let target: unknown = instance

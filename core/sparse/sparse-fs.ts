@@ -370,6 +370,7 @@ export class SparseFS {
   private readonly checker: IncludeChecker
 
   /** Original options - kept for future use (cone mode, etc.) */
+  // @ts-expect-error Reserved for future cone mode implementation
   private readonly options: SparseFSOptions
 
   /** Root path to strip from paths before pattern matching */

@@ -288,7 +288,7 @@ function getRelativePath(path: string, base: string): string {
  * @internal
  */
 // Legacy function - preserved for potential external use
-async function _traverse(
+export async function _traverse(
   dir: string,
   options: {
     dot: boolean
@@ -495,10 +495,11 @@ function analyzePattern(pattern: string, dot: boolean): PatternInfo {
  * @param dot - Whether to match dotfiles
  * @returns true if the directory could contain matches
  */
-function couldContainMatches(
+// Reserved for future traversal optimization - early pruning during directory traversal
+export function _couldContainMatches(
   dirPath: string,
   patterns: PatternInfo[],
-  dot: boolean
+  _dot: boolean
 ): boolean {
   // Check each pattern to see if this directory could contain matches
   for (const info of patterns) {

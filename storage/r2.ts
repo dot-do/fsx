@@ -49,6 +49,7 @@ import {
 const MAX_KEY_LENGTH_BYTES = 1024
 
 /** Maximum parts for multipart uploads (R2 limit) */
+// @ts-expect-error Reserved for future multipart upload implementation
 const _MAX_MULTIPART_PARTS = 10000
 
 /** Default retry configuration */
@@ -210,6 +211,7 @@ function sleep(ms: number): Promise<void> {
  *
  * @internal Reserved for future use when retry is enabled by configuration.
  */
+// @ts-expect-error Reserved for future retry implementation
 async function _withRetry<T>(
   fn: () => Promise<T>,
   config: Required<RetryConfig>,
@@ -316,6 +318,7 @@ export class R2Storage implements BlobStorage {
   private readonly prefix: string
   private readonly hooks?: StorageHooks
   /** @internal Reserved for future retry functionality */
+  // @ts-expect-error Reserved for future retry implementation
   private readonly _retryConfig: Required<RetryConfig>
 
   /**

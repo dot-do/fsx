@@ -35,7 +35,7 @@
  */
 
 import type { BufferEncoding } from '../types'
-import { ENOENT, EISDIR, ENOTDIR } from '../errors'
+import { ENOENT, EISDIR } from '../errors'
 
 /**
  * Options for appendFile operation

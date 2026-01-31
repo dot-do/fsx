@@ -85,7 +85,7 @@ export interface MemoryStub {
  */
 export function createMemoryStub(backend: MemoryBackend): MemoryStub {
   const stub: MemoryStub = {
-    async fetch(url: string, init?: RequestInit): Promise<Response> {
+    async fetch(_url: string, init?: RequestInit): Promise<Response> {
       if (init?.method !== 'POST' || !init.body) {
         return new Response('Not found', { status: 404 })
       }

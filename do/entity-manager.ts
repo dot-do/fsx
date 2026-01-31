@@ -198,7 +198,7 @@ export class EntityManager {
    *
    * @param name - Store name
    */
-  registerStore<T = unknown>(name: string): void {
+  registerStore<_T = unknown>(name: string): void {
     if (!this.stores.has(name)) {
       this.stores.set(name, {
         name,

@@ -46,7 +46,7 @@ import { DurableObject } from 'cloudflare:workers'
 import { Hono } from 'hono'
 import { FsModule } from './module.js'
 import type { Dirent, BufferEncoding } from '../core/index.js'
-import { SubscriptionManager, BatchEmitter, createWatchEvent, RateLimiter, RateLimiterDefaults, type WatchEvent } from '../core/watch/index.js'
+import { SubscriptionManager, BatchEmitter, createWatchEvent, type WatchEvent } from '../core/watch/index.js'
 
 // ===========================================================================
 // Stream Read Utilities
@@ -427,7 +427,7 @@ interface WelcomeMessage {
 /**
  * Union type for all WebSocket messages
  */
-type WebSocketMessage =
+export type _WebSocketMessage =
   | HeartbeatPingMessage
   | HeartbeatPongMessage
   | SubscribeMessage
@@ -1617,7 +1617,8 @@ export class FileSystemDO extends DurableObject<Env> {
    * @param recursive - Whether the watch is recursive
    * @returns true if the affected path matches the watch
    */
-  private pathMatchesWatch(affectedPath: string, watchPath: string, recursive: boolean): boolean {
+  // @ts-expect-error Reserved for future watch path matching implementation
+  private _pathMatchesWatch(affectedPath: string, watchPath: string, recursive: boolean): boolean {
     // Normalize paths
     const normalizedAffected = affectedPath.replace(/\/+$/, '') || '/'
     const normalizedWatch = watchPath.replace(/\/+$/, '') || '/'

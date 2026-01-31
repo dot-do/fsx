@@ -467,7 +467,9 @@ export class WatchManager {
    */
   flushPending(): void {
     for (const [path, pending] of this.pendingEvents) {
-      clearTimeout(pending.timer)
+      if (pending.timer !== null) {
+        clearTimeout(pending.timer)
+      }
       if (pending.maxWaitTimer) {
         clearTimeout(pending.maxWaitTimer)
       }
@@ -491,7 +493,9 @@ export class WatchManager {
 
     if (existingPending) {
       // Update existing pending event with smart coalescing
-      clearTimeout(existingPending.timer)
+      if (existingPending.timer !== null) {
+        clearTimeout(existingPending.timer)
+      }
 
       // Apply coalescing rules based on configuration
       const coalescedEventType = this.smartCoalescing
@@ -527,7 +531,9 @@ export class WatchManager {
         pending.maxWaitTimer = setTimeout(() => {
           const currentPending = this.pendingEvents.get(normalizedPath)
           if (currentPending) {
-            clearTimeout(currentPending.timer)
+            if (currentPending.timer !== null) {
+              clearTimeout(currentPending.timer)
+            }
             this.pendingEvents.delete(normalizedPath)
             this.emitNow(currentPending.eventType, normalizedPath)
           }

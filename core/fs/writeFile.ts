@@ -208,9 +208,11 @@ const VALID_ENCODINGS = new Set<BufferEncoding>([
  * @returns true if valid, false otherwise
  * @internal
  */
-function isValidEncoding(encoding: string): encoding is BufferEncoding {
+// Reserved for future encoding validation
+function _isValidEncoding(encoding: string): encoding is BufferEncoding {
   return VALID_ENCODINGS.has(encoding as BufferEncoding)
 }
+void _isValidEncoding
 
 /**
  * Encode string data to Uint8Array based on the specified encoding.

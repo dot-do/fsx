@@ -343,13 +343,14 @@ async function utimesInternal(
   }
 
   // Step 4: Resolve symlinks if needed
-  const [targetEntry, targetPath] = resolveTarget(
+  const [_targetEntry, targetPath] = resolveTarget(
     entry,
     normalizedPath,
     followSymlinks,
     syscall,
     normalizedPath
   )
+  void _targetEntry // Entry is resolved but path is what we need for update
 
   // Step 5: Convert timestamps to milliseconds
   const atimeMs = toMilliseconds(atime)

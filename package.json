@@ -1,6 +1,6 @@
 {
   "name": "fsx.do",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Filesystem on Cloudflare Durable Objects - A virtual filesystem for the edge",
   "type": "module",
   "main": "dist/index.js",
@@ -102,9 +102,15 @@
     "vitest": "^2.1.8",
     "wrangler": "^3.99.0"
   },
+  "peerDependencies": {
+    "@dotdo/types": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@dotdo/types": { "optional": true }
+  },
   "dependencies": {
-    "@dotdo/mcp": "file:../mcp/core",
-    "@dotdo/types": "^0.1.1",
+    "@dotdo/fsx": "^0.1.4",
+    "@dotdo/mcp": "^0.1.0",
     "@mdxui/beacon": "^0.2.0",
     "@mdxui/cockpit": "^0.2.0",
     "@opentui/core": "^0.1.0",

@@ -22,6 +22,27 @@
  */
 
 // =============================================================================
+// AsyncFn Pattern Types
+// =============================================================================
+
+export {
+  createFSX,
+  type Fn,
+  type AsyncFn,
+  type FSX,
+  type FSOptions,
+  type FSResult,
+  type ExtractParams,
+  type HasNamedParams,
+  type ParamsRecord,
+  type TaggedResult,
+  type FnOut,
+  type FnIn,
+  type FnOpts,
+  type ToAsync,
+} from './fn.js'
+
+// =============================================================================
 // Core FSx API
 // =============================================================================
 

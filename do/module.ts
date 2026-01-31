@@ -53,7 +53,7 @@ import {
   createCleanupSchedulerState,
   DEFAULT_CLEANUP_CONFIG,
 } from '../storage/blob-utils.js'
-import { createPageStorage, CHUNK_SIZE as PAGE_CHUNK_SIZE, type PageStorage } from '../storage/page-storage.js'
+import { createPageStorage, CHUNK_SIZE as _PAGE_CHUNK_SIZE, type PageStorage } from '../storage/page-storage.js'
 
 // Re-export CHUNK_SIZE for consumers
 export { CHUNK_SIZE } from '../storage/page-storage.js'
@@ -811,7 +811,8 @@ export class FsModule implements FsCapability {
     return null
   }
 
-  private async deleteBlob(id: string, tier: 'hot' | 'warm' | 'cold'): Promise<void> {
+  // @ts-expect-error Reserved for future blob deletion implementation
+  private async _deleteBlob(id: string, tier: 'hot' | 'warm' | 'cold'): Promise<void> {
     this.sql.exec('DELETE FROM blobs WHERE id = ?', id)
 
     if (tier === 'warm' && this.r2) {

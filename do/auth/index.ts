@@ -169,3 +169,65 @@ export {
   SQLiteTenantStore,
   TENANT_TABLE_SCHEMA,
 } from './tenant.js'
+
+// OAuth.do integration
+export {
+  // JWT verification
+  verifyJWT,
+  // Token extraction
+  extractToken,
+  extractBearerToken as extractOAuthBearerToken,
+  // Session caching
+  OAuthSessionCache,
+  // Scope validation
+  hasScope,
+  checkScopeForOperation,
+  // OAuth context
+  getOAuthContext,
+  requireOAuthContext,
+  // Middleware
+  createOAuthMiddleware,
+  requireOAuthScope,
+  // Bridge functions
+  scopesToPermissions,
+  oauthToAuthContext,
+  // Error handling
+  OAuthError,
+  mapOAuthError,
+  // Types
+  type OAuthJWTPayload,
+  type OAuthScope,
+  type JWTVerifyResult,
+  type CachedVerifyResult,
+  type VerifyJWTOptions,
+  type OAuthSessionCacheOptions,
+  type ScopeCheckResult,
+  type OAuthContext,
+  type OAuthMiddlewareOptions,
+} from './oauth.js'
+
+// MCP tool authentication middleware
+export {
+  // Tool classification
+  READ_ONLY_TOOLS,
+  WRITE_TOOLS,
+  isReadOnlyTool,
+  isWriteTool,
+  getRequiredScope,
+  // MCP auth context
+  getMCPAuthContext,
+  requireMCPAuthContext,
+  // Middleware
+  createMCPAuthMiddleware,
+  enforceMCPToolAuth,
+  // Tool auth checking
+  checkToolAuth,
+  // Auth context conversion
+  toToolHandlerAuthContext,
+  getToolAuthFromContext,
+  // Types
+  type MCPAuthContext,
+  type MCPAuthMiddlewareOptions,
+  type ToolAuthCheckResult,
+  type ToolHandlerAuthContext,
+} from './mcp-middleware.js'

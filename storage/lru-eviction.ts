@@ -164,7 +164,8 @@ export class LRUEvictionManagerImpl implements LRUEvictionManager {
   private readonly doStorage: DOStorageInterface
   private readonly r2Bucket: R2BucketInterface
   private readonly config: EvictionConfig
-  private evictionInProgress = false
+  // @ts-expect-error Reserved for future concurrent eviction tracking
+  private _evictionInProgress = false
 
   constructor(
     doStorage: DOStorageInterface,

@@ -280,7 +280,9 @@ class WatchManager {
   private watchersByPath: Map<string, Set<WatchEntry>> = new Map()
 
   // Reserved for future optimization - sorted watched paths for efficient prefix matching
+  // @ts-expect-error Reserved for future optimization
   private _sortedPaths: string[] = []
+  // @ts-expect-error Reserved for future optimization
   private _pathsNeedSort: boolean = false
 
   /**

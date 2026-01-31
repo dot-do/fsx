@@ -1,4 +1,5 @@
 import { defineWorkersConfig } from '@cloudflare/vitest-pool-workers/config'
+import path from 'path'
 
 export default defineWorkersConfig({
   test: {
@@ -15,6 +16,11 @@ export default defineWorkersConfig({
         // Ensure isolated storage for Durable Objects
         isolatedStorage: true,
       },
+    },
+  },
+  resolve: {
+    alias: {
+      'oauth.do/server': path.resolve(__dirname, './do/auth/oauth-server.ts'),
     },
   },
 })

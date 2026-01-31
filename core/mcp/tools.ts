@@ -14,6 +14,7 @@
  */
 
 import type { ToolResponse, DoInput, DoResult, Tool, ToolHandler, ToolRegistry } from '@dotdo/mcp/tools'
+import { createDoHandler, type SandboxEnv } from '@dotdo/mcp/tools'
 
 import type { StorageBackend } from './shared'
 import { normalizePath } from './shared'
@@ -22,9 +23,12 @@ import { invokeFsTree, type TreeStorageBackend } from './fs-tree'
 import {
   createFsScope,
   type ExtendedFsStorage,
-  type FsDoScope,
   type FsPermissions,
+  type DoPermissions,
 } from './scope'
+
+// Re-export SandboxEnv and DoPermissions for consumers
+export type { SandboxEnv, DoPermissions }
 
 // =============================================================================
 // Types - Re-export shared types from @dotdo/mcp
@@ -338,110 +342,11 @@ function inferContentType(path: string): string {
 }
 
 // =============================================================================
-// Do Tool
+// Do Tool - uses @dotdo/mcp's createDoHandler with ai-evaluate
 // =============================================================================
 
-/**
- * Create a do handler that executes code in a sandboxed environment.
- *
- * The do tool provides access to the `fs` binding for filesystem operations.
- * Code is executed in isolation with only the provided bindings available.
- *
- * @param scope - The DoScope configuration with fs binding
- * @returns Do handler function
- *
- * @example
- * ```typescript
- * const scope = createFsScope(storage)
- * const doHandler = createDoHandler(scope)
- *
- * const result = await doHandler({
- *   code: `
- *     const files = await fs.list('/home')
- *     return files.length
- *   `
- * })
- * ```
- */
-export function createDoHandler(
-  scope: FsDoScope
-): (input: DoInput) => Promise<ToolResponse> {
-  return async (input: DoInput): Promise<ToolResponse> => {
-    const startTime = Date.now()
-    const logs: Array<{ level: string; message: string; timestamp: number }> = []
-
-    try {
-      // Create console object that captures logs
-      const sandboxConsole = {
-        log: (...args: unknown[]) => logs.push({
-          level: 'log',
-          message: args.map(String).join(' '),
-          timestamp: Date.now(),
-        }),
-        error: (...args: unknown[]) => logs.push({
-          level: 'error',
-          message: args.map(String).join(' '),
-          timestamp: Date.now(),
-        }),
-        warn: (...args: unknown[]) => logs.push({
-          level: 'warn',
-          message: args.map(String).join(' '),
-          timestamp: Date.now(),
-        }),
-        info: (...args: unknown[]) => logs.push({
-          level: 'info',
-          message: args.map(String).join(' '),
-          timestamp: Date.now(),
-        }),
-      }
-
-      // Build the code to execute with explicit parameter destructuring
-      // This ensures bindings are available as local variables
-      const wrappedCode = `
-        return (async function(bindings) {
-          const { fs, console } = bindings;
-          ${input.code}
-        })(bindings);
-      `
-
-      // Create function that takes bindings as a parameter
-      const fn = new Function('bindings', wrappedCode)
-      const result = await fn({
-        ...scope.bindings,
-        console: sandboxConsole,
-      })
-
-      const duration = Date.now() - startTime
-
-      const doResult: DoResult = {
-        success: true,
-        value: result,
-        logs,
-        duration,
-      }
-
-      return {
-        content: [{ type: 'text', text: JSON.stringify(doResult, null, 2) }],
-        isError: false,
-      }
-    } catch (error) {
-      const duration = Date.now() - startTime
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
-
-      const doResult: DoResult = {
-        success: false,
-        logs,
-        error: errorMessage,
-        duration,
-      }
-
-      return {
-        content: [{ type: 'text', text: JSON.stringify(doResult, null, 2) }],
-        isError: true,
-      }
-    }
-  }
-}
+// Re-export createDoHandler from @dotdo/mcp for use with FsDoScope
+export { createDoHandler }
 
 // =============================================================================
 // Tool Registration
@@ -453,10 +358,14 @@ export function createDoHandler(
 export interface ToolsConfig {
   /** Storage backend for filesystem operations */
   storage: ExtendedFsStorage
-  /** Optional permissions for the fs binding */
-  permissions?: FsPermissions
+  /** Optional permissions for the fs binding (allowWrite, allowDelete, allowedPaths) */
+  fsPermissions?: FsPermissions
+  /** Optional sandbox permissions for ai-evaluate (allowNetwork, allowedHosts) */
+  sandboxPermissions?: DoPermissions
   /** Optional additional bindings for the do tool */
   additionalBindings?: Record<string, unknown>
+  /** Optional worker environment with LOADER binding for ai-evaluate sandboxing */
+  env?: SandboxEnv
 }
 
 /**
@@ -506,7 +415,7 @@ export function createToolRegistry(): ToolRegistry {
  * ```
  */
 export function registerTools(config: ToolsConfig): ToolRegistry {
-  const { storage, permissions, additionalBindings } = config
+  const { storage, fsPermissions, sandboxPermissions, additionalBindings, env } = config
   const registry = createToolRegistry()
 
   // Register search tool
@@ -517,9 +426,9 @@ export function registerTools(config: ToolsConfig): ToolRegistry {
   const fetchHandler = createFetchHandler(storage)
   registry.register(fetchToolSchema as Tool, fetchHandler as ToolHandler)
 
-  // Register do tool
-  const scope = createFsScope(storage, permissions, additionalBindings)
-  const doHandler = createDoHandler(scope)
+  // Register do tool - uses ai-evaluate for secure V8 sandbox execution
+  const scope = createFsScope(storage, fsPermissions, additionalBindings, sandboxPermissions)
+  const doHandler = createDoHandler(scope, env)
   registry.register(doToolSchema as Tool, doHandler as ToolHandler)
 
   return registry

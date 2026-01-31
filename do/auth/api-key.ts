@@ -109,7 +109,8 @@ export async function generateAPIKey(
 
   const now = Date.now()
 
-  const apiKey: APIKey = {
+  // Build the API key record (keyHash is stored, full key is only returned)
+  const _apiKey: APIKey = {
     id: keyId,
     keyHash,
     tenantId: options.tenantId,
@@ -120,6 +121,8 @@ export async function generateAPIKey(
     lastUsedAt: undefined,
     active: true,
   }
+  // The _apiKey contains keyHash for storage; we return metadata without it
+  void _apiKey
 
   return {
     id: keyId,

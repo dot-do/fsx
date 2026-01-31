@@ -42,7 +42,7 @@
  * ```
  */
 
-import type { WatchEvent, WatchEventType } from './events.js'
+import type { WatchEvent } from './events.js'
 
 // =============================================================================
 // Types
@@ -444,7 +444,7 @@ export class FSWatcherClient {
   private setupWebSocketHandlers(): void {
     if (!this.ws) return
 
-    this.ws.onopen = () => {
+    this.ws.addEventListener('open', () => {
       this._connectionState = 'connected'
       this.reconnectAttempt = 0
       this.startHealthCheck()
@@ -461,9 +461,9 @@ export class FSWatcherClient {
       // Resolve connect promise
       this.connectResolver?.()
       this.connectResolver = null
-    }
+    })
 
-    this.ws.onclose = (event) => {
+    this.ws.addEventListener('close', (event) => {
       this.stopHealthCheck()
       this.onDisconnect?.(event.code, event.reason)
 
@@ -472,15 +472,15 @@ export class FSWatcherClient {
       } else {
         this._connectionState = 'disconnected'
       }
-    }
+    })
 
-    this.ws.onerror = () => {
+    this.ws.addEventListener('error', () => {
       // Error will be followed by close event
-    }
+    })
 
-    this.ws.onmessage = (event) => {
-      this.handleMessage(event.data)
-    }
+    this.ws.addEventListener('message', (event) => {
+      this.handleMessage(event.data as string)
+    })
   }
 
   /**

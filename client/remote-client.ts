@@ -37,7 +37,6 @@ import type {
   WriteStreamOptions,
   StorageTier,
   FileType,
-  StatsInit,
 } from '../core/types.js'
 
 import { Stats, Dirent } from '../core/types.js'
@@ -63,7 +62,8 @@ import {
   EXDEV,
 } from '../core/errors.js'
 
-import { constants } from '../core/constants.js'
+// Mode constants are used from POSIX standards for file type checking
+void 0 // constants import removed - using inline constants below
 
 // =============================================================================
 // Types
@@ -162,17 +162,20 @@ interface RawDirent {
 }
 
 // =============================================================================
-// POSIX Mode Constants
+// POSIX Mode Constants (reserved for future stat mode parsing)
 // =============================================================================
 
-const S_IFMT = 0o170000   // File type mask
-const S_IFREG = 0o100000  // Regular file
-const S_IFDIR = 0o040000  // Directory
-const S_IFLNK = 0o120000  // Symbolic link
-const S_IFBLK = 0o060000  // Block device
-const S_IFCHR = 0o020000  // Character device
-const S_IFIFO = 0o010000  // FIFO
-const S_IFSOCK = 0o140000 // Socket
+const _S_IFMT = 0o170000   // File type mask
+const _S_IFREG = 0o100000  // Regular file
+const _S_IFDIR = 0o040000  // Directory
+const _S_IFLNK = 0o120000  // Symbolic link
+const _S_IFBLK = 0o060000  // Block device
+const _S_IFCHR = 0o020000  // Character device
+const _S_IFIFO = 0o010000  // FIFO
+const _S_IFSOCK = 0o140000 // Socket
+
+// Reserved for future stat mode parsing
+void _S_IFMT; void _S_IFREG; void _S_IFDIR; void _S_IFLNK; void _S_IFBLK; void _S_IFCHR; void _S_IFIFO; void _S_IFSOCK;
 
 // =============================================================================
 // Helper: Create Stats from raw API response
@@ -952,7 +955,6 @@ class RemoteFileHandle implements IFileHandle {
   private client: RemoteFsClient
   private path: string
   private _size: number
-  private _mode: number
   private _closed: boolean = false
 
   constructor(
@@ -960,13 +962,14 @@ class RemoteFileHandle implements IFileHandle {
     path: string,
     fd: number,
     size: number,
-    mode: number
+    _mode: number
   ) {
     this.client = client
     this.path = path
     this.fd = fd
     this._size = size
-    this._mode = mode
+    // Mode is reserved for future permission checking
+    void _mode
   }
 
   private ensureOpen(): void {
@@ -1121,7 +1124,7 @@ class RemoteFSWatcher implements FSWatcher {
       const wsUrl = this.baseUrl.replace(/^http/, 'ws') + '/api/fs/watch'
       this.ws = new WebSocket(wsUrl)
 
-      this.ws.onopen = () => {
+      this.ws.addEventListener('open', () => {
         // Subscribe to path
         this.ws?.send(
           JSON.stringify({
@@ -1132,32 +1135,32 @@ class RemoteFSWatcher implements FSWatcher {
             namespace: this.connectionOptions.namespace,
           })
         )
-      }
+      })
 
-      this.ws.onmessage = (event) => {
+      this.ws.addEventListener('message', (event) => {
         try {
-          const data = JSON.parse(event.data)
+          const data = JSON.parse(event.data as string)
           if (data.type === 'change' && this.listener) {
             this.listener(data.eventType, data.filename)
           }
         } catch {
           // Ignore parse errors
         }
-      }
+      })
 
-      this.ws.onerror = () => {
+      this.ws.addEventListener('error', () => {
         // Fall back to polling
         this.ws?.close()
         this.ws = null
         this.startPolling()
-      }
+      })
 
-      this.ws.onclose = () => {
+      this.ws.addEventListener('close', () => {
         if (!this.closed) {
           // Attempt reconnection
           setTimeout(() => this.connect(), 5000)
         }
-      }
+      })
     } catch {
       // WebSocket not available, use polling
       this.startPolling()

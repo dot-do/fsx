@@ -406,6 +406,7 @@ export class TieredFS {
    * @returns Whether promotion should occur
    * @internal
    */
+  // @ts-expect-error Reserved for future auto-promotion implementation
   private shouldAutoPromote(path: string, currentTier: StorageTier): boolean {
     if (this.promotionPolicy === 'none') return false
     if (currentTier === 'hot') return false // Already at highest tier
@@ -764,7 +765,7 @@ export class TieredFS {
    * @param toTier - Target tier
    * @internal
    */
-  // Reserved for future tier promotion implementation
+  // @ts-expect-error Reserved for future tier promotion implementation
   private async _promote(path: string, data: Uint8Array, _fromTier: string, toTier: 'hot' | 'warm'): Promise<void> {
     if (toTier === 'hot') {
       await this.hotStub.fetch('http://fsx.do/rpc', {
@@ -783,7 +784,15 @@ export class TieredFS {
     }
 
     // Update in-memory tier tracking
-    this.tierMap.set(path, { tier: toTier, size: data.length })
+    const now = Date.now()
+    const existingMeta = this.tierMap.get(path)
+    this.tierMap.set(path, {
+      tier: toTier,
+      size: data.length,
+      accessCount: (existingMeta?.accessCount ?? 0) + 1,
+      lastAccess: now,
+      recentAccesses: [...(existingMeta?.recentAccesses ?? []), now].slice(-10),
+    })
 
     // Update metadata in DO
     await this.hotStub.fetch('http://fsx.do/rpc', {

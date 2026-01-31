@@ -21,7 +21,8 @@ import {
 } from './types.js'
 import { validateJWT, extractBearerToken } from './jwt.js'
 import { extractAPIKey, extractKeyId, validateAPIKey, type APIKeyStore } from './api-key.js'
-import { checkPermission, resolveTenantPath, type PathCheckOptions } from './permissions.js'
+import { checkPermission, resolveTenantPath } from './permissions.js'
+import type { PathCheckOptions } from './types.js'
 
 // ============================================================================
 // CONTEXT KEYS
